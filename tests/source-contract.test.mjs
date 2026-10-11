@@ -572,7 +572,9 @@ const readStart = readerHml.indexOf('<div class="reading-area"');
 const settingsStart = readerHml.indexOf('<div class="settings-area"');
 assert.ok(readStart >= 0 && settingsStart > readStart,
   'reader must have exclusive reading and settings areas');
-const textOnly = readerHml.slice(readStart, settingsStart);
+// 截取阅读区域本身，避免后面的注释误算成阅读页可见内容。
+const readEnd = readerHml.indexOf('</div>', readStart) + 6;
+const textOnly = readerHml.slice(readStart, readEnd);
 assert.ok(textOnly.includes('{{ body }}') &&
   textOnly.includes('onswipe="onReadingSwipe"') &&
   textOnly.includes('onlongpress="openSettings"') &&
