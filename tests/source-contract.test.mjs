@@ -148,6 +148,15 @@ assert.ok(shelfHml.includes('class="book-info" onclick="openBook($idx)"'),
   'book info must remain separately clickable');
 assert.ok(shelfHml.includes('class="book-delete" onclick="askDelete($idx)"'),
   'delete must have its own click target');
+// issue #10 真机修复：书架必须用真正的列表容器 + 显式高度，
+// 否则真机上只见"书架就绪（N 本）"却一条书目都不显示。
+assert.ok(shelfHml.includes('<list class="book-list"') &&
+  shelfHml.includes('for="{{ books }}"') &&
+  shelfHml.includes('tid="bookId"'),
+  'shelf must use a real <list>/<list-item> container with tid=bookId');
+const shelfCss = read('apps/watch/entry/src/main/js/MainAbility/pages/index/index.css');
+assert.ok(/\.book-list\s*\{[^}]*height:/.test(shelfCss),
+  'shelf list must have an explicit height so rows are not collapsed');
 assert.ok(watchIndex.includes("event.type === 'RESULT'") &&
   watchIndex.includes('this.loadExternal();'),
   'watch shelf must refresh external books after a successful receive');

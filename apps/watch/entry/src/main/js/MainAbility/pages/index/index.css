@@ -23,8 +23,9 @@
 }
 .book-list {
   width: 100%;
-  display: flex;
-  flex-direction: column;
+  /* issue #10 真机修复：显式高度，避免 flex 子项高度坍缩导致
+     书目一条都看不见；超出可纵向滚动。 */
+  height: 288px;
 }
 .book-row {
   width: 100%;
