@@ -26,6 +26,9 @@ import { isLowerHex } from '../../util/Validate';
 
 export default {
   data: {
+    // issue #10：Lite 通过目标页 data 的**同名字段**注入路由参数，
+    // 因此这里必须声明 bookId，且 onInit 不得把它清空。
+    bookId: '',
     title: '',
     body: '正在读取本地文本……',
     pageHint: '请稍候',
@@ -45,7 +48,6 @@ export default {
   },
   onInit() {
     this.history = [];
-    this.bookId = '';
     this.settings = normalizeSettings(null);
     this.crownStatus = crownStatus();
     this.crownTracker = createCrownTracker(null);
@@ -53,15 +55,15 @@ export default {
     this.userMoved = false;
     this.saving = false;
     this.saveWanted = false;
-    const params = router.getParams() || {};
-    const bookId = params.bookId;
+    // Lite 通过目标页 data 同名字段注入 bookId（不再用旧的取参接口）；
+    // 切勿在这里重置 this.bookId，否则会把收到的参数清空。
+    const bookId = this.bookId;
     if (typeof bookId !== 'string' ||
         !isLowerHex(bookId, 16)) {
       this.pageHint = '未知书籍，请返回书架选择';
       this.isBusy = false;
       return;
     }
-    this.bookId = bookId;
     // 内置书（issue #10）：正文来自 rawfile 资源，按需窗口读取；
     // 外部书仍走原有文件通路。两者都**先出正文**再看进度。
     this.bundled = isBundled(bookId);
@@ -232,6 +234,7 @@ export default {
     else if (pages < 0) this.previousPage();
   },
   backToLibrary() {
-    router.back();
+    // issue #10：Lite Wearable 用 router.replace 切页（不用 router.back）。
+    router.replace({ uri: 'pages/index/index' });
   }
 };

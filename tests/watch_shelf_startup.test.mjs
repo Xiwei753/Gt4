@@ -136,15 +136,23 @@ function newPage() {
   assert.equal(page.books[0].title, '外来书');
   assert.notEqual(page.books[0].origin, 'builtin');
   assert.equal(page.status, '书架就绪（1 本）');
-  // 打开
-  page.openBook(0);
-  assert.equal(router.__calls[0][0], 'push');
+  // 打开：按唯一 bookId（不是数组下标），且必须用 router.replace
+  page.openBook(ext);
+  assert.equal(router.__calls[0][0], 'replace');
   assert.equal(router.__calls[0][1], 'pages/reader/reader');
   assert.equal(router.__calls[0][2].bookId, ext);
+  // 参数无效必须给出明确错误，而不是静默返回
+  const beforeInvalid = router.__calls.length;
+  page.openBook(0);
+  page.openBook({ target: {} });
+  assert.equal(router.__calls.length, beforeInvalid,
+    'invalid bookId must not navigate');
+  assert.ok(page.status.indexOf('E_BOOK_ID_INVALID') !== -1,
+    'invalid bookId must be reported; status=' + page.status);
   // 二次确认删除：第一次提示，第二次执行
-  page.askDelete(0);
+  page.askDelete(ext);
   assert.ok(page.status.indexOf('再次点击') === 0);
-  page.askDelete(0);
+  page.askDelete(ext);
   await waitFor(() => page.books.length === 0, 1500);
   assert.equal(page.books.length, 0,
     'second confirm removes the book; status=' + page.status);

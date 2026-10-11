@@ -93,18 +93,15 @@ export default stub;
 export const wait = (fn) =>
   new Promise((resolve) => fn(resolve));
 
-// @system.router 桩：记录 push/back，供书架页单元测试加载。
+// @system.router 桩：Lite Wearable 只支持 replace 切页；
+// push/back/getParams 在真机上不可用，桩里也不提供，防止代码误用。
 export function writeRouterStub(tmpDir,
   stubName = 'router_stub.mjs') {
   const stubPath = join(tmpDir, stubName);
   writeFileSync(stubPath, `
 const calls = [];
 const stub = {
-  push(o) { calls.push(['push', o && o.uri, o && o.params]); },
-  back() { calls.push(['back']); },
-  replace(o) { calls.push(['replace', o && o.uri]); },
-  clear() { calls.push(['clear']); },
-  getParams() { return (stub.__params || {}); }
+  replace(o) { calls.push(['replace', o && o.uri, o && o.params]); }
 };
 stub.__calls = calls;
 export default stub;

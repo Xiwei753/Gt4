@@ -14,6 +14,7 @@ import { ensureDirs, bookPath,
   deleteBook } from '../../storage/BookStorage';
 import { listBooks, removeBook } from '../../storage/LibraryIndex';
 import { beginReceive, stopReceive } from '../../wear/WearReceiver';
+import { isLowerHex } from '../../util/Validate';
 
 export default {
   data: {
@@ -123,20 +124,51 @@ export default {
       this.transferStatus = message;
     }
   },
-  // FA HML 的 for 循环里可用 $idx 传下标。
-  openBook(e) {
-    const book = this.books[e];
+  // 查找当前书架里指定的书（bookId 必须是 16 位小写十六进制）。
+  findBook(bookId) {
+    if (typeof bookId !== 'string' || !isLowerHex(bookId, 16)) {
+      this.status = '打开失败：参数无效（E_BOOK_ID_INVALID）';
+      console.error('[suyue] E_BOOK_ID_INVALID ' + bookId);
+      return null;
+    }
+    for (let i = 0; i < this.books.length; i++) {
+      if (this.books[i].bookId === bookId) return this.books[i];
+    }
+    this.status = '打开失败：未找到该书（E_BOOK_MISSING）';
+    console.error('[suyue] E_BOOK_MISSING ' + bookId);
+    return null;
+  },
+  // 打开阅读页：直接传唯一 bookId（不依赖 $idx 隐式绑定），
+  // 并用 Lite Wearable 支持的 router.replace 切页（不用 push）。
+  openBook(bookId) {
+    const book = this.findBook(bookId);
     if (!book) return;
-    router.push({
-      uri: 'pages/reader/reader',
-      params: { bookId: book.bookId }
-    });
+    this.status = '正在打开《' + book.title + '》';
+    try {
+      router.replace({
+        uri: 'pages/reader/reader',
+        params: { bookId: book.bookId }
+      });
+    } catch (error) {
+      this.status = '打开失败：路由异常（E_ROUTE_UNSUPPORTED）';
+      console.error('[suyue] E_ROUTE_UNSUPPORTED ' + error);
+    }
   },
   // 二次确认删除：第一次点击标记，第二次点击执行。
   // 内置书籍是构建期打进来的静态书单，不可从设备删除。
-  askDelete(e) {
-    const book = this.books[e];
-    if (!book) return;
+  askDelete(bookId) {
+    if (typeof bookId !== 'string' || !isLowerHex(bookId, 16)) {
+      this.status = '删除失败：参数无效（E_BOOK_ID_INVALID）';
+      return;
+    }
+    var book = null;
+    for (let i = 0; i < this.books.length; i++) {
+      if (this.books[i].bookId === bookId) book = this.books[i];
+    }
+    if (!book) {
+      this.status = '删除失败：未找到该书（E_BOOK_MISSING）';
+      return;
+    }
     if (book.origin === 'builtin') {
       this.status = '《' + book.title + '》是内置书籍，不可删除';
       return;

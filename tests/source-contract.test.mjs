@@ -116,8 +116,16 @@ for (const rel of watchFiles) {
 const watchReader = read('apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.js');
 assert.ok(!watchReader.includes('getDemoBook'),
   'reader must open by bookId, not the demo getter');
-assert.ok(watchReader.includes('router.getParams'),
-  'reader must read bookId from router params');
+// issue #10：Lite Wearable 通过目标页 data 的**同名字段**注入路由参数，
+// 不能用 router.getParams()（真机不支持），也不能在 onInit 重置 bookId。
+assert.ok(/data:\s*\{[\s\S]*?bookId:\s*''/.test(watchReader),
+  'reader must declare bookId in data to receive the route param');
+assert.ok(!watchReader.includes('router.getParams'),
+  'reader must not use router.getParams (unsupported on Lite Wearable)');
+assert.ok(!watchReader.includes("this.bookId = ''"),
+  'reader must not reset this.bookId in onInit');
+assert.ok(watchReader.includes('isLowerHex(bookId, 16)'),
+  'reader must validate the injected bookId');
 assert.ok(watchReader.includes('normalizeSettings'),
   'reader must use ReaderSettings as single truth');
 assert.ok(watchReader.includes('createCrownTracker'),
@@ -144,10 +152,20 @@ assert.ok(watchIndex.includes('askDelete'),
 const shelfHml = read('apps/watch/entry/src/main/js/MainAbility/pages/index/index.hml');
 assert.ok(!/<div class="book-row"[^>]*onclick=/.test(shelfHml),
   'book row must not open when the child delete button is clicked');
-assert.ok(shelfHml.includes('class="book-info" onclick="openBook($idx)"'),
-  'book info must remain separately clickable');
-assert.ok(shelfHml.includes('class="book-delete" onclick="askDelete($idx)"'),
-  'delete must have its own click target');
+assert.ok(shelfHml.includes('class="book-info" onclick="openBook($item.bookId)"'),
+  'book info must open by the unique bookId (not $idx)');
+assert.ok(shelfHml.includes('class="book-delete" onclick="askDelete($item.bookId)"'),
+  'delete must have its own click target bound to bookId');
+// issue #10 第三次真机回归：点击无响应，且误用了 Lite 不支持的路由 API。
+assert.ok(watchIndex.includes('router.replace('),
+  'shelf must open the reader with router.replace (Lite Wearable)');
+assert.ok(watchReader.includes("router.replace({ uri: 'pages/index/index' })"),
+  'reader must return to the shelf with router.replace');
+assert.ok(!/router\.(push|back|getParams)\s*\(/.test(watchIndex + watchReader),
+  'watch JS must not use router.push/back/getParams on Lite Wearable');
+assert.ok(watchIndex.includes('E_BOOK_ID_INVALID') &&
+  watchIndex.includes('E_ROUTE_UNSUPPORTED'),
+  'shelf must report a real error instead of silently ignoring a tap');
 // issue #10 真机修复：书架必须用真正的列表容器 + 显式高度，
 // 否则真机上只见"书架就绪（N 本）"却一条书目都不显示。
 assert.ok(shelfHml.includes('<list class="book-list"') &&
@@ -320,7 +338,13 @@ for (const file of watchJsFiles) {
     'Lite 的 JerryScript 没有 RegExp，会导致页面 .bc 快照生成失败，' +
     '构建仍报成功但手表上打不开该页。请改用字符比较（见 util/Validate.js）。');
   for (const [api, why] of MISSING_APIS) {
-    assert.ok(!code.includes(api), `${file} 使用了不可用 API「${api}」：${why}`);
+    // issue #10：允许 router.replace(...)（Lite 唯一可用的切页 API），
+    // 但继续禁止 String.replace(...)（依赖正则，Lite 下抛 TypeError）。
+    const scanned = api === 'replace('
+      ? code.split('router.replace(').join('router.REPLACE_OK(')
+      : code;
+    assert.ok(!scanned.includes(api),
+      `${file} 使用了不可用 API「${api}」：${why}`);
   }
 }
 
