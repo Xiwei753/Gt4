@@ -119,6 +119,20 @@ try {
     assert.match(r.stderr, /不是有效 UTF-8/);
   }
 
+  // (5b) 合法 GB18030（UTF-8 失败后的确定性回退）→ 构建期转成 UTF-8。
+  {
+    const { books, res } = tmp();
+    // GBK/GB18030 的「你好」= C4 E3 BA C3，不是合法 UTF-8。
+    writeFileSync(join(books, 'gb.txt'), Buffer.from([0xc4, 0xe3, 0xba, 0xc3]));
+    const r = run(books, res);
+    assert.equal(r.status, 0, r.stderr);
+    const expected = Buffer.from('你好', 'utf8');
+    const book = manifestOf(res).books[0];
+    assert.equal(book.bytes, expected.length);
+    assert.equal(book.sha256, sha256hex(expected));
+    assert.ok(readFileSync(join(res, book.file)).equals(expected));
+  }
+
   // (6) 带 BOM 的 UTF-16LE 是无歧义的 → 构建期直接转成 UTF-8。
   {
     const { books, res } = tmp();

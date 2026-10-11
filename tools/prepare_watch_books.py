@@ -7,7 +7,8 @@
   1. 只扫描 --books-dir 的**顶层** *.txt（不递归、不看别处）；
   2. 逐个读入、去掉 UTF-8 BOM、严格按 UTF-8 解码
      （带 BOM 的 UTF-16LE/BE 是**无歧义**的，构建期直接转成 UTF-8）；
-     其它编码（GBK 等）一律**显式失败**，绝不猜；
+     UTF-8 失败时**确定性回退 GB18030**（中文小说常见 GBK/GB2312 的超集）
+     后转成 UTF-8；两者都失败才**显式失败**，绝不猜；
   3. 生成与现有书库兼容的 bookId =
      sha256(规范化 UTF-8 字节) 的前 16 位小写十六进制，
      与手机端 BookImportService 的口径一致（对规范化字节算摘要）；
@@ -83,9 +84,17 @@ def decode_book(path):
     else:
         try:
             text = body.decode('utf-8')
-        except UnicodeDecodeError as exc:
-            fail('%s 不是有效 UTF-8（%s）。请在构建前自行转成 UTF-8；'
-                 '手表端不会猜编码。' % (path, exc), EXIT_ENCODING)
+        except UnicodeDecodeError:
+            # 构建侧确定性回退：中文小说常见 GBK/GB2312，统一按
+            # GB18030（其超集，标准、可复现）解码，再不行才显式失败。
+            # 手表端永远只读规范化后的 UTF-8。
+            try:
+                text = body.decode('gb18030')
+                source = 'gb18030 (converted)'
+            except UnicodeDecodeError as exc:
+                fail('%s 既不是有效 UTF-8 也不是有效 GB18030（%s）。'
+                     '请在构建前自行转成 UTF-8；手表端不会猜编码。'
+                     % (path, exc), EXIT_ENCODING)
 
     # 与手机端一致：摘要对「去掉 BOM 后的规范化 UTF-8 字节」计算。
     return text.encode('utf-8'), source
