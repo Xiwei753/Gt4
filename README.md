@@ -16,6 +16,7 @@
 - 手表本地生成一份长中文测试书、按字节读取与估算分页、前后翻页和进度 JSON；未实机验证。
 - 手表端多书书架：书籍索引（原子写+串行化+失败回滚）、每书独立进度与设置、纯 JS 流式 SHA-256 接收校验、按 bookId 阅读、删除确认、日间/夜间主题、字号/行距重排；接收协议按 `shared/protocol` v0 落地。
 - 手表端接收双通道：消息通道（CHUNK 拼接 → 摘要 → 入库）与文件通道（Wear Engine 送达 → 复制入沙箱 → 大小+流式摘要校验 → 原子入库）；失败一律清理暂存、绝不入书架；RESULT/ACK/RESUME 经 `wearengine.sendMsg` 唯一通道回手机；单本在途互斥（并发传书回 `E_BUSY`）。
+- 手表端**构建期内置书籍**（issue #7，可选）：`WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug` 把本机顶层 TXT 打进 HAP、走现有书架与阅读器；不带该变量时命令与原样一致。书只进临时资源目录并由构建级 `EXIT` trap 清理且被 gitignore，私人正文不入库；产物经 `BOOKS_IN_BIN_OK` 校验内部 `entry.bin` 真的带了内容字节。诚实边界：本机 Lite JS FA 运行时里打包的 `rawfile` 无 JS 可读接口，导入桥接会探测候选路径、读不到即 `BUNDLED_IMPORT_UNAVAILABLE` 安全 no-op；真机首启与阅读待验证（GT4 安装仍被 issue #4 的 `errorCode 10` 阻断）。详见 [apps/watch/README.md](apps/watch/README.md#构建期内置书籍issue-7)。
 - 手机端实现 TXT/EPUB 导入：文档选择器 → 授权 URI 分块读取（32 MiB 上限）→ 编码识别/EPUB 解包 → 规范化 UTF-8 写入沙箱（摘要对规范化字节计算并写后复核）→ 书库索引；**尚未在 DevEco 编译或真机验证**。
 - 双端身份分离：`PHONE_SELF`（手机身份，手表验证来源）与 `WATCH_PEER`（手表身份，手机作为 remoteApp）；证书指纹由 CI 从 Secrets 注入**手表 JS 与 Manifest supportLists 两处**，空指纹明确禁用发送；构建后用 `hap-sign-tool` 验签。
 - 手机端 Wear Engine 发送：设备发现、显式选择目标、`transferFile` 文件通道（句柄终态关闭）、每轮重试重新注册 RESULT waiter（上传/回执超时分离）、取消接 `cancelFileTransfer` 并通知手表清理；等待手表 RESULT 回执才认定入库；**Wear Engine 真机互通待验证**。应用级 Client ID 元数据（`module.metadata.client_id`，issue #6）已写入并在最终签名 HAP 中构建期校验（`METADATA_OK`）；设备发现对确定性错误（`1008509999`）不自动重试，仅在途串行 + 短暂错误有限退避（见 [WEAR_ENGINE_CLIENT_ID](docs/WEAR_ENGINE_CLIENT_ID.md)）。

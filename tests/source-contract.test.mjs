@@ -97,6 +97,7 @@ const watchFiles = [
   'storage/BookStorage.js',
   'storage/LibraryIndex.js',
   'storage/ProgressStore.js',
+  'storage/BundledBookImporter.js',
   'wear/IncomingBookReceiver.js',
   'wear/TransferLogic.js',
   'wear/WearReceiver.js',

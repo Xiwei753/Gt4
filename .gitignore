@@ -42,6 +42,15 @@
 # 本地构建产物投放目录（HAP 已被上面的 *.hap 挡住，这里再显式兜一层）
 /dist/
 
+# 手表内置书籍构建资源（issue #7）：tools/build_watch_lite.sh 创建并
+# EXIT 清理的临时 rawfile。本地私人书库/临时构建目录同样绝不入库——
+# 私人小说正文不得提交到公开仓库，也不得打印进日志。
+apps/watch/entry/src/main/resources/rawfile/
+/watch-books/
+.watch-books-build/
+*.watch-books.tmp
+__pycache__/
+
 # Local file and OS artifacts
 .DS_Store
 Thumbs.db

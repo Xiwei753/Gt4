@@ -109,7 +109,8 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 `pages/index/index.js` 把初始化改成显式状态机，**无日志也能从屏幕定位**：
 
 - 阶段文案：`初始化 1/5：进入首页` → `2/5 目录 books/temp/progress`
-  → `3/5 读取 books.json` → `4/5 检查旧 demo` → 完成
+  → `3/5 导入内置书籍`（issue #7 的导入桥，读不到资源时安全 no-op）
+  → `4/5 读取 books.json` → `5/5 检查旧 demo` → 完成
   （`本地书库就绪（N 本）` 或 `书库为空，等待手机传书`）。
 - 超时兜底：10 秒（测试可注入更短值）未完成则显示
   `书库初始化超时：阶段=<卡住的阶段>`。超时**不会**清空目录、重启循环
@@ -133,6 +134,40 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 回归：`tests/watch_init_diagnostics.test.mjs`（空书架、已有书、301→mkdir、
 mkdir 202、readText 300、无回调超时、重试、Wear Engine 隔离、队列看门狗）。
 **这些均以 Node 文件桩验证；GT 4 真机最终验证仍待完成，故本 issue 暂不可关闭。**
+
+## 构建期内置书籍（issue #7）
+
+可选的构建期入口，把本机挑选的 TXT 直接打进 GT4 的 HAP，安装后出现在**现有书架**、用**现有阅读器**打开——不新增第二套书库，也不替代手机传书。
+
+用法：
+
+```bash
+# 不带书：与原命令完全一致，不产生任何内置书籍
+tools/build_watch_lite.sh debug
+
+# 带书：把一个目录里的顶层 *.txt 全部内置（不递归、不看子目录）
+WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
+```
+
+处理规则（`tools/prepare_watch_books.py`，构建机执行）：
+
+- 只认顶层 `*.txt`（不支持 EPUB，不做递归扫描）；按 `(文件名小写, 原名)` 稳定排序。
+- 编码：UTF-8（含 BOM 自动去除）；带 BOM 的 UTF-16LE/BE 自动转 UTF-8；其它/无法判定编码**直接报错**，不在手表上猜编码。
+- `bookId` = 规范化 UTF-8 内容 SHA-256 前 16 位十六进制，与现有书库口径一致；同时写入 `bytes`、全量 `sha256`、`encoding:'utf-8'`、`chapters:[]`。
+- 书名取文件名（去扩展名）。
+- 行为明确：**同内容重复**只保留排序最靠前的一本并打印 `跳过重复内容`；**同名不同内容**另一本自动加 ` (2)`、` (3)`。
+- 单本上限默认 8 MiB（`--max-bytes` 可调）；超限、路径不存在、目录里没有可用 TXT、编码失败、空书名都会**非零退出**，绝不产出一个“看起来成功但少了书”的包。
+- 构建后打印 `WATCH_BOOKS_ADDED title=.. bytes=.. id=..`、`WATCH_BOOKS_BAKED=<n>`，**从不打印书本正文**。
+
+放置与清理：脚本把书放进临时资源目录 `entry/src/main/resources/rawfile/gt4books/`（Hvigor 会真实处理并嵌入内部 `entry.bin`），并注册 `EXIT` trap **无条件清理**，因此某次带书的构建不会污染下一次不带书的构建；该目录与常见个人书库已在 `.gitignore` 中屏蔽，**私人小说正文不会进入公开仓库**。
+
+产物校验：`tests/build_artifact_check.sh --expect-books-manifest <manifest.json>` 会解出 HAP 内那唯一的 `*.bin`，确认其中真的带了 `rawfile/gt4books` 目录、每本书的 `<bookId>.txt` 文件名、每本书的**真实内容字节**与 `manifest.json` 字节，而不仅是源码目录或外层 ZIP；通过时打印 `BOOKS_IN_BIN_OK count=N`。
+
+### 运行时导入桥接与设备侧诚实边界
+
+`storage/BundledBookImporter.js` 在 `pages/index/index.js` 的 `prepareLibrary()` 里**只调用一次**，把内置书按块复制进现有可写书库（`internal://app/gt4reader/books/`）、校验长度与摘要后再经 `LibraryIndex.addBook` 登记。它是**幂等**的：`internal://app/gt4reader/bundled.json` 记录了“已处理过的 bookId”，已存在的书和已删除的书都**不会**被覆盖或自动复活，也绝不重建 `books.json`、不动阅读进度；任何失败只清理半成品暂存、不入书架，并打印可诊断日志，绝不卡住书架。
+
+诚实说明（与源码一致，非“已支持”）：本机 Lite JS FA 运行时里，打进 HAP 的 `rawfile` **没有 JS 可读接口**——`@system.file` 的 `IsValidPath()` 只接受 `internal://app…` 前缀、且禁止 path traversal，实际只能落到**应用私有目录**；Lite 也没有 `$rawfile`/resourceManager。因此导入器会**依次探测**若干候选重定位路径（`internal://app/rawfile/gt4books/`、`internal://app/assets/entry/resources/rawfile/gt4books/`、`internal://app/entry/resources/rawfile/gt4books/`），若都读不到就打印 `BUNDLED_IMPORT_UNAVAILABLE` 并**安全 no-op**，如实记录为“无法在此 Lite 运行时读成可写书库”。此外 GT4 真机安装本身仍被 issue #4 的 `errorCode 10` 阻断，**内置书是否真的能在真机首启出现在书架、能否阅读，尚未在真机验证**；构建/产物/导入逻辑已验证，真实机行为待验证。
 
 ## 未完成
 

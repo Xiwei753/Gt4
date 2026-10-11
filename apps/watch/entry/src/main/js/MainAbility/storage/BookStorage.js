@@ -128,6 +128,21 @@ export function saveTempBook(transferId, text, cb) {
   });
 }
 
+// 分块二进制写：把窗口字节写入目标文件。
+// append=true 追加到末尾；append=false 从头创建/覆盖。
+// 用于把内置书籍资源流式拷进沙箱（issue #7），
+// 峰值内存只有一个窗口。
+export function writeBytes(uri, bytes, append, cb) {
+  file.writeArrayBuffer({
+    uri: uri,
+    buffer: bytes,
+    append: !!append,
+    success: () => complete(cb, { ok: true }),
+    fail: (data, code) => complete(cb,
+      { ok: false, reason: 'write_failed', code: code })
+  });
+}
+
 // 校验通过后：暂存文件改名为正式书籍文件。
 export function commitVerifiedBook(transferId, bookId, cb) {
   if (!isSafeBookId(bookId)) {

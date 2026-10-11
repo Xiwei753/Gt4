@@ -12,6 +12,8 @@ import { ensureDirs, bookPath,
   from '../../storage/BookStorage';
 import { listBooks, addBook,
   removeBook } from '../../storage/LibraryIndex';
+import { importBundledBooks }
+  from '../../storage/BundledBookImporter';
 import { beginReceive, stopReceive } from '../../wear/WearReceiver';
 import { createSha256 } from '../../util/Sha256';
 
@@ -148,25 +150,13 @@ export default {
             '书库目录创建失败：' + (dirs.stage || '') +
             ' code=' + (dirs.code || dirs.reason || '?'));
         }
-        this.initStage = '读取 books.json';
-        this.status = '初始化 3/5：读取 books.json';
-        listBooks((books) => {
+        // 构建期内置书籍（issue #7）：一次性、幂等导入桥。
+        // 读不到打包资源时安全 no-op，绝不阻塞书架。
+        this.initStage = '导入内置书籍';
+        this.status = '初始化 3/5：导入内置书籍';
+        importBundledBooks(() => {
           if (token !== this.initToken) return;
-          this.libraryReady = true;
-          if (books.length > 0) {
-            this.books = books;
-            return this.finishInit(
-              '本地书库就绪（' + books.length + ' 本）');
-          }
-          if (this.indexError) {
-            return this.failInit('E_INDEX_READ',
-              '书库索引读取失败 code=' + this.indexError);
-          }
-          this.migrateDemo(token);
-        }, (diag) => {
-          if (token !== this.initToken) return;
-          this.indexError = (diag && diag.state === 'error') ?
-            (diag.code || 'error') : 0;
+          this.readIndex(token);
         });
       }, (stage) => {
         if (token !== this.initToken) return;
@@ -177,11 +167,34 @@ export default {
       this.failInit('E_PREPARE_THROW', '初始化同步异常：' + error);
     }
   },
+  // 读取真实索引：有书即就绪；索引读错则上屏；否则查旧 demo。
+  readIndex(token) {
+    this.initStage = '读取 books.json';
+    this.status = '初始化 4/5：读取 books.json';
+    listBooks((books) => {
+      if (token !== this.initToken) return;
+      this.libraryReady = true;
+      if (books.length > 0) {
+        this.books = books;
+        return this.finishInit(
+          '本地书库就绪（' + books.length + ' 本）');
+      }
+      if (this.indexError) {
+        return this.failInit('E_INDEX_READ',
+          '书库索引读取失败 code=' + this.indexError);
+      }
+      this.migrateDemo(token);
+    }, (diag) => {
+      if (token !== this.initToken) return;
+      this.indexError = (diag && diag.state === 'error') ?
+        (diag.code || 'error') : 0;
+    });
+  },
   // 一次性迁移：先直接检查旧文件，存在且移动
   // 成功才登记；不调用任何生成函数。
   migrateDemo(token) {
     this.initStage = '检查旧 demo';
-    this.status = '初始化 4/5：检查旧 demo';
+    this.status = '初始化 5/5：检查旧 demo';
     try {
       file.access({
         uri: DEMO_PATH,

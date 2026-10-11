@@ -14,6 +14,8 @@ PRODUCT="${PRODUCT:-default}"
 
 if [ "$MODE" != "debug" ] && [ "$MODE" != "release" ]; then
   echo "usage: $0 [debug|release]" >&2
+  echo "       (optional) WATCH_BOOKS_DIR=/path/to/txt-dir $0 debug" >&2
+  echo "       把选定 TXT 内置进 HAP 书库，见 issue #7。" >&2
   exit 2
 fi
 
@@ -30,6 +32,43 @@ HVIGORW="$(command -v hvigorw || echo ./hvigorw)"
 OUT_DIR="entry/build/default/outputs/default"
 rm -rf entry/build
 mkdir -p "$OUT_DIR"
+
+# ---- 内置书籍（issue #7）---------------------------------------------
+# 可选入口（向后兼容，不带变量＝与以前完全一致）：
+#   WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
+#   · 把用户选定 TXT 规范化为**临时** Lite 构建资源
+#     apps/watch/entry/src/main/resources/rawfile/gt4books/，
+#     交给 hvigor 真正打进 entry.bin（绝不是签名后补外层 ZIP）；
+#   · 无论成功失败，EXIT 时都删除该临时目录，下一次「无书」构建
+#     不会被上一次的私人书污染；
+#   · 私人正文既不进仓库、也不进日志（只打印书名与字节数）。
+RAWFILE_DIR="$REPO_ROOT/apps/watch/entry/src/main/resources/rawfile"
+BOOK_RESOURCE_DIR="$RAWFILE_DIR/gt4books"
+BOOKS_MANIFEST=""
+BOOKS_STAGED=0
+
+cleanup_books() {
+  if [ "$BOOKS_STAGED" = "1" ]; then
+    rm -rf "$BOOK_RESOURCE_DIR"
+    rmdir "$RAWFILE_DIR" 2>/dev/null || true
+    BOOKS_STAGED=0
+  fi
+}
+trap cleanup_books EXIT
+
+if [ -n "${WATCH_BOOKS_DIR:-}" ]; then
+  # 先置位：prepare 中途失败也要由 trap 清干净。
+  BOOKS_STAGED=1
+  python3 "$REPO_ROOT/tools/prepare_watch_books.py" \
+    --books-dir "$WATCH_BOOKS_DIR" \
+    --resource-dir "$BOOK_RESOURCE_DIR"
+  BOOKS_MANIFEST="$BOOK_RESOURCE_DIR/manifest.json"
+  echo "WATCH_BOOKS_STAGED=1"
+else
+  # 无指定书籍：清掉可能残留的临时资源，保持源码树干净。
+  rm -rf "$BOOK_RESOURCE_DIR"
+  rmdir "$RAWFILE_DIR" 2>/dev/null || true
+fi
 
 "$HVIGORW" --mode module -p product="$PRODUCT" -p buildMode="$MODE" assembleHap --no-daemon
 
@@ -216,7 +255,20 @@ ARTIFACT_CHECK_ARGS=(
 if [ -n "$SIGNED_BIN_SHA256" ]; then
   ARTIFACT_CHECK_ARGS+=(--expect-bin-sha256 "$SIGNED_BIN_SHA256")
 fi
+# 内置书籍（issue #7）：核对**内层 entry.bin** 真的带了
+# rawfile/gt4books/*.txt 与 manifest.json（只看源码目录或外层
+# ZIP 都不算数）。
+if [ -n "$BOOKS_MANIFEST" ]; then
+  ARTIFACT_CHECK_ARGS+=(--expect-books-manifest "$BOOKS_MANIFEST")
+fi
 "$REPO_ROOT/tests/build_artifact_check.sh" "${ARTIFACT_CHECK_ARGS[@]}"
+
+if [ -n "$BOOKS_MANIFEST" ]; then
+  BOOKS_COUNT="$(python3 -c \
+    'import json,sys; print(len(json.load(open(sys.argv[1])).get("books", [])))' \
+    "$BOOKS_MANIFEST" 2>/dev/null || echo unknown)"
+  echo "WATCH_BOOKS_BAKED=${BOOKS_COUNT:-unknown}"
+fi
 
 if [ "$UNSIGNED" = "0" ]; then
   BIN_BUNDLE="$(python3 "$REPO_ROOT/tools/check_lite_bin.py" \
