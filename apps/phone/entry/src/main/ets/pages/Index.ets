@@ -19,7 +19,8 @@ import { importBook } from '../services/BookImportService';
 import { BookRepository } from '../services/BookRepository';
 import { WearDeviceService } from '../services/WearDeviceService';
 import { BookTransferService } from '../services/BookTransferService';
-import { authNotice, deviceNotice } from '../services/WearAuthPolicy';
+import { authNotice, deviceNotice, planRetry,
+  MAX_AUTO_RETRIES } from '../services/WearAuthPolicy';
 
 // 双端身份严格分离（P0-1/P0-2）：
 //   WATCH_PEER：对端 GT 4 身份，作为
@@ -57,6 +58,11 @@ struct Index {
   // 设备发现/授权的进度序号：只允许最后一次异步结果落地，
   // 避免旧的 await 覆盖新状态（issue #5 P0-B）。
   private refreshSeq: number = 0;
+  // issue #6 P0-B：自动重试的定时器与计数。确定性失败不重试，
+  // 只有短暂断连/网络错误才在有限次数内退避重试；页面退出/切后台
+  // 时一并清理，绝不做亚秒级连续请求。
+  private retryTimer: number = -1;
+  private autoRetryCount: number = 0;
 
   private getRepository(): BookRepository {
     if (this.repository === null) {
@@ -82,6 +88,25 @@ struct Index {
     this.refreshDevices();
   }
 
+  // issue #6 P0-B：切后台/页面退出时，取消任何在途发现的自动重试定时器，
+  // 并让旧结果作废，避免后台继续轰炸华为服务。
+  onPageHide(): void {
+    this.clearRetryTimer();
+    this.refreshSeq++;
+  }
+
+  onDisappear(): void {
+    this.clearRetryTimer();
+    this.refreshSeq++;
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer !== -1) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = -1;
+    }
+  }
+
   private refresh(): void {
     this.books = this.getRepository().list();
   }
@@ -89,7 +114,16 @@ struct Index {
   // 设备发现（issue #5）：先查授权状态，再列设备；两者都保留
   // 真实的 stage/code，不再一律归为“Wear Engine 不可用”。
   // 空列表 = Wear Engine 未返回可用设备，不等于“未配对/蓝牙没连”。
+  // issue #6 P0-B：这是用户/生命周期入口，同一时间最多 1 个在途请求，
+  // 重复点击不叠加；进入时清理旧的自动重试定时器。
   private async refreshDevices(): Promise<void> {
+    if (this.deviceBusy) return;
+    this.clearRetryTimer();
+    this.autoRetryCount = 0;
+    await this.runDeviceDiscovery();
+  }
+
+  private async runDeviceDiscovery(): Promise<void> {
     const seq = ++this.refreshSeq;
     this.receiverReady = false;
     const previous = this.devices[this.selectedDevice];
@@ -97,16 +131,36 @@ struct Index {
       await this.getDeviceService().unregisterMessageReceiver(previous);
     }
     this.deviceBusy = true;
-    const auth = await this.getDeviceService().queryAuthorization();
-    if (seq !== this.refreshSeq) return;
-    this.authGranted = auth.granted;
-    this.authStatus = authNotice(auth).text;
-    const result = await this.getDeviceService().listDevices();
-    if (seq !== this.refreshSeq) return;
-    this.deviceBusy = false;
-    this.devices = result.ok ? result.devices : [];
-    this.deviceStatus = deviceNotice(result).text;
-    this.selectedDevice = -1;
+    try {
+      const auth = await this.getDeviceService().queryAuthorization();
+      if (seq !== this.refreshSeq) return;
+      this.authGranted = auth.granted;
+      this.authStatus = authNotice(auth).text;
+      const result = await this.getDeviceService().listDevices();
+      if (seq !== this.refreshSeq) return;
+      this.devices = result.ok ? result.devices : [];
+      const notice = deviceNotice(result);
+      this.deviceStatus = notice.text;
+      this.selectedDevice = -1;
+
+      // 只有可恢复的短暂错误才排定有退避上限的自动重试；
+      // 1008509999（应用身份未配置）等确定性失败立即停下，只让用户手动刷新。
+      const plan = planRetry(this.autoRetryCount,
+        result.ok ? { ok: true } : notice);
+      if (plan.retry) {
+        this.autoRetryCount = plan.attempt;
+        this.deviceStatus = notice.text +
+          '（自动重试 ' + plan.attempt + '/' + MAX_AUTO_RETRIES + '）';
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = -1;
+          this.runDeviceDiscovery();
+        }, plan.delayMs);
+      } else {
+        this.autoRetryCount = 0;
+      }
+    } finally {
+      this.deviceBusy = false;
+    }
   }
 
   // 用户主动授权（issue #5 P0-A）：只在点击时请求，不自动弹窗；

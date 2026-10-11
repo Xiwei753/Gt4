@@ -21,6 +21,26 @@ assert.equal(watchConfig.module.abilities[0].icon, '$media:icon');
 assert.ok(existsSync('apps/watch/entry/src/main/resources/base/media/icon.png'));
 assert.ok(existsSync('apps/watch/entry/src/main/resources/base/media/icon_small.png'));
 assert.ok(phoneManifest.includes('stageMode') === false, 'module is a Stage manifest, not a lite JS manifest');
+// issue #6 P0-A：Wear Engine 读取设备前先从 module.metadata 取应用级
+// client_id；缺失会在设备发现时报 1008509999（应用身份未配置）。
+// 真实 Client ID 是该应用的唯一身份、随 HAP 分发，不入库：仓库里只保留
+// 占位符，构建期由 tools/build_phone_hap.sh / tools/inject_client_id.py
+// 从被 gitignore 的 signing/phone/client_id.env 注入，构建结束还原。
+const CLIENT_ID_PLACEHOLDER = 'CONFIGURE_WITH_AGC_CLIENT_ID';
+const clientIdMatch = phoneManifest.match(
+  /"name"\s*:\s*"client_id"\s*,\s*"value"\s*:\s*"([^"]*)"/);
+assert.ok(clientIdMatch, 'phone module.json5 must declare client_id metadata');
+assert.equal(clientIdMatch[1], CLIENT_ID_PLACEHOLDER,
+  'repo must keep the client_id placeholder (real value injected at build time)');
+assert.ok(!/"value"\s*:\s*"[0-9]{10,}"/.test(phoneManifest),
+  'phone module.json5 must not contain a committed numeric Client ID value');
+const phoneClientIdInjector = read('tools/inject_client_id.py');
+assert.ok(phoneClientIdInjector.includes(CLIENT_ID_PLACEHOLDER),
+  'client id injector must guard the placeholder');
+assert.ok(phoneClientIdInjector.includes('--client-id'),
+  'client id injector must take the real value as an argument, not embed it');
+assert.ok(read('tools/build_phone_hap.sh').includes('signing/phone/client_id.env'),
+  'phone build must load the real Client ID from the gitignored local file');
 assert.ok(phoneIndex.includes('DocumentViewPicker'), 'phone must expose a real document picker');
 assert.ok(phoneIndex.includes('importBook'), 'phone index must run a real import flow');
 assert.ok(phoneIndex.includes('BookRepository'), 'phone index must list a real library');
@@ -45,6 +65,19 @@ assert.ok(phoneIndexFull.includes('RESULT'),
   'phone must wait for watch RESULT receipt');
 assert.ok(phoneIndexFull.includes('transferService'),
   'phone index must use BookTransferService');
+// issue #6 P0-B：设备发现必须用有上限的退避重试策略，且确定性失败不自动重试。
+const phoneDeviceService = read('apps/phone/entry/src/main/ets/services/WearDeviceService.ts');
+const phonePolicy = read('apps/phone/entry/src/main/ets/services/WearAuthPolicy.js');
+assert.ok(phonePolicy.includes('app_client_id_not_configured'),
+  'policy must classify 1008509999 as app identity misconfiguration');
+assert.ok(phonePolicy.includes('planRetry') && phonePolicy.includes('isRetryable'),
+  'policy must expose a bounded retry state machine');
+assert.ok(phoneIndexFull.includes('planRetry'),
+  'phone index must gate auto-retry through planRetry');
+assert.ok(phoneIndexFull.includes('clearRetryTimer'),
+  'phone index must clean up retry timers on hide');
+assert.ok(phoneDeviceService.includes('deviceQueryInFlight'),
+  'device service must serialize device discovery (single in-flight query)');
 assert.ok(read('README.md').startsWith('# 素阅 · suyue'));
 assert.ok(read('docs/BUILD_AND_TRANSFER.md').includes('尚未产出任何 HAP'));
 const protocolReadme = read('shared/protocol/README.md');

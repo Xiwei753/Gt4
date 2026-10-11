@@ -74,6 +74,8 @@ hdc install -r <signed.hap>      -> install bundle successfully
 | 6 | 圆屏阅读体验 | 源码完成；分页回归扩展通过；表冠明确不支持（待 SDK 核对） |
 | 复核轮 | issue #1 第二轮施工单修复 | 源码完成；新增 tests/watch_receive.test.mjs 端到端互验；真机/HAP 仍待验证 |
 | 复核轮 2 | issue #1 第三轮施工单修复 | 源码完成；新增 waiter/索引/注入三类失败回归；HAP 与真机仍阻断 |
+| issue #5 | 手机 Wear Engine 授权 / 结构化错误码 | 源码完成；真机互通待验证 |
+| issue #6 | Client ID 元数据 + 设备发现重试治理 | 源码完成；本机签名 HAP 校验 `METADATA_OK`；Pocket 2 复测待完成 |
 
 ### 第三轮修复明细（第二轮复核施工单）
 
@@ -187,6 +189,50 @@ GT 4 46mm 与 Pocket 2 真机、Wear Engine 文件通道回调
 Secrets、GT 4 46mm 与 Pocket 2 真机、Wear Engine
 文件通道回调字段名（`data.file`）真机核对、双端证书
 指纹的 CI 配置。
+
+### issue #6 修复明细：Wear Engine Client ID 元数据 + 设备发现重试治理
+
+**P0-A：应用身份元数据与打包校验**
+
+1. `apps/phone/entry/src/main/module.json5` 的 `module.metadata` 新增
+   `client_id`（应用级 Client ID），这是 Wear Engine 读取设备前必须的
+   应用身份；缺失即报 `1008509999`。取值来源、与 APP ID / 项目级
+   Client ID 的区别见 [WEAR_ENGINE_CLIENT_ID](WEAR_ENGINE_CLIENT_ID.md)。
+   **真实值不入库**：源码只保留占位符 `CONFIGURE_WITH_AGC_CLIENT_ID`，
+   构建期由 `tools/inject_client_id.py` 从被 gitignore 的
+   `signing/phone/client_id.env`（或 `SUYUE_CLIENT_ID`）注入，构建/校验
+   结束后自动还原，避免该身份值进入 git 历史。
+2. 构建期硬校验：`tools/build_phone_hap.sh` 构建后从**最终（含签名）
+   HAP** 的清单里核对 `module.metadata.client_id`（实现对
+   `tests/build_artifact_check.sh --expect-metadata client_id=<值>`），
+   缺项/空值/不一致一律失败；`tests/source-contract.test.mjs` 断言源码
+   保留占位符、且注入脚本确实守护该占位符。
+
+**P0-B：停止高频无限重试与并发请求**
+
+3. `services/WearAuthPolicy.js` 把 `1008509999` 专列为
+   `app_client_id_not_configured`（应用身份配置错误），文案明确指向
+   「更新素阅安装包」，不再提示用户重开蓝牙/权限。
+4. 新增纯逻辑重试状态机 `isRetryable` / `planRetry` / `RETRY_BACKOFF_MS`：
+   只有 `network_error` / `device_disconnected` 允许自动重试，最多 3 次，
+   退避 ≥1s（1/2/4s）；身份/服务/授权/参数等确定性失败**不自动重试**。
+5. `services/WearDeviceService.ts`：设备发现加在途串行化
+   （`deviceQueryInFlight`），同一时间最多 1 个 `getConnectedDevices`。
+6. `pages/Index.ets`：`refreshDevices` 在途去重、重复点击不叠加；
+   `try/finally` 复位 `deviceBusy`；`onPageHide`/`onDisappear`
+   清理自动重试定时器并作废旧结果序号。
+
+**P0-C：测试**
+
+7. `tests/wear_auth_policy.test.mjs` 扩展：`1008509999` 分类、
+   确定性失败不重试、短暂错误计数上限与退避单调性。
+
+本机已实测：`tools/build_phone_hap.sh debug` 编译+签名成功
+（`SIGNED_TOOL_OK` / `VERIFY_APP_OK`，313,463 字节），最终签名 HAP 的
+清单校验输出 `METADATA_OK client_id=<本地注入值>`（真实值来自 gitignore 的
+`signing/phone/client_id.env`，不写入本文件）。
+**真机复测（Pocket 2 上 `getConnectedDevices` 不再报 `1008509999`）
+仍待完成**，查到设备列表前不宣称已发现 GT 4。
 
 ## 现有源码不能直接认定兼容的地方
 

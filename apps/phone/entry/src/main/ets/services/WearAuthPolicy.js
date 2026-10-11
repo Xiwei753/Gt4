@@ -40,13 +40,30 @@ export function shorten(message) {
 //   1008500007  设备不支持该能力
 //   1008500008  未登录 HUAWEI ID
 //   1008500009  获取账号信息失败
+//   1008509999  Internal error.（SDK 侧通用兜底码）
 //   401         请求参数非法
 // 关于 201：华为 request_user_authorization 文档示例里出现过 201，但本机 SDK
 // d.ts 中 201 属于 P2pResultCode（REMOTE_APP_NOT_RUNNING，手表端应用未运行），
 // 两者冲突、无法确证；因此不为 201 编造「未授权」结论，交由下方 api_error
 // 原样保留 code（不丢失 (201) 信息）。
+//
+// 关于 1008509999（issue #6）：SDK d.ts 只把它写为 Internal error.，但实机
+// hilog 已确证在设备发现路径上它由「应用元数据缺少 client ID」触发：
+//   com.huawei.hmos.health.core/WearEngineImpl: registerCallback err:
+//     {"code":1008509999,"message":"The client ID is not configured in the
+//      metadata of the application."}
+// SDK 会把这条底层 message 折叠掉，只回 Internal error.；因此必须结合
+// 实机日志证据，把它专门解释为**应用身份配置错误**，而不是「设备未找到」
+// 或「用户没开蓝牙/权限」。这是确定性配置错误，用户重开权限、解除配对都
+// 无用，只能由开发者修包（补 client_id 元数据后重装）。
 export function describeWearError(stage, code, message) {
   const n = typeof code === 'number' ? code : 0;
+  if (n === 1008509999) {
+    return { stage: stage, code: n, kind: 'app_client_id_not_configured',
+      text: '应用身份配置错误（Wear Engine 1008509999）：' +
+        '安装包缺少应用级 Client ID 元数据，请更新素阅安装包；' +
+        '重开蓝牙/权限、重新配对均无效' };
+  }
   if (n === 1008500001) {
     return { stage: stage, code: n, kind: 'network_error',
       text: '网络不可用（1008500001），请检查网络后重试' };
@@ -125,3 +142,46 @@ export function deviceNotice(result) {
   }
   return describeWearError(result.stage, result.code, result.message);
 }
+
+// ---- 设备发现的自动重试策略（issue #6 P0-B）----
+//
+// 目标：确定性失败（应用身份未配置、服务未审批、用户拒绝授权、设备不支持、
+// 参数非法、未绑定设备等）**立即停止自动重试**，只由用户手动刷新；
+// 只有可恢复的短暂断连/网络错误才允许少量、有上限、带退避的重试，
+// 绝不做亚秒级连续轰炸。
+export const MAX_AUTO_RETRIES = 3;
+
+// 可恢复、允许有限自动重试的错误类别。
+export const RETRYABLE_KINDS = ['network_error', 'device_disconnected'];
+
+// 退避间隔（毫秒）：第 1/2/3 次重试前分别等待。全部 >= 1s，
+// 不允许亚秒级连发。
+export const RETRY_BACKOFF_MS = [1000, 2000, 4000];
+
+// 某错误类别是否允许自动重试。
+export function isRetryable(kind) {
+  return RETRYABLE_KINDS.indexOf(kind) !== -1;
+}
+
+// 根据「已自动重试次数 attempt」与本次失败类别，给出下一次动作。
+// 返回 { retry, delayMs, attempt, reason }：
+//   - retry=false 表示必须由用户手动刷新；
+//   - probe 为 { ok:true } 或发现成功/空列表时不重试（交回 UI）。
+export function planRetry(attempt, notice) {
+  const used = typeof attempt === 'number' && attempt > 0 ? attempt : 0;
+  if (!notice || notice.ok === true) {
+    return { retry: false, delayMs: 0, attempt: used,
+      reason: 'nothing_to_retry' };
+  }
+  if (!isRetryable(notice.kind)) {
+    return { retry: false, delayMs: 0, attempt: used,
+      reason: 'non_retryable:' + (notice.kind || 'unknown') };
+  }
+  if (used >= MAX_AUTO_RETRIES) {
+    return { retry: false, delayMs: 0, attempt: used,
+      reason: 'max_attempts' };
+  }
+  return { retry: true, delayMs: RETRY_BACKOFF_MS[used], attempt: used + 1,
+    reason: 'transient' };
+}
+

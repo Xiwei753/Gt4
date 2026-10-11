@@ -59,6 +59,9 @@ export class WearDeviceService {
   private context: Context;
   private messageRegistrations: Map<string, MessageRegistration> =
     new Map<string, MessageRegistration>();
+  // issue #6 P0-B：同一时间只允许 1 个设备发现在途。
+  // 并发/重复调用复用同一个 Promise，避免并发请求叠加。
+  private deviceQueryInFlight: Promise<WearDeviceListResult> | null = null;
 
   constructor(context: common.UIAbilityContext) {
     this.context = context;
@@ -147,7 +150,21 @@ export class WearDeviceService {
   // 已连接设备列表。ok=false 携带真实 stage/code/message；
   // ok=true 且 devices 为空表示 Wear Engine 未返回可用设备
   // （不等于“未配对/蓝牙没连”）。
+  // issue #6 P0-B：同一时间只允许 1 个在途查询；已有查询时复用其结果，
+  // 不再并发调用 getConnectedDevices（并发会放大错误风暴）。
   async listDevices(): Promise<WearDeviceListResult> {
+    if (this.deviceQueryInFlight !== null) {
+      return this.deviceQueryInFlight;
+    }
+    this.deviceQueryInFlight = this.queryDevices();
+    try {
+      return await this.deviceQueryInFlight;
+    } finally {
+      this.deviceQueryInFlight = null;
+    }
+  }
+
+  private async queryDevices(): Promise<WearDeviceListResult> {
     try {
       const devices = await this.deviceClient.getConnectedDevices();
       const out: TargetDevice[] = [];

@@ -32,6 +32,52 @@ OUT_DIR="entry/build/default/outputs/default"
 rm -rf entry/build
 mkdir -p "$OUT_DIR"
 
+# ---------- Client ID 注入（issue #6 P0-A）----------
+# 真实应用级 Client ID 是该应用的唯一身份，不入库：仓库里 module.json5
+# 只保留占位符。构建前从被 gitignore 的本地材料
+# （signing/phone/client_id.env）或环境变量 SUYUE_CLIENT_ID 取真实值
+# 临时注入，构建/清单校验结束后（EXIT trap）自动还原源码。
+MODULE_JSON5="entry/src/main/module.json5"
+CLIENT_ID_PLACEHOLDER="CONFIGURE_WITH_AGC_CLIENT_ID"
+INJECT_CLIENT_ID="${SUYUE_CLIENT_ID:-}"
+if [ -z "$INJECT_CLIENT_ID" ]; then
+  for f in \
+    "${PHONE_CLIENT_ID_FILE:-$REPO_ROOT/signing/phone/client_id.env}" \
+    "$REPO_ROOT/signing/client_id.env"; do
+    if [ -f "$f" ]; then
+      INJECT_CLIENT_ID="$(sed -n \
+        's/^[[:space:]]*CLIENT_ID[[:space:]]*=[[:space:]]*//p' "$f" \
+        | head -n 1 | tr -d '"'"'"' \r')"
+      [ -n "$INJECT_CLIENT_ID" ] && break
+    fi
+  done
+fi
+
+MODULE_JSON5_BACKUP=""
+restore_module_json5() {
+  if [ -n "$MODULE_JSON5_BACKUP" ] && [ -f "$MODULE_JSON5_BACKUP" ]; then
+    cp -f "$MODULE_JSON5_BACKUP" "$MODULE_JSON5"
+    rm -f "$MODULE_JSON5_BACKUP"
+  fi
+}
+trap restore_module_json5 EXIT
+
+if grep -q "\"$CLIENT_ID_PLACEHOLDER\"" "$MODULE_JSON5"; then
+  if [ -z "$INJECT_CLIENT_ID" ]; then
+    echo "ERROR: module.json5 的 client_id 仍是占位符" >&2
+    echo "       $CLIENT_ID_PLACEHOLDER，但没有找到真实值。" >&2
+    echo "       请创建 signing/phone/client_id.env（内容：CLIENT_ID=<应用级ClientID>）" >&2
+    echo "       或设置环境变量 SUYUE_CLIENT_ID；该文件已被 .gitignore 忽略。" >&2
+    exit 1
+  fi
+  MODULE_JSON5_BACKUP="$(mktemp)"
+  cp -f "$MODULE_JSON5" "$MODULE_JSON5_BACKUP"
+  python3 "$REPO_ROOT/tools/inject_client_id.py" \
+    --manifest "$MODULE_JSON5" \
+    --client-id "$INJECT_CLIENT_ID" \
+    --placeholder "$CLIENT_ID_PLACEHOLDER"
+fi
+
 "$HVIGORW" --mode module -p product="$PRODUCT" -p buildMode="$MODE" assembleHap --no-daemon
 
 # Stage 的产物命名随是否签名而变：
@@ -145,11 +191,37 @@ if [ -n "$SIGN_P12" ] || [ -n "$SIGN_CER" ] || [ -n "$SIGN_PROFILE" ]; then
 fi
 
 echo "HAP_PATH=$REPO_ROOT/apps/phone/$HAP"
+# issue #6 P0-A：Wear Engine 需要应用级 client_id 元数据；源码里有不等于
+# 最终 HAP 里还在。此时 module.json5 已被注入真实值（见上文注入块），
+# 这里从源码取该值，再去最终 HAP 的清单里核对，缺项/空值/不一致一律失败
+# ——不许打出「能装但发现手表必失败」的包。校验后 EXIT trap 会还原占位符。
+CLIENT_ID="$(python3 - <<'PY'
+import re
+try:
+    src = open('entry/src/main/module.json5', encoding='utf-8').read()
+except OSError:
+    print('')
+    raise SystemExit(0)
+m = re.search(r'"name"\s*:\s*"client_id"\s*,\s*"value"\s*:\s*"([^"]*)"', src)
+print(m.group(1) if m else '')
+PY
+)"
+if [ -z "$CLIENT_ID" ]; then
+  echo "ERROR: 源码 module.json5 缺少 client_id 元数据（issue #6）——" >&2
+  echo "       设备发现会报 1008509999，拒绝产出这种包。" >&2
+  exit 1
+fi
+if [ "$CLIENT_ID" = "$CLIENT_ID_PLACEHOLDER" ]; then
+  echo "ERROR: client_id 仍是占位符，真实值未注入（issue #6）——" >&2
+  echo "       拒绝打出会报 1008509999 的包。" >&2
+  exit 1
+fi
 "$REPO_ROOT/tests/build_artifact_check.sh" \
   "$REPO_ROOT/apps/phone/$HAP" \
   --bundle 'com.xiwei.suyue' \
   --device phone \
-  --mode "$MODE"
+  --mode "$MODE" \
+  --expect-metadata "client_id=$CLIENT_ID"
 
 if [ "$UNSIGNED" = "1" ]; then
   cat >&2 <<'MSG'

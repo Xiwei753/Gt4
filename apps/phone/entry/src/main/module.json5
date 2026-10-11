@@ -7,6 +7,24 @@
     "deliveryWithInstall": true,
     "installationFree": false,
     "pages": "$profile:main_pages",
+    // issue #6 P0-A：Wear Engine 在读取已连接设备前，先从应用元数据里取
+    // 应用级 Client ID；缺失时华为侧直接以 1008509999
+    // (client ID is not configured in the metadata of the application)
+    // 拒绝，SDK 只回 Internal error.。
+    // Client ID 来源：AGC「我的项目 > 项目设置 > 常规 > 应用」的 Client ID
+    // （见 docs/WEAR_ENGINE_CLIENT_ID.md）。它是应用身份标识，不是手表 UUID，
+    // 也不等同于 APP ID / 项目级 Client ID。
+    // 安全约定：真实值**不入库**——它随 HAP 分发、属于该应用的唯一身份，
+    // 不应进入 git 历史。仓库里只保留占位符 CONFIGURE_WITH_AGC_CLIENT_ID；
+    // 构建时由 tools/build_phone_hap.sh 调用 tools/inject_client_id.py，
+    // 从被 gitignore 的 signing/phone/client_id.env（或环境变量
+    // SUYUE_CLIENT_ID）注入真实值，构建/校验结束后自动还原。
+    "metadata": [
+      {
+        "name": "client_id",
+        "value": "CONFIGURE_WITH_AGC_CLIENT_ID"
+      }
+    ],
     "abilities": [
       {
         "name": "EntryAbility",

@@ -31,6 +31,7 @@ MODE=""
 EXPECT_FINGERPRINT=""
 EXPECT_BIN_SHA256=""
 SOURCE_MANIFEST=""
+EXPECT_METADATA=()
 SINGLE_BIN=0
 MANIFEST_ORIGIN="embedded"
 while [ "$#" -gt 0 ]; do
@@ -40,6 +41,7 @@ while [ "$#" -gt 0 ]; do
     --mode) MODE="${2:?--mode needs a value}"; shift 2 ;;
     --expect-fingerprint) EXPECT_FINGERPRINT="${2:?--expect-fingerprint needs a value}"; shift 2 ;;
     --expect-bin-sha256) EXPECT_BIN_SHA256="${2:?--expect-bin-sha256 needs a value}"; shift 2 ;;
+    --expect-metadata) EXPECT_METADATA+=("${2:?--expect-metadata needs NAME=VALUE}"); shift 2 ;;
     --source-manifest) SOURCE_MANIFEST="${2:?--source-manifest needs a value}"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -210,6 +212,72 @@ if [ -n "$EXPECT_FINGERPRINT" ]; then
     echo "FAIL: HAP manifest does not contain the injected fingerprint: $HAP" >&2
     exit 1
   fi
+fi
+
+# 6b) 应用元数据校验（issue #6）：Wear Engine 需要 module.metadata 里
+#     名为 client_id 的应用级 Client ID；源码里有不等于打包后还在。
+#     必须对**最终 HAP 的清单**核对，且不得是空/占位值。
+if [ "${#EXPECT_METADATA[@]}" -gt 0 ]; then
+  if ! METADATA_OUT="$(MANIFEST_JSON="$MANIFEST_TEXT" \
+      EXPECT_METADATA="$(printf '%s\n' "${EXPECT_METADATA[@]}")" \
+      python3 - <<'PY'
+import json, os, sys
+
+try:
+    data = json.loads(os.environ.get("MANIFEST_JSON", ""))
+except Exception as exc:
+    sys.stderr.write("manifest is not valid JSON: %s\n" % exc)
+    sys.exit(3)
+
+metadata = []
+
+def collect(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "metadata" and isinstance(v, list):
+                metadata.extend(v)
+            collect(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            collect(item)
+
+collect(data)
+# 只在 module 级 metadata 里找（避免把其它无关 metadata 当命中）。
+by_name = {}
+for item in metadata:
+    if isinstance(item, dict) and isinstance(item.get("name"), str):
+        by_name[item["name"]] = item.get("value")
+
+fail = False
+for line in os.environ.get("EXPECT_METADATA", "").splitlines():
+    if not line.strip():
+        continue
+    name, _, expected = line.partition("=")
+    actual = by_name.get(name)
+    if actual is None:
+        sys.stderr.write("FAIL: HAP manifest has no metadata entry '%s'\n" % name)
+        fail = True
+        continue
+    if not isinstance(actual, str) or not actual.strip():
+        sys.stderr.write("FAIL: metadata '%s' is empty in HAP\n" % name)
+        fail = True
+        continue
+    if actual != expected:
+        sys.stderr.write(
+            "FAIL: metadata '%s' mismatch: hap=%r expected=%r\n"
+            % (name, actual, expected))
+        fail = True
+
+if fail:
+    sys.exit(1)
+print("METADATA_OK " + ",".join(
+    "%s=%s" % (k, v) for k, v in sorted(by_name.items())))
+PY
+)"; then
+    echo "FAIL: final HAP manifest metadata check failed: $HAP" >&2
+    exit 1
+  fi
+  echo "$METADATA_OUT"
 fi
 
 # 7) Lite Wearable 快照完整性（issue #2 新增）。

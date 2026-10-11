@@ -44,15 +44,18 @@ signing/
 手表 profile (con.xiwei.suyue.gt4)  证书 DER-SHA256 = fbdee2e124a2232509b1c614d452bded…
 ```
 
-两者真正不同的是 `app-identifier`（手机 `6917618613178762508`，
-手表 `6917618615525663621`）。
+两者真正不同的是 `app-identifier`（手机与手表各一个）。
+**手机的这个值同时就是它要写进 `module.metadata` 的**
+**应用级 Client ID，属于应用唯一身份，本文件不再记录具体数字**；
+需要时从 AGC 或本地 profile 读取，真实值放
+`signing/phone/client_id.env`（已 gitignore）。
 
 **只有 profile 是按应用的**，它把包名、设备 UDID、有效期绑在一起：
 
 | | 手机 | 手表 |
 |---|---|---|
 | `bundle-name` | `com.xiwei.suyue` | `con.xiwei.suyue.gt4` |
-| `app-identifier` | `6917618613178762508` | `6917618615525663621` |
+| `app-identifier` | （见 AGC/本地 profile，不落库） | （见 AGC/本地 profile，不落库） |
 | `type` | `debug` | `debug` |
 | `device-id-type` | `udid` | `udid` |
 | 授权设备 | 2 个 UDID | 1 个 UDID（GT 4） |

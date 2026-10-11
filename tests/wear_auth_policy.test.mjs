@@ -18,7 +18,8 @@ assert.ok(!/^\s*import\s/m.test(src),
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-wear-'));
 const modPath = join(tmp, 'WearAuthPolicy.mjs');
 writeFileSync(modPath, src);
-const { describeWearError, authNotice, deviceNotice, shorten } =
+const { describeWearError, authNotice, deviceNotice, shorten,
+  isRetryable, planRetry, MAX_AUTO_RETRIES, RETRY_BACKOFF_MS } =
   await import(modPath);
 
 // ---- 错误码分类：只认有官方依据的码，其余原样保留 ----
@@ -30,6 +31,18 @@ assert.equal(describeWearError('auth_query', 1008500006, '').kind,
   'privacy_not_agreed');
 assert.equal(describeWearError('auth_request', 401, '').kind,
   'param_invalid');
+// issue #6：1008509999 在设备发现路径上由「应用元数据缺少 client ID」触发，
+// 必须专列为应用身份配置错误，且给出真实码与可执行指引。
+const clientIdErr = describeWearError('device_query', 1008509999,
+  'Internal error.');
+assert.equal(clientIdErr.kind, 'app_client_id_not_configured');
+assert.equal(clientIdErr.code, 1008509999);
+assert.ok(clientIdErr.text.includes('1008509999'),
+  'raw 1008509999 must surface');
+assert.ok(clientIdErr.text.includes('应用身份配置错误'),
+  'must be classified as app identity misconfiguration');
+assert.ok(clientIdErr.text.includes('更新素阅安装包'),
+  'must point the user at reinstalling the fixed package');
 // 201：SDK d.ts 里属 P2pResultCode.REMOTE_APP_NOT_RUNNING，与文档示例的
 // 「未授权」冲突，无法确证；不编结论，原样保留 code 走 api_error。
 const p2p201 = describeWearError('auth_request', 201, '');
@@ -93,6 +106,61 @@ assert.equal(deviceNotice({ ok: false, stage: 'device_query',
   code: 1008500004, message: '' }).kind, 'service_not_applied');
 assert.equal(deviceNotice({ ok: false, stage: 'device_query',
   code: 1008500005, message: '' }).kind, 'not_authorized');
+assert.equal(deviceNotice({ ok: false, stage: 'device_query',
+  code: 1008509999, message: '' }).kind, 'app_client_id_not_configured');
+
+// ---- issue #6：自动重试状态机 ----
+// 确定性失败绝不自动重试。
+assert.equal(isRetryable('app_client_id_not_configured'), false);
+assert.equal(isRetryable('service_not_applied'), false);
+assert.equal(isRetryable('not_authorized'), false);
+assert.equal(isRetryable('privacy_not_agreed'), false);
+assert.equal(isRetryable('device_unsupported'), false);
+assert.equal(isRetryable('param_invalid'), false);
+assert.equal(isRetryable('no_device_bound'), false);
+assert.equal(isRetryable('account_not_logged_in'), false);
+assert.equal(isRetryable('api_error'), false);
+// 只有短暂断连/网络错误可重试。
+assert.equal(isRetryable('network_error'), true);
+assert.equal(isRetryable('device_disconnected'), true);
+
+const clientPlan = planRetry(0, describeWearError('device_query',
+  1008509999, ''));
+assert.equal(clientPlan.retry, false, '1008509999 must never auto-retry');
+assert.ok(clientPlan.reason.startsWith('non_retryable'));
+const deniedPlan = planRetry(0, describeWearError('auth_query',
+  1008500005, ''));
+assert.equal(deniedPlan.retry, false, 'user denial must never auto-retry');
+const notAppliedPlan = planRetry(0, describeWearError('device_query',
+  1008500004, ''));
+assert.equal(notAppliedPlan.retry, false, 'unapproved service must not retry');
+
+// 短暂错误：次数有限、退避 >= 1s、单调不缩短。
+let attempt = 0;
+const delays = [];
+for (;;) {
+  const p = planRetry(attempt, describeWearError('device_query',
+    1008500003, ''));
+  if (!p.retry) {
+    assert.equal(p.reason, 'max_attempts');
+    break;
+  }
+  delays.push(p.delayMs);
+  attempt = p.attempt;
+  assert.ok(attempt <= MAX_AUTO_RETRIES);
+}
+assert.equal(delays.length, MAX_AUTO_RETRIES,
+  'transient errors retry at most MAX_AUTO_RETRIES times');
+assert.deepEqual(delays, RETRY_BACKOFF_MS);
+for (const d of delays) {
+  assert.ok(d >= 1000, 'no sub-second retry storm');
+}
+assert.deepEqual(delays, [...delays].sort((a, b) => a - b),
+  'backoff must not shrink');
+// 成功/空列表不需要重试。
+assert.equal(planRetry(0, { ok: true }).retry, false);
+assert.equal(planRetry(0, null).retry, false);
 
 console.info('PASS: Wear Engine auth/discovery policy ' +
-  '(code classification, empty != bluetooth, raw code preserved)');
+  '(code classification, empty != bluetooth, raw code preserved, ' +
+  'client-id non-retry, bounded backoff)');
