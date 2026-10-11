@@ -15,6 +15,7 @@
 import file from '@system.file';
 import { INDEX_FILE, bookPath, isSafeBookId,
   complete, deleteFile } from './BookStorage.js';
+import { decodeUtf8Bytes } from '../util/Utf8.js';
 
 var INDEX_TMP = INDEX_FILE + '.tmp';
 var queue = [];
@@ -24,12 +25,6 @@ var running = false;
 // listBooks 永久排队阻塞。释放不等于伪造成功：调用方
 // 的回调不会在这里被触发。默认 9s，测试可缩短。
 var QUEUE_TIMEOUT_MS = 9000;
-// 索引读取分块（issue #7 真机修正）：Lite `@system.file.readText`
-// 单次文本上限 4 KB，超过返回 302；旧的固定 65536 长度在真机上
-// 一旦索引正文超 4 KB 会直接失败。改为按 4096 字节分块读、
-// 边读边尝试解析，读到完整 JSON 数组即停。
-var TEXT_CHUNK = 4096;
-var MAX_INDEX_TEXT = 1024 * 1024;
 
 export function setQueueTimeout(ms) {
   if (typeof ms === 'number' && ms > 0) QUEUE_TIMEOUT_MS = ms;
@@ -59,72 +54,70 @@ function snapshot(entries) {
   return out;
 }
 
-export function loadIndex(cb, onDiag) {
-  const report = (state, code) => {
-    if (typeof onDiag === 'function') {
-      onDiag({ state: state, code: code });
-    }
-  };
-  try {
-    // 分块读索引：避免 length:65536 在真机上因正文超 4 KB 报 302。
-    readIndexText((r) => {
-      if (r.ok) {
-        const entries = parseEntries(r.text);
-        lastGood = snapshot(entries);
-        report('ok', 0);
-        return complete(cb, snapshot(entries));
-      }
-      // 301 = 从未创建过 books.json（首次安装，正常空库）；
-      // 其它（300/202 等）是真正的文件系统异常，必须如实
-      // 上报给启动页，不能混成"空书架"。
-      const state = (r.code === 301) ? 'missing' : 'error';
-      report(state, r.code || r.reason);
-      complete(cb, []);
-    });
-  } catch (error) {
-    report('error', 'throw');
-    complete(cb, []);
-  }
-}
+var TEXT_CHUNK = 4096;
+var MAX_INDEX_TEXT = 1024 * 1024;
 
-// 累积文本是否为完整 JSON 数组（用于判断是否读全）。
-function isCompleteArrayText(text) {
-  if (!text) return false;
+// 把已累积的分块字节整体 UTF-8 解码后再尝试 JSON.parse。
+// 返回 { text }（完整 JSON 数组）/ { bad:true }（能解析但不是数组）
+// / null（还读全）。
+function parseAccumulated(parts, total) {
+  const all = new Uint8Array(total);
+  var offset = 0;
+  for (var i = 0; i < parts.length; i++) {
+    all.set(parts[i], offset);
+    offset += parts[i].length;
+  }
+  const text = decodeUtf8Bytes(all);
   try {
-    return Array.isArray(JSON.parse(text));
+    const value = JSON.parse(text);
+    if (Array.isArray(value)) return { text: text };
+    return { bad: true };
   } catch (e) {
-    return false;
+    return null;
   }
 }
 
-// 分块读取 books.json：单次 4096 字节，边读边解析。
-// 每块都是一个有限操作；返回 { ok, text } 或
-// { ok:false, reason, code }。
+// 索引读取（issue #8 真机修正）：Lite `@system.file.readText`
+// 单次文本上限 4 KB（超过报 302），旧的固定 65536 长度在真机上
+// 直接读取失败。这里改用受控长度分块 readArrayBuffer →
+// 累积字节 → 一次性 UTF-8 解码 → JSON.parse：既绕开 4 KB 限制，
+// 也避免多字节汉字被截断在分块边界。总内存上限 1 MiB。
+// 回传 { ok:true, text } 或 { ok:false, reason, code }。
 function readIndexText(cb) {
-  var acc = '';
-  function step(pos) {
+  var parts = [];
+  var total = 0;
+  function step(position) {
     try {
-      file.readText({
+      file.readArrayBuffer({
         uri: INDEX_FILE,
         length: TEXT_CHUNK,
-        position: pos,
+        position: position,
         success: (data) => {
-          var text = (data && typeof data.text === 'string') ?
-            data.text : '';
-          acc += text;
-          if (isCompleteArrayText(acc)) {
-            return complete(cb, { ok: true, text: acc });
+          const bytes = (data && data.buffer) ?
+            new Uint8Array(data.buffer) : null;
+          if (!bytes || bytes.length === 0) {
+            // 读到文件尾仍凑不成完整数组：空文件=空库，
+            // 否则视为损坏/截断，绝不伪造成功。
+            return complete(cb, (total === 0) ?
+              { ok: false, reason: 'empty' } :
+              { ok: false, reason: 'truncated' });
           }
-          if (text.length === 0) {
-            return complete(cb, { ok: false, reason: 'empty' });
+          parts.push(bytes);
+          total += bytes.length;
+          const parsed = parseAccumulated(parts, total);
+          if (parsed && parsed.text) {
+            return complete(cb, { ok: true, text: parsed.text });
           }
-          if (acc.length >= MAX_INDEX_TEXT) {
+          if (parsed && parsed.bad) {
+            return complete(cb, { ok: false, reason: 'bad_shape' });
+          }
+          if (total >= MAX_INDEX_TEXT) {
             return complete(cb, { ok: false, reason: 'too_long' });
           }
-          step(pos + TEXT_CHUNK);
+          step(position + bytes.length);
         },
         fail: (data, code) => {
-          complete(cb, { ok: false, reason: 'read', code: code });
+          complete(cb, { ok: false, reason: 'fail', code: code });
         }
       });
     } catch (error) {
@@ -132,6 +125,32 @@ function readIndexText(cb) {
     }
   }
   step(0);
+}
+
+export function loadIndex(cb, onDiag) {
+  const report = (state, code, api) => {
+    if (typeof onDiag === 'function') {
+      onDiag({ state: state, code: code, api: api });
+    }
+  };
+  readIndexText((r) => {
+    if (r.ok) {
+      const entries = parseEntries(r.text);
+      lastGood = snapshot(entries);
+      report('ok', 0, 'readArrayBuffer');
+      return complete(cb, snapshot(entries));
+    }
+    // 301 = 从未创建过 books.json（首次安装，正常空库）；
+    // 空文件同样按空库处理。其它（300/202/302 等）是真正的
+    // 文件系统异常，必须带真实 code + 出错接口上报启动页，
+    // 不能混成"空书架"。
+    if ((r.code === 301) || (r.reason === 'empty')) {
+      report('missing', r.code || r.reason, 'readArrayBuffer');
+      return complete(cb, []);
+    }
+    report('error', r.code || r.reason, 'readArrayBuffer');
+    complete(cb, []);
+  });
 }
 
 // 把 tmp 提交为正式索引：不假设 move 可以
@@ -227,11 +246,12 @@ function rollback(orphanEntry, cb) {
       return complete(cb, { restored: false,
         reason: 'E_ROLLBACK_FAILED' });
     }
-    // 回读校验：磁盘内容必须等于快照（分块读，见 readIndexText）。
+    // 回读校验：磁盘内容必须等于快照（同样分块读，见 issue #8）。
     readIndexText((r) => {
       if (!r.ok) {
         return complete(cb, { restored: false,
-          reason: 'E_ROLLBACK_FAILED' });
+          reason: 'E_ROLLBACK_FAILED',
+          code: r.code || r.reason });
       }
       const onDisk = parseEntries(r.text);
       if (JSON.stringify(onDisk) !==

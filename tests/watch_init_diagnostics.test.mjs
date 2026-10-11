@@ -133,11 +133,12 @@ const meta = (id, title) => ({ bookId: id, title,
   }
 }
 
-// ---- 4b. readText 报 300 → 不伪装成空书架，给出错误码 ----
+// ---- 4b. readArrayBuffer 报 300 → 不伪装成空书架，给出错误码 ----
+// issue #8：索引改用分块 readArrayBuffer，不再用超过 4KB 的 readText。
 {
   clearLibrary();
-  const original = systemFile.readText;
-  systemFile.readText = (o) => o.fail && o.fail({}, 300);
+  const original = systemFile.readArrayBuffer;
+  systemFile.readArrayBuffer = (o) => o.fail && o.fail({}, 300);
   try {
     const page = await initPage(newPage());
     assert.equal(page.initFailed, true,
@@ -146,8 +147,10 @@ const meta = (id, title) => ({ bookId: id, title,
       'status must flag the index read error, got: ' + page.status);
     assert.ok(page.status.includes('300'),
       'status must carry the read error code, got: ' + page.status);
+    assert.ok(page.status.includes('readArrayBuffer'),
+      'status must name the failing interface, got: ' + page.status);
   } finally {
-    systemFile.readText = original;
+    systemFile.readArrayBuffer = original;
   }
 }
 
@@ -215,9 +218,9 @@ const meta = (id, title) => ({ bookId: id, title,
   assert.equal(missingDiag.state, 'missing',
     'absent index from a fresh install must be classified missing');
 
-  // error：readText 报 300。
-  const original = systemFile.readText;
-  systemFile.readText = (o) => o.fail && o.fail({}, 300);
+  // error：readArrayBuffer 报 300（issue #8：索引走分块 readArrayBuffer）。
+  const original = systemFile.readArrayBuffer;
+  systemFile.readArrayBuffer = (o) => o.fail && o.fail({}, 300);
   try {
     let errDiag = null;
     const err = await wait((cb) => LibraryIndex.listBooks(cb,
@@ -227,18 +230,18 @@ const meta = (id, title) => ({ bookId: id, title,
       'a real I/O failure must be classified error, not empty');
     assert.equal(errDiag.code, 300);
   } finally {
-    systemFile.readText = original;
+    systemFile.readArrayBuffer = original;
   }
 
   // 无回调：看门狗释放队列，后续 listBooks 不再永久阻塞。
   let firstCalled = false;
-  systemFile.readText = () => {};
+  systemFile.readArrayBuffer = () => {};
   LibraryIndex.listBooks(() => { firstCalled = true; },
     () => {});
   await new Promise((r) => setTimeout(r, 120));
   assert.equal(firstCalled, false,
     'a hung index read must not fake a callback');
-  systemFile.readText = original;
+  systemFile.readArrayBuffer = original;
   const after = await Promise.race([
     wait((cb) => LibraryIndex.listBooks(cb, () => {})),
     new Promise((_, rej) => setTimeout(

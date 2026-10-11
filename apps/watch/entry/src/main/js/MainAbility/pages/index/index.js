@@ -46,6 +46,7 @@ export default {
     this.initStage = '进入首页';
     this.indexError = 0;
     this.bundledStatus = '';
+    this.indexApi = 'readArrayBuffer';
     this.status = '初始化 1/5：进入首页';
     try {
       this.prepareLibrary();
@@ -124,6 +125,7 @@ export default {
     this.initStage = '进入首页';
     this.indexError = 0;
     this.bundledStatus = '';
+    this.indexApi = 'readArrayBuffer';
     try {
       this.prepareLibrary();
     } catch (error) {
@@ -232,13 +234,15 @@ export default {
       }
       if (this.indexError) {
         return this.failInit('E_INDEX_READ',
-          '书库索引读取失败 code=' + this.indexError);
+          '索引读取失败 ' + (this.indexApi || 'readArrayBuffer') +
+          ' code=' + this.indexError);
       }
       this.migrateDemo(token);
     }, (diag) => {
       if (token !== this.initToken) return;
       this.indexError = (diag && diag.state === 'error') ?
         (diag.code || 'error') : 0;
+      this.indexApi = (diag && diag.api) ? diag.api : 'readArrayBuffer';
     });
   },
   // 一次性迁移：先直接检查旧文件，存在且移动

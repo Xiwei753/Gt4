@@ -118,6 +118,8 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 - 错误码直接上屏（`status(...)` 括号内）：
   `E_PREPARE_THROW` / `E_DIRS_books|temp|progress` / `E_INDEX_READ`
   / `E_INIT_TIMEOUT` / `E_DEMO_MOVE_<code>` / `E_DEMO_STAT` / `E_DEMO_DIGEST`。
+- 索引读取失败时上屏**真实接口名与错误码**，例如
+  `索引读取失败 readArrayBuffer 302`，而不是笼统的"初始化失败"。
   同步异常由 try/catch 兜底，异步结果带 token 校验，过时回调不会覆盖
   新状态；`onDestroy` 清理定时器。
 - 失败时屏幕出现"重试"文本按钮（`retryInit`），不必卸载应用。
@@ -126,13 +128,28 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 
 `storage/BookStorage.js` 的每个 `access`/`mkdir` 都只结算一次回调，带
 `setOperationTimeout`（默认 8s）无回调兜底，并保留真实错误 code；目录创建
-失败会带上阶段名。`storage/LibraryIndex.js` 用 `onDiag` 区分**首次安装的
-301（missing）**与真正的 **I/O/参数错误（error）**，不再把两者都当成空书架；
+失败会带上阶段名。
+
+`storage/LibraryIndex.js` 读取 `books.json` **不再用单次
+`file.readText({length: 65536})`**（Lite `readText` 上限 4 KB，超过即 302，
+且多本内置书会让索引超过 4 KB）。改为**分块 `file.readArrayBuffer`**：
+以 4 KB（`TEXT_CHUNK`）从位置 0 逐块读字节，边读边解析，累积到能
+`JSON.parse` 出数组即停；整体拼接后再用 `util/Utf8.js` 的 `decodeUtf8Bytes`
+**一次性解码**，因此中文标题跨块边界也不会被截断。上限 `MAX_INDEX_TEXT`
+= 1 MiB，超限报 `too_long`。`onDiag` 现在带 `api` 字段，区分**首次安装的
+301（missing）**与真正的 **I/O/参数错误（error，附真实 code 与 api）**，
+不再把两者都当成空书架；读失败时**不会**用 `[]` 覆盖旧索引、不会清理
+目录、不会删除 `books/<id>.txt` 或 `progress/<id>.json`。
 队列加 `setQueueTimeout`（默认 9s）看门狗，单个操作不回调只释放队列、
 不伪造成功，后续 `listBooks` 不会被永久卡住。
 
 回归：`tests/watch_init_diagnostics.test.mjs`（空书架、已有书、301→mkdir、
-mkdir 202、readText 300、无回调超时、重试、Wear Engine 隔离、队列看门狗）。
+mkdir 202、readArrayBuffer 300、无回调超时、重试、Wear Engine 隔离、队列
+看门狗）与 `tests/watch_index_read.test.mjs`（分块读；区分 301/202/300/超时；
+>4 KB 与中文跨块边界均不丢条目）。`tests/helpers/system_file_stub.mjs` 已
+模拟真机 `readText` 的 4 KB 上限（超限返回 302，可用 `.readtext_max` /
+`.readtext_302` 注入）。
+
 **这些均以 Node 文件桩验证；GT 4 真机最终验证仍待完成，故本 issue 暂不可关闭。**
 
 ## 构建期内置书籍（issue #7）
