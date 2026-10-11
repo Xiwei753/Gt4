@@ -18,6 +18,10 @@ import { createSha256 } from '../../util/Sha256';
 const DEMO_BOOK_ID = 'aaaa000000000001';
 const DEMO_PATH = 'internal://app/gt4reader/demo.txt';
 var MIGRATE_WINDOW = 64 * 1024;
+// 启动看门狗（issue #8）：本地书库初始化必须在有限时间内
+// 得出明确结论（就绪 / 空库 / 错误），否则在圆屏上显示
+// 卡住的阶段，绝不无限停留在"正在准备本地书库"。
+var INIT_TIMEOUT_MS = 10000;
 
 export default {
   data: {
@@ -25,14 +29,35 @@ export default {
     books: [],
     status: '正在准备本地书库',
     transferStatus: '传书未配置',
-    confirmId: ''
+    confirmId: '',
+    initFailed: false
   },
   onInit() {
+    // 页面级状态机：onInit 第一句就置醒目标记，用来区分
+    // "onInit 根本没执行"与"执行后卡住"。
     this.libraryReady = false;
-    this.prepareLibrary();
-    beginReceive((message) => {
-      this.handleReceiveStatus(message);
-    });
+    this.initDone = false;
+    this.initFailed = false;
+    this.initToken = 0;
+    this.initTimer = null;
+    this.initStage = '进入首页';
+    this.indexError = 0;
+    this.status = '初始化 1/5：进入首页';
+    try {
+      this.prepareLibrary();
+    } catch (error) {
+      this.failInit('E_PREPARE_THROW', '初始化同步异常：' + error);
+    }
+    // Wear Engine 与本地书库彼此独立：接收初始化异常
+    // 绝不能阻断离线书架（issue #8）。
+    try {
+      beginReceive((message) => {
+        this.handleReceiveStatus(message);
+      });
+    } catch (error) {
+      this.transferStatus = '传书初始化异常';
+      console.error('[suyue] E_WEAR_INIT ' + error);
+    }
   },
   // 从阅读页返回书架时重新取索引，不依赖 onInit 再次执行。
   onShow() {
@@ -59,63 +84,162 @@ export default {
     }
   },
   onDestroy() {
+    this.clearInitTimer();
     stopReceive();
   },
+  clearInitTimer() {
+    if (this.initTimer !== null && this.initTimer !== undefined &&
+        typeof clearTimeout === 'function') {
+      clearTimeout(this.initTimer);
+    }
+    this.initTimer = null;
+  },
+  // 明确成功：停看门狗，落定最终文案。
+  finishInit(text) {
+    this.clearInitTimer();
+    this.initDone = true;
+    this.initFailed = false;
+    this.status = text;
+  },
+  // 明确失败：屏幕显示阶段 + 错误码，开放重试。
+  // 自增 token 使在途回调失效，过时结果不能覆盖错误态。
+  failInit(code, text) {
+    this.initToken++;
+    this.clearInitTimer();
+    this.initDone = true;
+    this.initFailed = true;
+    this.status = text + '（' + code + '）';
+    console.error('[suyue] ' + code + ' ' + text);
+  },
+  // 点击重试：不卸载应用也能重新初始化。
+  retryInit() {
+    this.libraryReady = false;
+    this.initFailed = false;
+    this.initStage = '进入首页';
+    this.indexError = 0;
+    try {
+      this.prepareLibrary();
+    } catch (error) {
+      this.failInit('E_PREPARE_THROW', '初始化同步异常：' + error);
+    }
+  },
   prepareLibrary() {
-    ensureDirs((dirs) => {
-      if (!dirs.ok) {
-        this.status = '书库目录创建失败';
-        return;
-      }
-      listBooks((books) => {
-        this.libraryReady = true;
-        if (books.length > 0) {
-          this.books = books;
-          this.status = '本地书库就绪';
-          return;
+    const token = ++this.initToken;
+    this.initDone = false;
+    this.initFailed = false;
+    this.indexError = 0;
+    this.initStage = '进入首页';
+    this.status = '初始化 1/5：进入首页';
+    this.clearInitTimer();
+    if (typeof setTimeout === 'function') {
+      this.initTimer = setTimeout(() => {
+        if (token !== this.initToken || this.initDone) return;
+        // 超时不清空目录、不伪造成功：只报出卡住的阶段。
+        this.failInit('E_INIT_TIMEOUT',
+          '书库初始化超时：阶段=' + this.initStage);
+      }, this.initTimeoutMs || INIT_TIMEOUT_MS);
+    }
+    try {
+      ensureDirs((dirs) => {
+        if (token !== this.initToken) return;
+        if (!dirs.ok) {
+          return this.failInit(
+            'E_DIRS_' + (dirs.stage || 'unknown'),
+            '书库目录创建失败：' + (dirs.stage || '') +
+            ' code=' + (dirs.code || dirs.reason || '?'));
         }
-        this.migrateDemo();
+        this.initStage = '读取 books.json';
+        this.status = '初始化 3/5：读取 books.json';
+        listBooks((books) => {
+          if (token !== this.initToken) return;
+          this.libraryReady = true;
+          if (books.length > 0) {
+            this.books = books;
+            return this.finishInit(
+              '本地书库就绪（' + books.length + ' 本）');
+          }
+          if (this.indexError) {
+            return this.failInit('E_INDEX_READ',
+              '书库索引读取失败 code=' + this.indexError);
+          }
+          this.migrateDemo(token);
+        }, (diag) => {
+          if (token !== this.initToken) return;
+          this.indexError = (diag && diag.state === 'error') ?
+            (diag.code || 'error') : 0;
+        });
+      }, (stage) => {
+        if (token !== this.initToken) return;
+        this.initStage = '目录 ' + stage;
+        this.status = '初始化 2/5：目录 ' + stage;
       });
-    });
+    } catch (error) {
+      this.failInit('E_PREPARE_THROW', '初始化同步异常：' + error);
+    }
   },
   // 一次性迁移：先直接检查旧文件，存在且移动
   // 成功才登记；不调用任何生成函数。
-  migrateDemo() {
-    file.access({
-      uri: DEMO_PATH,
-      success: () => {
-        file.move({
-          srcUri: DEMO_PATH,
-          dstUri: bookPath(DEMO_BOOK_ID),
-          success: () => this.describeMovedDemo(),
-          fail: (data, code) => {
-            this.status = '旧演示书迁移失败：' + code;
+  migrateDemo(token) {
+    this.initStage = '检查旧 demo';
+    this.status = '初始化 4/5：检查旧 demo';
+    try {
+      file.access({
+        uri: DEMO_PATH,
+        success: () => {
+          if (token !== this.initToken) return;
+          try {
+            file.move({
+              srcUri: DEMO_PATH,
+              dstUri: bookPath(DEMO_BOOK_ID),
+              success: () => {
+                if (token !== this.initToken) return;
+                this.describeMovedDemo(token);
+              },
+              fail: (data, code) => {
+                if (token !== this.initToken) return;
+                this.failInit('E_DEMO_MOVE_' + code,
+                  '旧演示书迁移失败 code=' + code);
+              }
+            });
+          } catch (error) {
+            this.failInit('E_DEMO_MOVE_THROW',
+              '旧演示书迁移异常：' + error);
           }
-        });
-      },
-      fail: () => {
-        // 旧文件不存在：显示空库，不重造。
-        this.status = '书库为空，等待手机传书';
-        this.books = [];
-      }
-    });
+        },
+        fail: (data, code) => {
+          if (token !== this.initToken) return;
+          // 没有旧 demo（含 301 不存在）是正常空书架：
+          // 不重造、不阻塞、不长时间等待。
+          this.books = [];
+          if (code && code !== 301) {
+            console.error('[suyue] E_DEMO_ACCESS code=' + code);
+          }
+          this.finishInit('书库为空，等待手机传书');
+        }
+      });
+    } catch (error) {
+      this.failInit('E_DEMO_ACCESS_THROW',
+        '检查旧演示书异常：' + error);
+    }
   },
   // 移动成功后统计真实字节数与摘要，再登记索引
   // （拒绝假元数据）。
-  describeMovedDemo() {
+  describeMovedDemo(token) {
     const dst = bookPath(DEMO_BOOK_ID);
     fileSize(dst, (stat) => {
+      if (token !== this.initToken) return;
       if (!stat.ok) {
-        this.status = '迁移后校验失败：无法取得大小';
-        return;
+        return this.failInit('E_DEMO_STAT',
+          '迁移后校验失败：无法取得大小');
       }
       const hasher = createSha256();
       this.hashAll(dst, 0, stat.size, hasher,
         (digest) => {
+          if (token !== this.initToken) return;
           if (!digest) {
             // 读取失败：不写空摘要，不登记。
-            this.status = '迁移后校验失败：摘要读取不完整';
-            return;
+            return this.failInit('E_DEMO_DIGEST',
+              '迁移后校验失败：摘要读取不完整');
           }
           addBook({
             bookId: DEMO_BOOK_ID,
@@ -126,7 +250,11 @@ export default {
             chunks: 0,
             chunkBytes: 0,
             chapters: []
-          }, () => this.refresh());
+          }, () => {
+            if (token !== this.initToken) return;
+            this.refresh();
+            this.finishInit('本地书库就绪（1 本）');
+          });
         });
     });
   },

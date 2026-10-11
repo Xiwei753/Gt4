@@ -148,6 +148,24 @@ assert.ok(shelfHml.includes('class="book-delete" onclick="askDelete($idx)"'),
 assert.ok(watchIndex.includes("event.type === 'RESULT'") &&
   watchIndex.includes('this.refresh();'),
   'watch shelf must refresh after a successful receive');
+// issue #8：启动初始化必须有可见阶段、超时兜底、错误码和重试入口，
+// 不能再永久停在"正在准备本地书库"。
+assert.ok(watchIndex.includes('E_INIT_TIMEOUT') &&
+  watchIndex.includes('setTimeout'),
+  'shelf init must have a timeout fallback');
+assert.ok(watchIndex.includes('E_DIRS_') &&
+  watchIndex.includes('E_INDEX_READ'),
+  'shelf init must surface stage error codes on screen');
+assert.ok(watchIndex.includes('retryInit') &&
+  shelfHml.includes('onclick="retryInit"'),
+  'a failed shelf init must offer an on-screen retry');
+const watchStorage = read('apps/watch/entry/src/main/js/MainAbility/storage/BookStorage.js');
+assert.ok(watchStorage.includes('setOperationTimeout'),
+  'storage file ops must have a no-callback timeout guard');
+const watchIndexStore = read('apps/watch/entry/src/main/js/MainAbility/storage/LibraryIndex.js');
+assert.ok(watchIndexStore.includes('setQueueTimeout') &&
+  watchIndexStore.includes("'missing'"),
+  'index queue must expose a watchdog and distinguish missing vs error');
 
 // ---- Lite 运行时能力守门 ----
 // 依据（本机 HarmonyOS Command Line Tools 26.0.0 / API 26 实测）：

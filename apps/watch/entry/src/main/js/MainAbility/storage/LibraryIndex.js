@@ -19,6 +19,15 @@ import { INDEX_FILE, bookPath, isSafeBookId,
 var INDEX_TMP = INDEX_FILE + '.tmp';
 var queue = [];
 var running = false;
+// 队列看门狗（issue #8）：底层文件操作既不回调 success
+// 也不回调 fail 时，必须释放 running，避免后续所有
+// listBooks 永久排队阻塞。释放不等于伪造成功：调用方
+// 的回调不会在这里被触发。默认 9s，测试可缩短。
+var QUEUE_TIMEOUT_MS = 9000;
+
+export function setQueueTimeout(ms) {
+  if (typeof ms === 'number' && ms > 0) QUEUE_TIMEOUT_MS = ms;
+}
 // 最近一次成功写入的索引内容（深拷贝快照，
 // 任何写路径都不得修改其元素）。
 var lastGood = [];
@@ -44,18 +53,36 @@ function snapshot(entries) {
   return out;
 }
 
-export function loadIndex(cb) {
-  file.readText({
-    uri: INDEX_FILE,
-    length: 65536,
-    position: 0,
-    success: (data) => {
-      const entries = parseEntries(data.text);
-      lastGood = snapshot(entries);
-      complete(cb, snapshot(entries));
-    },
-    fail: () => complete(cb, [])
-  });
+export function loadIndex(cb, onDiag) {
+  const report = (state, code) => {
+    if (typeof onDiag === 'function') {
+      onDiag({ state: state, code: code });
+    }
+  };
+  try {
+    file.readText({
+      uri: INDEX_FILE,
+      length: 65536,
+      position: 0,
+      success: (data) => {
+        const entries = parseEntries(data.text);
+        lastGood = snapshot(entries);
+        report('ok', 0);
+        complete(cb, snapshot(entries));
+      },
+      fail: (data, code) => {
+        // 301 = 从未创建过 books.json（首次安装，正常空库）；
+        // 其它（300/202 等）是真正的文件系统异常，必须如实
+        // 上报给启动页，不能混成"空书架"。
+        const state = (code === 301) ? 'missing' : 'error';
+        report(state, code);
+        complete(cb, []);
+      }
+    });
+  } catch (error) {
+    report('error', 'throw');
+    complete(cb, []);
+  }
 }
 
 // 把 tmp 提交为正式索引：不假设 move 可以
@@ -112,7 +139,31 @@ function runNext() {
   }
   running = true;
   const task = queue.shift();
-  task(() => runNext());
+  let settled = false;
+  let timer = null;
+  const done = () => {
+    if (settled) return;
+    settled = true;
+    if (timer !== null && typeof clearTimeout === 'function') {
+      clearTimeout(timer);
+      timer = null;
+    }
+    runNext();
+  };
+  if (typeof setTimeout === 'function') {
+    timer = setTimeout(() => {
+      console.error('LibraryIndex: 文件操作超时，释放队列' +
+        '（未伪造成功，调用方回调不会触发）');
+      done();
+    }, QUEUE_TIMEOUT_MS);
+  }
+  try {
+    task(done);
+  } catch (error) {
+    // 同步 throw 也必须释放队列，不能让运行标志卡死。
+    console.error('LibraryIndex: 任务同步异常 ' + error);
+    done();
+  }
 }
 
 // 写失败回滚：把最近一次成功的快照写回，
@@ -157,7 +208,7 @@ function finishRollback(orphanEntry, cb) {
   }
 }
 
-export function listBooks(cb) {
+export function listBooks(cb, onDiag) {
   // 读-检-清理整周期入队，与写操作互斥，
   // 避免并发清理覆盖刚写入的条目（P0-4）。
   enqueue((done) => {
@@ -192,7 +243,7 @@ export function listBooks(cb) {
           fail: () => settleIfDone()
         });
       });
-    });
+    }, onDiag);
   });
 }
 

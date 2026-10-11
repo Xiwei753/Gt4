@@ -43,26 +43,73 @@ export function complete(cb, value) {
   if (typeof cb === 'function') cb(value);
 }
 
-function ensureDir(uri, cb) {
-  file.access({
-    uri: uri,
-    success: () => complete(cb, { ok: true }),
-    fail: () => file.mkdir({
-      uri: uri,
-      recursive: true,
-      success: () => complete(cb, { ok: true }),
-      fail: (data, code) => complete(cb,
-        { ok: false, reason: 'mkdir', code: code })
-    })
-  });
+// 目录操作后备超时（issue #8）：某个 access/mkdir 既不回调
+// success 也不回调 fail 时，必须给出后备返回，不能再无限等待。
+// 默认 8s；测试可用 setOperationTimeout 缩短。
+export var OPERATION_TIMEOUT_MS = 8000;
+
+export function setOperationTimeout(ms) {
+  if (typeof ms === 'number' && ms > 0) OPERATION_TIMEOUT_MS = ms;
 }
 
-export function ensureDirs(cb) {
+function ensureDir(uri, cb) {
+  let settled = false;
+  const done = (value) => {
+    if (settled) return;
+    settled = true;
+    complete(cb, value);
+  };
+  if (typeof setTimeout === 'function') {
+    setTimeout(() => done({ ok: false, reason: 'timeout' }),
+      OPERATION_TIMEOUT_MS);
+  }
+  try {
+    file.access({
+      uri: uri,
+      success: () => done({ ok: true, existed: true }),
+      fail: (data, code) => {
+        // 301（不存在）是正常首装；其它错误码也照常尝试创建，
+        // 但把 access 的真实 code 带上，绝不把它当成"缺权限"。
+        try {
+          file.mkdir({
+            uri: uri,
+            recursive: true,
+            success: () => done({ ok: true, created: true }),
+            fail: (md, mcode) => done({ ok: false,
+              reason: 'mkdir', code: mcode, accessCode: code })
+          });
+        } catch (error) {
+          done({ ok: false, reason: 'mkdir_throw',
+            accessCode: code, error: String(error) });
+        }
+      }
+    });
+  } catch (error) {
+    done({ ok: false, reason: 'access_throw',
+      error: String(error) });
+  }
+}
+
+export function ensureDirs(cb, onStage) {
+  const report = (stage) => {
+    if (typeof onStage === 'function') onStage(stage);
+  };
+  report('books');
   ensureDir(BOOKS_DIR, (books) => {
-    if (!books.ok) return complete(cb, books);
+    if (!books.ok) {
+      return complete(cb, Object.assign({ stage: 'books' }, books));
+    }
+    report('temp');
     ensureDir(TEMP_DIR, (temp) => {
-      if (!temp.ok) return complete(cb, temp);
+      if (!temp.ok) {
+        return complete(cb, Object.assign({ stage: 'temp' }, temp));
+      }
+      report('progress');
       ensureDir(PROGRESS_DIR, (progress) => {
+        if (!progress.ok) {
+          return complete(cb,
+            Object.assign({ stage: 'progress' }, progress));
+        }
         complete(cb, progress);
       });
     });

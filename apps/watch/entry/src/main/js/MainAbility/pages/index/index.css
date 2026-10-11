@@ -79,6 +79,17 @@
   text-align: center;
   color: #aeb6c4;
 }
+/* 初始化失败/超时后的重试入口（issue #8）：不卸载也能重试。 */
+.retry {
+  width: 120px;
+  height: 34px;
+  margin-top: 8px;
+  font-size: 15px;
+  color: #93c5fd;
+  text-align: center;
+  border-radius: 10px;
+  background-color: #1f2937;
+}
 .foot {
   width: 100%;
   margin-top: 10px;

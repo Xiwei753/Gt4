@@ -11,6 +11,7 @@ export function createWatchLoader(options) {
   const tmpDir = options.tmpDir;
   const stubPath = options.stubPath;
   const wearengineStubPath = options.wearengineStubPath;
+  const routerStubPath = options.routerStubPath;
   const loaded = new Map();
   const load = async (rel) => {
     if (loaded.has(rel)) return loaded.get(rel);
@@ -36,6 +37,8 @@ export function createWatchLoader(options) {
       } else if (spec === '@system.wearengine' &&
           wearengineStubPath) {
         deps.push({ spec, depTmp: wearengineStubPath });
+      } else if (spec === '@system.router' && routerStubPath) {
+        deps.push({ spec, depTmp: routerStubPath });
       }
     }
     const modPath = join(tmpDir,
@@ -89,3 +92,22 @@ export default stub;
 
 export const wait = (fn) =>
   new Promise((resolve) => fn(resolve));
+
+// @system.router 桩：记录 push/back，供书架页单元测试加载。
+export function writeRouterStub(tmpDir,
+  stubName = 'router_stub.mjs') {
+  const stubPath = join(tmpDir, stubName);
+  writeFileSync(stubPath, `
+const calls = [];
+const stub = {
+  push(o) { calls.push(['push', o && o.uri, o && o.params]); },
+  back() { calls.push(['back']); },
+  replace(o) { calls.push(['replace', o && o.uri]); },
+  clear() { calls.push(['clear']); },
+  getParams() { return (stub.__params || {}); }
+};
+stub.__calls = calls;
+export default stub;
+`);
+  return stubPath;
+}

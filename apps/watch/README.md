@@ -102,6 +102,38 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 - 安装步骤与待验证清单：[../../docs/WATCH_INSTALL.md](../../docs/WATCH_INSTALL.md)。
 - **尚未在任何真机上安装或运行；`6.1.1(24)` 版本号待 GT 4 真机核对。**
 
+## 启动初始化诊断（issue #8）
+
+真机反馈首页曾长期停在"正在准备本地书库"。原因是任一异步步骤不回调
+（或同步抛异常）时，UI 永远维持初始文案，而用户看不到手表日志。现在
+`pages/index/index.js` 把初始化改成显式状态机，**无日志也能从屏幕定位**：
+
+- 阶段文案：`初始化 1/5：进入首页` → `2/5 目录 books/temp/progress`
+  → `3/5 读取 books.json` → `4/5 检查旧 demo` → 完成
+  （`本地书库就绪（N 本）` 或 `书库为空，等待手机传书`）。
+- 超时兜底：10 秒（测试可注入更短值）未完成则显示
+  `书库初始化超时：阶段=<卡住的阶段>`。超时**不会**清空目录、重启循环
+  或伪造成功。
+- 错误码直接上屏（`status(...)` 括号内）：
+  `E_PREPARE_THROW` / `E_DIRS_books|temp|progress` / `E_INDEX_READ`
+  / `E_INIT_TIMEOUT` / `E_DEMO_MOVE_<code>` / `E_DEMO_STAT` / `E_DEMO_DIGEST`。
+  同步异常由 try/catch 兜底，异步结果带 token 校验，过时回调不会覆盖
+  新状态；`onDestroy` 清理定时器。
+- 失败时屏幕出现"重试"文本按钮（`retryInit`），不必卸载应用。
+- Wear Engine 初始化与本地书库**分开** try/catch：传书/授权异常只在
+  底部 `transferStatus` 显示，绝不阻塞离线书架启动。
+
+`storage/BookStorage.js` 的每个 `access`/`mkdir` 都只结算一次回调，带
+`setOperationTimeout`（默认 8s）无回调兜底，并保留真实错误 code；目录创建
+失败会带上阶段名。`storage/LibraryIndex.js` 用 `onDiag` 区分**首次安装的
+301（missing）**与真正的 **I/O/参数错误（error）**，不再把两者都当成空书架；
+队列加 `setQueueTimeout`（默认 9s）看门狗，单个操作不回调只释放队列、
+不伪造成功，后续 `listBooks` 不会被永久卡住。
+
+回归：`tests/watch_init_diagnostics.test.mjs`（空书架、已有书、301→mkdir、
+mkdir 202、readText 300、无回调超时、重试、Wear Engine 隔离、队列看门狗）。
+**这些均以 Node 文件桩验证；GT 4 真机最终验证仍待完成，故本 issue 暂不可关闭。**
+
 ## 未完成
 
 - 手机发书 → 手表接收文件 → 校验 → 加入书架的完整闭环；Wear Engine 文件通道回调字段待真机确认。

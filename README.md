@@ -20,6 +20,7 @@
 - 双端身份分离：`PHONE_SELF`（手机身份，手表验证来源）与 `WATCH_PEER`（手表身份，手机作为 remoteApp）；证书指纹由 CI 从 Secrets 注入**手表 JS 与 Manifest supportLists 两处**，空指纹明确禁用发送；构建后用 `hap-sign-tool` 验签。
 - 手机端 Wear Engine 发送：设备发现、显式选择目标、`transferFile` 文件通道（句柄终态关闭）、每轮重试重新注册 RESULT waiter（上传/回执超时分离）、取消接 `cancelFileTransfer` 并通知手表清理；等待手表 RESULT 回执才认定入库；**Wear Engine 真机互通待验证**。应用级 Client ID 元数据（`module.metadata.client_id`，issue #6）已写入并在最终签名 HAP 中构建期校验（`METADATA_OK`）；设备发现对确定性错误（`1008509999`）不自动重试，仅在途串行 + 短暂错误有限退避（见 [WEAR_ENGINE_CLIENT_ID](docs/WEAR_ENGINE_CLIENT_ID.md)）。
 - Wear Engine 消息接收入口在手机指纹尚未注入时停用；未完成真实传书。
+- 手表首页启动初始化改成可见状态机（issue #8）：阶段文案 `初始化 N/5`、10s 超时兜底、屏幕级错误码（`E_DIRS_*`/`E_INDEX_READ`/`E_INIT_TIMEOUT` 等）、失败可点击重试；`BookStorage` 异步操作超时守卫、`LibraryIndex` 队列看门狗并区分"无索引(301)"与"文件系统异常"，Wear Engine 初始化与离线书架隔离；回归见 `tests/watch_init_diagnostics.test.mjs`（**真机最终验证待做，暂不可关闭**）。
 - 第三方示例借鉴、原作者 MIT 声明：[来源说明](docs/REFERENCES.md)、[版权说明](third_party/NOTICE.md)。
 - Node 回归测试（分页/ZIP/协议/SHA-256/工具/接收逻辑/接收闭环/静态契约）可运行；**CI 通过不等于 HAP 构建成功，也不等于真机互通**。
 
