@@ -181,13 +181,21 @@ type        : debug
 
 ```bash
 # 1) 构建（产出单 BIN 的 Debug 签名 HAP）
+#    不带书（与原命令一致，书架为空）：
 tools/build_watch_lite.sh debug
+#    带内置书（把目录里顶层 *.txt 编译成内置 JS 数据模块，见 issue #10）：
+WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 # 2) 推到已授权、且已配对手表的中间手机（示例：nova 7 Pro）
 adb -s TNL0220908013936 push \
   apps/watch/entry/build/default/outputs/default/entry-default-debug-signed.hap \
-  /sdcard/haps/suyue-watch-con.xiwei.suyue.gt4-debug-signed.hap
+  /sdcard/haps/suyue-watch-issue10-con.xiwei.suyue.gt4-debug-signed.hap
 ```
+
+**带内置书要点（issue #10）**：正文以 16 KiB/块的 base64 JS 数据模块**只进入阅读页
+bundle**（书架 bundle 仍很小、**启动不加载正文**）；`BOOKS_IN_BIN_OK count=N` 证明内容
+真的进了内部单 BIN；`WATCH_BOOKS_BAKED=N` 为内置本数。合计 >2 MiB 时生成器打印告警
+（真机内存占用未验证，建议先用小书/单本验证再扩容）。**私人正文不进 git/CI/日志。**
 
 3) 打开手机「应用调测助手」→ 该文件 → 选择配对的 HUAWEI WATCH GT 4 →
    解包 → 蓝牙传输 → 手表安装。`/sdcard/haps/` 里**只保留这一个**签名包，
@@ -206,17 +214,16 @@ adb -s TNL0220908013936 push \
 1. DevEco Assistant / HDEA 经配对手机中转安装到 GT 4（本仓库当前主路径）。
 2. 若 Pocket 2（HarmonyOS 7）无法运行对应安装助手，寻找实际兼容的安卓/鸿蒙旧手机做中转。
 
-安装后验证清单：
+安装后验证清单（issue #10 一次性真机验收）：
 - [ ] 应用出现在手表桌面，名称为「素阅」
-- [ ] 本地测试书可打开、前后翻页、退出重进恢复进度
+- [ ] **启动立即出现书架**，不再停在「正在准备本地书库 / 导入内置书籍 / 读取 books.json 第 4 步」
+- [ ] 内置书（标题旁标「内置」）出现在书架，点开显示**真实正文**；内置书不能删除（提示不可删除）
+- [ ] 触屏前后翻页正确，无吞字/重字/中文乱码；字号 14–32 能连续调整且重排正确
+- [ ] 日/夜切换正常；退出重进、切换书目后**各自进度独立恢复**（字号/主题/位置）
+- [ ] 覆盖安装（不卸载）后已有书与进度仍在；不内置任何书时不破坏手机传书路径
 - [ ] 圆屏 466×466 安全区域内文字不被裁切
-- [ ] 表冠旋转是否真的下发到 `onCrownChange`（读 `pageHint` 是否出现
-      "表冠待真机验证"即可确认隐藏 slider 挂载成功）；未送达则维持触屏
-      翻页，并按实测手感调整 `reader/CrownInput.js` 的 `STEPS_PER_PAGE`
-- [ ] `font-size` 是否真能取 14–32px 的连续值（SDK 的 CSS 配置对
-      `line-height` 标注支持 v3.0，但 `font-size` 条目写着"仅支持
-      30px 和 38px"，该说明归属哪个组件尚不明确，需真机核对；
-      `line-height` 在编译期会出非致命告警）
+- [ ] 表冠旋转是否真的下发到 `onCrownChange`（未送达则维持触屏翻页）
+- [ ] `font-size` 是否真能取 14–32px 的连续值（SDK 对 `font-size` 的说明不明确，需真机核对）
 
 ## 已知未决
 

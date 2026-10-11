@@ -42,9 +42,13 @@
 # 本地构建产物投放目录（HAP 已被上面的 *.hap 挡住，这里再显式兜一层）
 /dist/
 
-# 手表内置书籍构建资源（issue #7）：tools/build_watch_lite.sh 创建并
-# EXIT 清理的临时 rawfile。本地私人书库/临时构建目录同样绝不入库——
+# 手表内置书籍构建资源（issue #10）：tools/build_watch_lite.sh 构建期
+# 生成到 apps/watch/.../MainAbility/books/ 的 JS 正文模块，构建结束由
+# trap 还原为仓库里的空默认值。下面再兜一层，万一被中断也不入库——
 # 私人小说正文不得提交到公开仓库，也不得打印进日志。
+apps/watch/entry/src/main/js/MainAbility/books/BookText_*.g.js
+apps/watch/entry/src/main/js/MainAbility/books/books_report.json
+# 旧的 rawfile 资源目录（issue #7 遗留，已弃用）
 apps/watch/entry/src/main/resources/rawfile/
 /watch-books/
 .watch-books-build/

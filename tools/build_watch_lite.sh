@@ -15,7 +15,7 @@ PRODUCT="${PRODUCT:-default}"
 if [ "$MODE" != "debug" ] && [ "$MODE" != "release" ]; then
   echo "usage: $0 [debug|release]" >&2
   echo "       (optional) WATCH_BOOKS_DIR=/path/to/txt-dir $0 debug" >&2
-  echo "       把选定 TXT 内置进 HAP 书库，见 issue #7。" >&2
+  echo "       把选定 TXT 编译成内置 JS 数据模块，见 issue #10。" >&2
   exit 2
 fi
 
@@ -33,41 +33,41 @@ OUT_DIR="entry/build/default/outputs/default"
 rm -rf entry/build
 mkdir -p "$OUT_DIR"
 
-# ---- 内置书籍（issue #7）---------------------------------------------
+# ---- 内置书籍（issue #10）---------------------------------------------
 # 可选入口（向后兼容，不带变量＝与以前完全一致）：
 #   WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
-#   · 把用户选定 TXT 规范化为**临时** Lite 构建资源
-#     apps/watch/entry/src/main/resources/rawfile/gt4books/，
-#     交给 hvigor 真正打进 entry.bin（绝不是签名后补外层 ZIP）；
-#   · 无论成功失败，EXIT 时都删除该临时目录，下一次「无书」构建
-#     不会被上一次的私人书污染；
-#   · 私人正文既不进仓库、也不进日志（只打印书名与字节数）。
-RAWFILE_DIR="$REPO_ROOT/apps/watch/entry/src/main/resources/rawfile"
-BOOK_RESOURCE_DIR="$RAWFILE_DIR/gt4books"
-BOOKS_MANIFEST=""
-BOOKS_STAGED=0
+# 构建期把选定 TXT 生成为 **JS 数据模块**写入
+#   apps/watch/entry/src/main/js/MainAbility/books/
+#   （BookCatalog.g.js 仅元数据 / BookText_<id>.g.js 分块正文 /
+#     BookRegistry.g.js 访问器），由 webpack 真正打包进 entry.bin。
+# 为什么不用 rawfile：官方 Lite 示例只用 internal://app/... 私有目录，
+# JS 没有读 internal://app/rawfile/... 的通路（issue #10 实测结论）。
+# 仓库里的 books/ 是空默认值：带书构建前先备份、构建后由 trap 还原，
+# 私人正文既不进仓库、也不进日志（只打印书名与字节数）。
+BOOKS_JS_DIR="$REPO_ROOT/apps/watch/entry/src/main/js/MainAbility/books"
+BOOKS_REPORT=""
+BOOKS_BACKUP=""
 
 cleanup_books() {
-  if [ "$BOOKS_STAGED" = "1" ]; then
-    rm -rf "$BOOK_RESOURCE_DIR"
-    rmdir "$RAWFILE_DIR" 2>/dev/null || true
-    BOOKS_STAGED=0
+  if [ -n "$BOOKS_BACKUP" ] && [ -d "$BOOKS_BACKUP" ]; then
+    rm -rf "$BOOKS_JS_DIR"
+    mv "$BOOKS_BACKUP/books" "$BOOKS_JS_DIR"
+    rm -rf "$BOOKS_BACKUP"
+    BOOKS_BACKUP=""
   fi
 }
 trap cleanup_books EXIT
 
 if [ -n "${WATCH_BOOKS_DIR:-}" ]; then
-  # 先置位：prepare 中途失败也要由 trap 清干净。
-  BOOKS_STAGED=1
-  python3 "$REPO_ROOT/tools/prepare_watch_books.py" \
+  # 先备份提交的默认空实现：generator 会清空并重建该目录，
+  # 中途失败也要由 trap 还原。
+  BOOKS_BACKUP="$(mktemp -d)"
+  cp -a "$BOOKS_JS_DIR" "$BOOKS_BACKUP/books"
+  python3 "$REPO_ROOT/tools/generate_watch_book_modules.py" \
     --books-dir "$WATCH_BOOKS_DIR" \
-    --resource-dir "$BOOK_RESOURCE_DIR"
-  BOOKS_MANIFEST="$BOOK_RESOURCE_DIR/manifest.json"
+    --out-dir "$BOOKS_JS_DIR"
+  BOOKS_REPORT="$BOOKS_JS_DIR/books_report.json"
   echo "WATCH_BOOKS_STAGED=1"
-else
-  # 无指定书籍：清掉可能残留的临时资源，保持源码树干净。
-  rm -rf "$BOOK_RESOURCE_DIR"
-  rmdir "$RAWFILE_DIR" 2>/dev/null || true
 fi
 
 "$HVIGORW" --mode module -p product="$PRODUCT" -p buildMode="$MODE" assembleHap --no-daemon
@@ -255,18 +255,17 @@ ARTIFACT_CHECK_ARGS=(
 if [ -n "$SIGNED_BIN_SHA256" ]; then
   ARTIFACT_CHECK_ARGS+=(--expect-bin-sha256 "$SIGNED_BIN_SHA256")
 fi
-# 内置书籍（issue #7）：核对**内层 entry.bin** 真的带了
-# rawfile/gt4books/*.txt 与 manifest.json（只看源码目录或外层
-# ZIP 都不算数）。
-if [ -n "$BOOKS_MANIFEST" ]; then
-  ARTIFACT_CHECK_ARGS+=(--expect-books-manifest "$BOOKS_MANIFEST")
+# 内置书籍（issue #10）：核对**内层 entry.bin** 真的带了每本内置书的
+# bookId / 书名 / 正文块（只看源码目录或外层 ZIP 都不算数）。
+if [ -n "$BOOKS_REPORT" ]; then
+  ARTIFACT_CHECK_ARGS+=(--expect-books-report "$BOOKS_REPORT")
 fi
 "$REPO_ROOT/tests/build_artifact_check.sh" "${ARTIFACT_CHECK_ARGS[@]}"
 
-if [ -n "$BOOKS_MANIFEST" ]; then
+if [ -n "$BOOKS_REPORT" ]; then
   BOOKS_COUNT="$(python3 -c \
     'import json,sys; print(len(json.load(open(sys.argv[1])).get("books", [])))' \
-    "$BOOKS_MANIFEST" 2>/dev/null || echo unknown)"
+    "$BOOKS_REPORT" 2>/dev/null || echo unknown)"
   echo "WATCH_BOOKS_BAKED=${BOOKS_COUNT:-unknown}"
 fi
 

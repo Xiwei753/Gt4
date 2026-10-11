@@ -97,7 +97,9 @@ const watchFiles = [
   'storage/BookStorage.js',
   'storage/LibraryIndex.js',
   'storage/ProgressStore.js',
-  'storage/BundledBookImporter.js',
+  'storage/BundledBookSource.js',
+  'books/BookCatalog.g.js',
+  'books/BookRegistry.g.js',
   'wear/IncomingBookReceiver.js',
   'wear/TransferLogic.js',
   'wear/WearReceiver.js',
@@ -147,19 +149,36 @@ assert.ok(shelfHml.includes('class="book-info" onclick="openBook($idx)"'),
 assert.ok(shelfHml.includes('class="book-delete" onclick="askDelete($idx)"'),
   'delete must have its own click target');
 assert.ok(watchIndex.includes("event.type === 'RESULT'") &&
-  watchIndex.includes('this.refresh();'),
-  'watch shelf must refresh after a successful receive');
-// issue #8：启动初始化必须有可见阶段、超时兜底、错误码和重试入口，
-// 不能再永久停在"正在准备本地书库"。
-assert.ok(watchIndex.includes('E_INIT_TIMEOUT') &&
-  watchIndex.includes('setTimeout'),
-  'shelf init must have a timeout fallback');
-assert.ok(watchIndex.includes('E_DIRS_') &&
-  watchIndex.includes('E_INDEX_READ'),
-  'shelf init must surface stage error codes on screen');
-assert.ok(watchIndex.includes('retryInit') &&
-  shelfHml.includes('onclick="retryInit"'),
-  'a failed shelf init must offer an on-screen retry');
+  watchIndex.includes('this.loadExternal();'),
+  'watch shelf must refresh external books after a successful receive');
+// issue #10：开机即书架——书架页**同步**渲染内置书单（BookCatalog），
+// 不等待任何文件接口/导入/队列；正文数据只在阅读页 import。
+assert.ok(watchIndex.includes('BookCatalog.g.js') &&
+  watchIndex.includes('bundledList'),
+  'shelf must render the build-time catalog synchronously');
+assert.ok(!watchIndex.includes('importBundledBooks') &&
+  !watchIndex.includes('BundledBookImporter'),
+  'shelf must not run the old blocking bundled importer');
+assert.ok(watchIndex.includes('loadExternal'),
+  'external books load in the background, built-in shelf does not wait');
+const bookSource = read(
+  'apps/watch/entry/src/main/js/MainAbility/storage/BundledBookSource.js');
+assert.ok(bookSource.includes('readBundledWindow') &&
+  bookSource.includes('decodeBase64') &&
+  bookSource.includes('CHUNK_BYTES'),
+  'bundled source must read byte windows from JS chunks');
+const catalogSrc = read(
+  'apps/watch/entry/src/main/js/MainAbility/books/BookCatalog.g.js');
+assert.ok(catalogSrc.includes('export var BOOKS'),
+  'catalog module must export BOOKS metadata');
+const registrySrc = read(
+  'apps/watch/entry/src/main/js/MainAbility/books/BookRegistry.g.js');
+assert.ok(registrySrc.includes('export function getChunk') &&
+  registrySrc.includes('CHUNK_BYTES'),
+  'registry must expose chunk access');
+assert.ok(watchReader.includes('isBundled') &&
+  watchReader.includes('readBundledWindow'),
+  'reader must read bundled text from JS chunks (not file API)');
 const watchStorage = read('apps/watch/entry/src/main/js/MainAbility/storage/BookStorage.js');
 assert.ok(watchStorage.includes('setOperationTimeout'),
   'storage file ops must have a no-callback timeout guard');
@@ -173,9 +192,6 @@ assert.ok(watchIndexStore.includes('readIndexText') &&
   'index read must be chunked via readArrayBuffer');
 assert.ok(!watchIndexStore.includes('length: 65536'),
   'index read must not request 64 KB in one readText call');
-assert.ok(watchIndex.includes('indexApi') &&
-  watchIndex.includes('索引读取失败'),
-  'shelf must show the failing interface and real code on index error');
 
 // ---- Lite 运行时能力守门 ----
 // 依据（本机 HarmonyOS Command Line Tools 26.0.0 / API 26 实测）：
@@ -500,15 +516,14 @@ assert.ok(mainControls.includes('上页') &&
 assert.ok(!mainControls.includes('A+'),
   'reader main row must not hold font controls');
 
-// P2-14：demo 迁移必须条件化，不得回造假元数据。
-assert.ok(watchIndex.includes('migrateDemo'),
-  'index must migrate the demo conditionally');
-assert.ok(watchIndex.includes('file.access'),
-  'migration must check the legacy file exists');
+// issue #10：内置书单取代旧的 demo 迁移作为书架先决条件；
+// 仍不得回造假元数据。
+assert.ok(watchIndex.includes('mergeShelf'),
+  'shelf must merge built-in and external lists');
 assert.ok(!watchIndex.includes('fail: () => this.registerDemo()'),
-  'migration must not register on failure');
+  'shelf must not register on failure');
 assert.ok(!watchIndex.includes('bytes: 0'),
-  'migration must not fabricate metadata');
+  'shelf must not fabricate metadata');
 
 // P2-15（issue #2 更新）：表冠不再是"永远返回 false"的占位。
 // 已按上游 slider/rotation 机制接入（见上方 crownProxy 检查），
@@ -595,8 +610,8 @@ assert.ok(!existsSync(
   'demo generator must be deleted');
 assert.ok(!watchIndex.includes('initializeLibrary'),
   'index page must not call any demo generator');
-assert.ok(watchIndex.includes("if (!digest)"),
-  'migration must abort instead of writing an empty digest');
+assert.ok(watchIndex.includes('BookCatalog.g.js'),
+  'index page must build the shelf from the static catalog');
 
 // P1-6：容器检查不得宣称验签；workflow 必须有
 // 官方 hap-sign-tool 验签步骤。

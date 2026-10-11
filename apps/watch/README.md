@@ -102,121 +102,87 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 - 安装步骤与待验证清单：[../../docs/WATCH_INSTALL.md](../../docs/WATCH_INSTALL.md)。
 - **尚未在任何真机上安装或运行；`6.1.1(24)` 版本号待 GT 4 真机核对。**
 
-## 启动初始化诊断（issue #8）
+## 书架启动（issue #10，取代 #7/#8 的 books.json 初始化链）
 
-真机反馈首页曾长期停在"正在准备本地书库"。原因是任一异步步骤不回调
-（或同步抛异常）时，UI 永远维持初始文案，而用户看不到手表日志。现在
-`pages/index/index.js` 把初始化改成显式状态机，**无日志也能从屏幕定位**：
+真机反馈（#7 → #8 → #9）证明"先等 books.json 初始化"这条路在 GT 4 上不可靠：会依次卡在
+「正在准备本地书库」「导入内置书籍超时」「读取 books.json（第 4 步）」。issue #10 **换掉这条启动架构**：
 
-- 阶段文案：`初始化 1/5：进入首页` → `2/5 目录 books/temp/progress`
-  → `3/5 导入内置书籍`（issue #7 的导入桥在**后台**跑，不阻塞书架）
-  → `4/5 读取 books.json` → `5/5 检查旧 demo` → 完成
-  （`本地书库就绪（N 本）` 或 `书库为空，等待手机传书`）。
-- 超时兜底：10 秒（测试可注入更短值）未完成则显示
-  `书库初始化超时：阶段=<卡住的阶段>`。超时**不会**清空目录、重启循环
-  或伪造成功。
-- 错误码直接上屏（`status(...)` 括号内）：
-  `E_PREPARE_THROW` / `E_DIRS_books|temp|progress` / `E_INDEX_READ`
-  / `E_INIT_TIMEOUT` / `E_DEMO_MOVE_<code>` / `E_DEMO_STAT` / `E_DEMO_DIGEST`。
-- 索引读取失败时上屏**真实接口名与错误码**，例如
-  `索引读取失败 readArrayBuffer 302`，而不是笼统的"初始化失败"。
-  同步异常由 try/catch 兜底，异步结果带 token 校验，过时回调不会覆盖
-  新状态；`onDestroy` 清理定时器。
-- 失败时屏幕出现"重试"文本按钮（`retryInit`），不必卸载应用。
-- Wear Engine 初始化与本地书库**分开** try/catch：传书/授权异常只在
-  底部 `transferStatus` 显示，绝不阻塞离线书架启动。
+- **启动不等异步**：`pages/index/index.js` 的 `onInit()` 先用编译期书单
+  `books/BookCatalog.g.js`（**只有元数据，没有正文**）**同步**渲染书架并置 `status`，
+  随后才在后台 `loadExternal()`（`ensureDirs` → `listBooks`）合并手机传书的外部书。
+- 首次安装没有 `books.json`（真实 301）→ **立刻显示空书架**，不再有"第 4 步超时"。
+- 外部书加载失败、或文件接口完全不回调，**只**记 `console.error('[suyue] E_EXTERNAL_*')`，
+  不阻塞、不覆盖内置书架；损坏的 `books.json` **不会被删除或清空**。
+- 书架行标来源：`内置` / `手机`；内置书**不可删除**（提示「《X》是内置书籍，不可删除」），
+  手机书仍需二次点击确认删除。
+- 已移除：#9 的手动「文件自检」入口、`pages/probe/*`、`WatchFileProbe.js`、
+  `BundledBookImporter.js`，以及启动前置链 `prepareLibrary/readIndex/migrateDemo/...` 与重复看门狗。
+- Wear Engine 初始化与本地书库分开 try/catch，传书异常只体现在底部 `transferStatus`。
 
-`storage/BookStorage.js` 的每个 `access`/`mkdir` 都只结算一次回调，带
-`setOperationTimeout`（默认 8s）无回调兜底，并保留真实错误 code；目录创建
-失败会带上阶段名。
+`storage/BookStorage.js` 仍保留 settle-once + `setOperationTimeout`（默认 8s）无回调兜底。
 
-`storage/LibraryIndex.js` 读取 `books.json` **不再用单次
-`file.readText({length: 65536})`**（Lite `readText` 上限 4 KB，超过即 302，
-且多本内置书会让索引超过 4 KB）。改为**分块 `file.readArrayBuffer`**：
-以 4 KB（`TEXT_CHUNK`）从位置 0 逐块读字节，边读边解析，累积到能
-`JSON.parse` 出数组即停；整体拼接后再用 `util/Utf8.js` 的 `decodeUtf8Bytes`
-**一次性解码**，因此中文标题跨块边界也不会被截断。上限 `MAX_INDEX_TEXT`
-= 1 MiB，超限报 `too_long`。`onDiag` 现在带 `api` 字段，区分**首次安装的
-301（missing）**与真正的 **I/O/参数错误（error，附真实 code 与 api）**，
-不再把两者都当成空书架；读失败时**不会**用 `[]` 覆盖旧索引、不会清理
-目录、不会删除 `books/<id>.txt` 或 `progress/<id>.json`。
-队列加 `setQueueTimeout`（默认 9s）看门狗，单个操作不回调只释放队列、
-不伪造成功，后续 `listBooks` 不会被永久卡住。
+`storage/LibraryIndex.js` 仍是**外部书**目录管理器，保留 #8 的耐久修复：读 `books.json`
+不再用单次 `readText({length: 65536})`（Lite 上限 4 KB，超限即 302），改为先 `access`/`get`
+探测再分级读；`onDiag` 区分 **301（missing）** 与真实错误（error，附 api+code）；读失败
+**绝不**用 `[]` 覆盖旧索引、不删书/进度；写索引用 tmp 回读校验后安全替换并保留 `.bak` 备份，
+队列看门狗无回调时向调用方回报结构化超时而不伪造成功。
 
-回归：`tests/watch_init_diagnostics.test.mjs`（空书架、已有书、301→mkdir、
-mkdir 202、readArrayBuffer 300、无回调超时、重试、Wear Engine 隔离、队列
-看门狗）与 `tests/watch_index_read.test.mjs`（分块读；区分 301/202/300/超时；
->4 KB 与中文跨块边界均不丢条目）。`tests/helpers/system_file_stub.mjs` 已
-模拟真机 `readText` 的 4 KB 上限（超限返回 302，可用 `.readtext_max` /
-`.readtext_302` 注入）。
+回归：`tests/watch_shelf_startup.test.mjs`（同步渲染书架、文件层全死也不卡启动、损坏索引不被删、
+后台合并外部书、二次删除确认、传书状态隔离）；`tests/watch_index_read.test.mjs`、
+`tests/watch_library_index.test.mjs`。
 
-**这些均以 Node 文件桩验证；GT 4 真机最终验证仍待完成，故本 issue 暂不可关闭。**
+## 内置 TXT：编译期 JS 数据模块（issue #10）
 
-## 构建期内置书籍（issue #7）
-
-可选的构建期入口，把本机挑选的 TXT 直接打进 GT4 的 HAP，安装后出现在**现有书架**、用**现有阅读器**打开——不新增第二套书库，也不替代手机传书。
+**为什么不用 rawfile**：官方 Lite 示例（`sportwatch-how-to-read-large-text-files`、
+`sportwatch-how-to-do-file-operations`）全部只用 `internal://app/...`，**没有一个读
+`internal://app/rawfile/...`**；与更早的源码结论一致——Lite `@system.file` 只把
+`internal://app` 映射到应用私有数据目录，**打包进 HAP 的 rawfile 没有 JS 可读接口**。
+因此按既定决定改为**编译期把正文切成小 JS 数据模块**直接读，**不**先写入 `internal://app` 再 `readText`。
 
 用法：
 
 ```bash
-# 不带书：与原命令完全一致，不产生任何内置书籍
+# 不带书：与原命令一致，使用仓库里的空书单（书架为空）
 tools/build_watch_lite.sh debug
 
-# 带书：把一个目录里的顶层 *.txt 全部内置（不递归、不看子目录）
+# 带书：把目录里顶层 *.txt 编译成内置 JS 数据模块
 WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 ```
 
-处理规则（`tools/prepare_watch_books.py`，构建机执行）：
+构建期（`tools/generate_watch_book_modules.py`，复用 `prepare_watch_books.py` 的编码/去重规则）：
 
-- 只认顶层 `*.txt`（不支持 EPUB，不做递归扫描）；按 `(文件名小写, 原名)` 稳定排序。
-- 编码：UTF-8（含 BOM 自动去除）；带 BOM 的 UTF-16LE/BE 自动转 UTF-8；UTF-8 失败时**确定性回退 GB18030**（中文小说常见 GBK/GB2312 的超集，标准可复现）再转 UTF-8；两者都失败才**直接报错**，不在手表上猜编码。
-- `bookId` = 规范化 UTF-8 内容 SHA-256 前 16 位十六进制，与现有书库口径一致；同时写入 `bytes`、全量 `sha256`、`encoding:'utf-8'`、`chapters:[]`。
-- 书名取文件名（去扩展名）。
-- 行为明确：**同内容重复**只保留排序最靠前的一本并打印 `跳过重复内容`；**同名不同内容**另一本自动加 ` (2)`、` (3)`。
-- 单本上限默认 8 MiB（`--max-bytes` 可调）；超限、路径不存在、目录里没有可用 TXT、UTF-8/GB18030 都无法解码、空书名都会**非零退出**，绝不产出一个“看起来成功但少了书”的包。
-- 构建后打印 `WATCH_BOOKS_ADDED title=.. bytes=.. id=..`、`WATCH_BOOKS_BAKED=<n>`，**从不打印书本正文**。
+- 只认顶层 `*.txt`，稳定排序；UTF-8（含 BOM）/ UTF-16(BOM) / **确定性回退 GB18030**，都失败即非零退出；
+  `bookId` = 规范化 UTF-8 的 SHA-256 前 16 位；同内容去重、同名加 ` (2)`；单本上限默认 8 MiB。**从不打印正文**。
+- 生成到 `apps/watch/entry/src/main/js/MainAbility/books/`（构建后 trap 还原为空默认值）：
+  - `BookCatalog.g.js` = `export var BOOKS = [{bookId,title,bytes,chunks}]` —— **仅元数据**；
+  - `BookText_<bookId>.g.js` = 16 KiB/块，base64 放在**函数体内**（`{0:function(){return '<b64>';},...}` + `getChunk(index)`）；
+  - `BookRegistry.g.js` = `getChunk(bookId,index)` 按 id 分发；另有 `books_report.json` 供产物校验。
+- 产物校验：`tests/build_artifact_check.sh --expect-books-report <json>` 解出内部唯一 `*.bin`，
+  逐本确认 `bookId`、`title` 与 `chunk0Prefix`（真实 base64 前缀）字节都在，打印 `BOOKS_IN_BIN_OK count=N`。
+- `.gitignore` 屏蔽 `books/BookText_*.g.js` 与 `books_report.json`，**私人正文不进公开仓库**。
 
-放置与清理：脚本把书放进临时资源目录 `entry/src/main/resources/rawfile/gt4books/`（Hvigor 会真实处理并嵌入内部 `entry.bin`），并注册 `EXIT` trap **无条件清理**，因此某次带书的构建不会污染下一次不带书的构建；该目录与常见个人书库已在 `.gitignore` 中屏蔽，**私人小说正文不会进入公开仓库**。
+阅读（`storage/BundledBookSource.js` + `pages/reader/reader.js`）：
 
-产物校验：`tests/build_artifact_check.sh --expect-books-manifest <manifest.json>` 会解出 HAP 内那唯一的 `*.bin`，确认其中真的带了 `rawfile/gt4books` 目录、每本书的 `<bookId>.txt` 文件名、每本书的**真实内容字节**与 `manifest.json` 字节，而不仅是源码目录或外层 ZIP；通过时打印 `BOOKS_IN_BIN_OK count=N`。
+- 书架只 import `BookCatalog.g.js`；**只有阅读页**才 import `BookRegistry.g.js`（含全部正文）。
+- `readBundledWindow(bookId, offset, size, cb)` 按**字节**取窗口：整块解码所涉 chunk（`decodeBase64`）再拼接，
+  保证中文跨块边界不截断；进度仍是字节 offset，兼容现有 `progress/<bookId>.json`。
+- 内置书用 `readBundledWindow` 分页，手机书仍走原 `readBytes`；字号 14–32、日夜、触屏翻页、按书独立进度均已具备。
 
-### 运行时导入桥接（issue #7，含真机失败修正）
+**内存诚实结论（尚未真机验证）**：Node/V8 实测 `import BookRegistry` 会把**模块源文本**留在堆里
+（≈2× 源大小；5.4 MB 正文 → +13.9 MB 堆），单次 `getChunk` 只再 +0.18 MB。JerryScript 快照的字面量
+驻留方式**只能在真机测**。缓解：正文**只**进阅读页 bundle（实测书架 bundle 70 KB、阅读页 bundle 2.1 MB），
+**启动不加载正文**；`WATCH_BOOKS_DIR` 合计 >2 MiB 时生成器打印告警，建议先小书实测再扩容。
 
-`storage/BundledBookImporter.js` 由 `pages/index/index.js` 的 `prepareLibrary()`
-在 **`3/5` 阶段以后台方式启动**，随即立刻进入 `readIndex`：**内置书籍导入无论
-成功、失败、超时还是包内没有资源，都不会再卡住书架**——正常显示已有书架或
-空书架，导入失败只体现在独立的 `bundledStatus` 提示行。
+构建实测（本机 Hvigor，单 BIN 签名，bundle `con.xiwei.suyue.gt4`）：
 
-资源路线（按 Lite Wearable 参考资料，**需真机实测**）：`rawfile` 按只读处理，
-**不假设可按字节窗口直接读**。导入器把
-`internal://app/rawfile/gt4books/<bookId>.txt` 用 `file.copy` 整文件复制到应用
-私有暂存的 `internal://app/gt4reader/temp/<bookId>`，再从**私有暂存**分块读、
-校验字节数与 SHA-256，最后用现有 `commitVerifiedBook` + `LibraryIndex.addBook`
-落盘登记。候选资源基路径依次探测（`internal://app/rawfile/gt4books/`、
-`.../assets/entry/resources/rawfile/gt4books/`、
-`.../entry/resources/rawfile/gt4books/`），谁先读出合法 `manifest.json` 用谁。
+| 构建 | 正文合计 | HAP 大小 |
+| --- | --- | --- |
+| 不带书 | 0 | 345,732 B |
+| 1 本小书 | 355,144 B | 823,090 B |
+| 1 本长篇 | 1,156,256 B | 1,895,534 B |
+| 3 本（本次交付） | 1,558,122 B | 2,436,710 B |
 
-- **每步都有有限超时**（`op()` settle-once；小操作默认 8s、整文件复制默认
-  120s，可用 `setImportTimeout`/`setCopyTimeout` 调整），同步异常也兜底；
-  超时**绝不算成功**，失败**不会**预写标记。
-- 屏幕可见阶段：`读取 bundled.json` / `检查 rawfile/manifest` / `复制第 n 本` /
-  `校验/落盘` / `写索引` / `标记已处理`；失败显示
-  `内置书籍导入失败：<步骤> <原因>（code=<真实错误码>）`，不与书架就绪文案混写。
-- `manifest.json` / `bundled.json` 用受控长度分块 `readText`（每块 4096 字节，
-  边读边 `JSON.parse`，上限 256 KiB），**不再使用 65536**，也不忽略 `fail(data,code)`。
-- **幂等、删了不复活**：`internal://app/gt4reader/bundled.json` 记录已处理的
-  `bookId`；已存在的书和已删除的书都不会被覆盖或自动复活，绝不重建
-  `books.json`、不动阅读进度；失败只清本次暂存，不入书架。
-- 手机传书路径不受影响。
-
-诚实边界：**真机首启能否从 `internal://app/rawfile/...` 成功 `copy`，取决于该
-版本 SDK/固件，必须用签名 HAP 在 GT 4 实测**（HiLog 不可见时以屏幕阶段 +
-错误码为准）；本机 Node 桩只能验证逻辑，不代表真机行为。GT 4 安装本身仍被
-issue #4 的 `errorCode 10` 阻断，因此**内置书是否真的能在真机打开阅读，尚未
-验证**。回归：`tests/watch_bundled_import.test.mjs`（复制成功、幂等/删了不复活、
-无资源、读超时、复制失败/超时、摘要不符、书架后台集成）；
-`tests/watch_bundled_books.test.mjs` 做静态契约。
-
+**GT 4 真机闭环（打开内置书、翻页、字号、日夜、进度）仍待实测，本 issue 暂不可关闭。**
 ## 未完成
 
 - 手机发书 → 手表接收文件 → 校验 → 加入书架的完整闭环；Wear Engine 文件通道回调字段待真机确认。

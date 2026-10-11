@@ -14,8 +14,8 @@
 #   - 可选：--expect-bin-sha256 时，ZIP 内提取的
 #     BIN 必须与本次签名输出逐字节一致（是"归档
 #     内容 == 签名产物"，不是"签名前后哈希相同"）；
-#   - 可选：--expect-books-manifest 时，Lite 单 BIN 的
-#     内层 bin 必须真的包含 rawfile/gt4books 下的每本书
+#   - 可选：--expect-books-report 时，Lite 单 BIN 的
+#     内层 bin 必须真的包含每本内置书的 bookId / 书名 / 正文块
 #     （资源路径 + 正文字节）与 manifest.json（issue #7）；
 #   - 非零字节，报告大小与 SHA-256。
 #
@@ -25,7 +25,7 @@
 # （workflow 中的 verify-signature 步骤）。
 set -euo pipefail
 
-HAP="${1:?usage: build_artifact_check.sh <path-to.hap> [--bundle ID] [--device TYPE] [--mode debug|release] [--expect-fingerprint VALUE] [--expect-books-manifest PATH]}"
+HAP="${1:?usage: build_artifact_check.sh <path-to.hap> [--bundle ID] [--device TYPE] [--mode debug|release] [--expect-fingerprint VALUE] [--expect-books-report PATH]}"
 shift || true
 
 BUNDLE=""
@@ -34,7 +34,7 @@ MODE=""
 EXPECT_FINGERPRINT=""
 EXPECT_BIN_SHA256=""
 SOURCE_MANIFEST=""
-EXPECT_BOOKS_MANIFEST=""
+EXPECT_BOOKS_REPORT=""
 EXPECT_METADATA=()
 SINGLE_BIN=0
 MANIFEST_ORIGIN="embedded"
@@ -47,7 +47,7 @@ while [ "$#" -gt 0 ]; do
     --expect-bin-sha256) EXPECT_BIN_SHA256="${2:?--expect-bin-sha256 needs a value}"; shift 2 ;;
     --expect-metadata) EXPECT_METADATA+=("${2:?--expect-metadata needs NAME=VALUE}"); shift 2 ;;
     --source-manifest) SOURCE_MANIFEST="${2:?--source-manifest needs a value}"; shift 2 ;;
-    --expect-books-manifest) EXPECT_BOOKS_MANIFEST="${2:?--expect-books-manifest needs a value}"; shift 2 ;;
+    --expect-books-report) EXPECT_BOOKS_REPORT="${2:?--expect-books-report needs a value}"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -355,27 +355,27 @@ PY
   echo "WARN: 单 .bin HAP 不含顶层 manifest/.bc；包名、指纹、设备类型仅根据本次源码 config.json 校验，不能冒充已验证 bin 内数据。" >&2
 fi
 
-# 8) 内置书籍（issue #7）：必须核对**内层 entry.bin** 真的带了
-#    rawfile/gt4books/*.txt 与 manifest.json。只看源码目录或外层
+# 8) 内置书籍（issue #10）：必须核对**内层 entry.bin** 真的带了每本内置书
+#    的 bookId / 书名 / 正文块（chunk0 base64 前缀）。只看源码目录或外层
 #    ZIP 都不算数——这正是"构建成功其实没打进去"最容易漏掉的地方。
-if [ -n "$EXPECT_BOOKS_MANIFEST" ]; then
+if [ -n "$EXPECT_BOOKS_REPORT" ]; then
   if [ "$SINGLE_BIN" != "1" ]; then
-    echo "FAIL: --expect-books-manifest requires a Lite single-bin HAP (inner entry.bin): $HAP" >&2
+    echo "FAIL: --expect-books-report requires a Lite single-bin HAP (inner entry.bin): $HAP" >&2
     exit 1
   fi
-  if [ ! -f "$EXPECT_BOOKS_MANIFEST" ]; then
-    echo "FAIL: books manifest not found: $EXPECT_BOOKS_MANIFEST" >&2
+  if [ ! -f "$EXPECT_BOOKS_REPORT" ]; then
+    echo "FAIL: books report not found: $EXPECT_BOOKS_REPORT" >&2
     exit 1
   fi
-  if ! BOOKS_OUT="$(python3 - "$HAP" "$EXPECT_BOOKS_MANIFEST" <<'PY'
-import json, os, sys, zipfile
+  if ! BOOKS_OUT="$(python3 - "$HAP" "$EXPECT_BOOKS_REPORT" <<'PY'
+import json, sys, zipfile
 
-hap, manifest_path = sys.argv[1], sys.argv[2]
-with open(manifest_path, encoding="utf-8") as fh:
-    manifest = json.load(fh)
-books = manifest.get("books", [])
+hap, report_path = sys.argv[1], sys.argv[2]
+with open(report_path, encoding="utf-8") as fh:
+    report = json.load(fh)
+books = report.get("books", [])
 if not isinstance(books, list) or not books:
-    raise SystemExit("FAIL: bundled books manifest has no books: %s" % manifest_path)
+    raise SystemExit("FAIL: bundled books report has no books: %s" % report_path)
 
 with zipfile.ZipFile(hap) as z:
     infos = z.infolist()
@@ -383,30 +383,20 @@ with zipfile.ZipFile(hap) as z:
         raise SystemExit("FAIL: not a single-entry HAP: %s" % hap)
     bin_bytes = z.read(infos[0])
 
-base_dir = os.path.dirname(os.path.abspath(manifest_path))
 missing = []
-# 资源表把「目录」与「文件名」分开存（实测：/assets/entry/resources/rawfile/gt4books
-# 与 <bookId>.txt 各为一项），所以不能依赖连续的完整路径字符串。
-if b"rawfile/gt4books" not in bin_bytes:
-    missing.append("rawfile-dir")
 for book in books:
-    name = str(book.get("bookId", "")) + ".txt"
-    if name.encode("utf-8") not in bin_bytes:
-        missing.append("asset-name:" + name)
-    # 不只是名字：真实正文字节也必须真的在 bin 里。
-    book_file = os.path.join(base_dir, name)
-    if not os.path.isfile(book_file):
-        missing.append("source-missing:" + name)
-        continue
-    with open(book_file, "rb") as bh:
-        content = bh.read()
-    if content not in bin_bytes:
-        missing.append("content:" + name)
-
-# 清单自身的字节也必须在 bin 里。
-with open(manifest_path, "rb") as mh:
-    if mh.read() not in bin_bytes:
-        missing.append("manifest.json")
+    bid = str(book.get("bookId", ""))
+    if bid.encode("utf-8") not in bin_bytes:
+        missing.append("bookId:" + bid)
+    title = str(book.get("title", ""))
+    if title and title.encode("utf-8") not in bin_bytes:
+        missing.append("title:" + bid)
+    # 不只是元数据：该书第一块的 base64 正文也必须真的在 bin 里。
+    prefix = str(book.get("chunk0Prefix", ""))
+    if len(prefix) < 32:
+        missing.append("short-prefix:" + bid)
+    elif prefix.encode("ascii", "ignore") not in bin_bytes:
+        missing.append("chunk0:" + bid)
 
 if missing:
     sys.stderr.write(
@@ -416,7 +406,7 @@ if missing:
 print("BOOKS_IN_BIN_OK count=%d" % len(books))
 PY
   )"; then
-    echo "FAIL: bundled book resource check failed: $HAP" >&2
+    echo "FAIL: bundled book module check failed: $HAP" >&2
     exit 1
   fi
   echo "$BOOKS_OUT"

@@ -8,6 +8,8 @@
 import router from '@system.router';
 import { getBook } from '../../storage/LibraryIndex';
 import { openBook, readBytes } from '../../storage/BookStorage';
+import { isBundled, bundledEntry,
+  readBundledWindow } from '../../storage/BundledBookSource';
 import { loadProgress,
   saveProgress } from '../../storage/ProgressStore';
 import { takePage } from '../../reader/PageLayout';
@@ -51,6 +53,19 @@ export default {
       return;
     }
     this.bookId = bookId;
+    // 内置书（issue #10）：正文来自构建期 JS 数据块，无需文件接口；
+    // 直接读进度并分页。外部书仍走原有文件通路。
+    this.bundled = isBundled(bookId);
+    if (this.bundled) {
+      const entry = bundledEntry(bookId);
+      this.title = entry ? entry.title : '内置书籍';
+      loadProgress(bookId, (progress) => {
+        this.history = progress.history;
+        this.applySettings(progress.settings);
+        this.loadPage(progress.offset);
+      });
+      return;
+    }
     openBook(bookId, (state) => {
       if (!state.ok) {
         this.pageHint = '书籍不存在或已删除';
@@ -84,7 +99,8 @@ export default {
     if (this.isLoading || !this.bookId) return;
     this.isLoading = true;
     this.isBusy = true;
-    readBytes(this.bookId, offset, 2048, (data) => {
+    const readSource = this.bundled ? readBundledWindow : readBytes;
+    readSource(this.bookId, offset, 2048, (data) => {
       this.isLoading = false;
       if (!data.ok) {
         this.pageHint = '读取失败：' + data.reason;
