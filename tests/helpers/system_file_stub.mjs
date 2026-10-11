@@ -36,6 +36,17 @@ export default {
   },
   readText(o) {
     try {
+      // 真实 Lite 限制：readText 单次上限 4 KB，超过返回 302。
+      // 注入：.readtext_max 文件覆盖上限；.readtext_302 存在时恒失败 302。
+      if (existsSync(ROOT + '/.readtext_302')) {
+        return fail(o.fail, 302);
+      }
+      const maxFile = ROOT + '/.readtext_max';
+      const max = existsSync(maxFile) ?
+        Number(readFileSync(maxFile, 'utf8')) : 4096;
+      if (typeof o.length === 'number' && o.length > max) {
+        return fail(o.fail, 302);
+      }
       const buf = readFileSync(resolve(o.uri));
       const start = o.position || 0;
       const len = Math.min(o.length || 4096,

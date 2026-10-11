@@ -167,6 +167,15 @@ const watchIndexStore = read('apps/watch/entry/src/main/js/MainAbility/storage/L
 assert.ok(watchIndexStore.includes('setQueueTimeout') &&
   watchIndexStore.includes("'missing'"),
   'index queue must expose a watchdog and distinguish missing vs error');
+// issue #8：索引必须分块读，且不得再用超过 4 KB 的单次 readText。
+assert.ok(watchIndexStore.includes('readIndexText') &&
+  watchIndexStore.includes('readArrayBuffer'),
+  'index read must be chunked via readArrayBuffer');
+assert.ok(!watchIndexStore.includes('length: 65536'),
+  'index read must not request 64 KB in one readText call');
+assert.ok(watchIndex.includes('indexApi') &&
+  watchIndex.includes('索引读取失败'),
+  'shelf must show the failing interface and real code on index error');
 
 // ---- Lite 运行时能力守门 ----
 // 依据（本机 HarmonyOS Command Line Tools 26.0.0 / API 26 实测）：
