@@ -109,7 +109,7 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 `pages/index/index.js` 把初始化改成显式状态机，**无日志也能从屏幕定位**：
 
 - 阶段文案：`初始化 1/5：进入首页` → `2/5 目录 books/temp/progress`
-  → `3/5 导入内置书籍`（issue #7 的导入桥，读不到资源时安全 no-op）
+  → `3/5 导入内置书籍`（issue #7 的导入桥在**后台**跑，不阻塞书架）
   → `4/5 读取 books.json` → `5/5 检查旧 demo` → 完成
   （`本地书库就绪（N 本）` 或 `书库为空，等待手机传书`）。
 - 超时兜底：10 秒（测试可注入更短值）未完成则显示
@@ -163,11 +163,42 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 产物校验：`tests/build_artifact_check.sh --expect-books-manifest <manifest.json>` 会解出 HAP 内那唯一的 `*.bin`，确认其中真的带了 `rawfile/gt4books` 目录、每本书的 `<bookId>.txt` 文件名、每本书的**真实内容字节**与 `manifest.json` 字节，而不仅是源码目录或外层 ZIP；通过时打印 `BOOKS_IN_BIN_OK count=N`。
 
-### 运行时导入桥接与设备侧诚实边界
+### 运行时导入桥接（issue #7，含真机失败修正）
 
-`storage/BundledBookImporter.js` 在 `pages/index/index.js` 的 `prepareLibrary()` 里**只调用一次**，把内置书按块复制进现有可写书库（`internal://app/gt4reader/books/`）、校验长度与摘要后再经 `LibraryIndex.addBook` 登记。它是**幂等**的：`internal://app/gt4reader/bundled.json` 记录了“已处理过的 bookId”，已存在的书和已删除的书都**不会**被覆盖或自动复活，也绝不重建 `books.json`、不动阅读进度；任何失败只清理半成品暂存、不入书架，并打印可诊断日志，绝不卡住书架。
+`storage/BundledBookImporter.js` 由 `pages/index/index.js` 的 `prepareLibrary()`
+在 **`3/5` 阶段以后台方式启动**，随即立刻进入 `readIndex`：**内置书籍导入无论
+成功、失败、超时还是包内没有资源，都不会再卡住书架**——正常显示已有书架或
+空书架，导入失败只体现在独立的 `bundledStatus` 提示行。
 
-诚实说明（与源码一致，非“已支持”）：本机 Lite JS FA 运行时里，打进 HAP 的 `rawfile` **没有 JS 可读接口**——`@system.file` 的 `IsValidPath()` 只接受 `internal://app…` 前缀、且禁止 path traversal，实际只能落到**应用私有目录**；Lite 也没有 `$rawfile`/resourceManager。因此导入器会**依次探测**若干候选重定位路径（`internal://app/rawfile/gt4books/`、`internal://app/assets/entry/resources/rawfile/gt4books/`、`internal://app/entry/resources/rawfile/gt4books/`），若都读不到就打印 `BUNDLED_IMPORT_UNAVAILABLE` 并**安全 no-op**，如实记录为“无法在此 Lite 运行时读成可写书库”。此外 GT4 真机安装本身仍被 issue #4 的 `errorCode 10` 阻断，**内置书是否真的能在真机首启出现在书架、能否阅读，尚未在真机验证**；构建/产物/导入逻辑已验证，真实机行为待验证。
+资源路线（按 Lite Wearable 参考资料，**需真机实测**）：`rawfile` 按只读处理，
+**不假设可按字节窗口直接读**。导入器把
+`internal://app/rawfile/gt4books/<bookId>.txt` 用 `file.copy` 整文件复制到应用
+私有暂存的 `internal://app/gt4reader/temp/<bookId>`，再从**私有暂存**分块读、
+校验字节数与 SHA-256，最后用现有 `commitVerifiedBook` + `LibraryIndex.addBook`
+落盘登记。候选资源基路径依次探测（`internal://app/rawfile/gt4books/`、
+`.../assets/entry/resources/rawfile/gt4books/`、
+`.../entry/resources/rawfile/gt4books/`），谁先读出合法 `manifest.json` 用谁。
+
+- **每步都有有限超时**（`op()` settle-once；小操作默认 8s、整文件复制默认
+  120s，可用 `setImportTimeout`/`setCopyTimeout` 调整），同步异常也兜底；
+  超时**绝不算成功**，失败**不会**预写标记。
+- 屏幕可见阶段：`读取 bundled.json` / `检查 rawfile/manifest` / `复制第 n 本` /
+  `校验/落盘` / `写索引` / `标记已处理`；失败显示
+  `内置书籍导入失败：<步骤> <原因>（code=<真实错误码>）`，不与书架就绪文案混写。
+- `manifest.json` / `bundled.json` 用受控长度分块 `readText`（每块 4096 字节，
+  边读边 `JSON.parse`，上限 256 KiB），**不再使用 65536**，也不忽略 `fail(data,code)`。
+- **幂等、删了不复活**：`internal://app/gt4reader/bundled.json` 记录已处理的
+  `bookId`；已存在的书和已删除的书都不会被覆盖或自动复活，绝不重建
+  `books.json`、不动阅读进度；失败只清本次暂存，不入书架。
+- 手机传书路径不受影响。
+
+诚实边界：**真机首启能否从 `internal://app/rawfile/...` 成功 `copy`，取决于该
+版本 SDK/固件，必须用签名 HAP 在 GT 4 实测**（HiLog 不可见时以屏幕阶段 +
+错误码为准）；本机 Node 桩只能验证逻辑，不代表真机行为。GT 4 安装本身仍被
+issue #4 的 `errorCode 10` 阻断，因此**内置书是否真的能在真机打开阅读，尚未
+验证**。回归：`tests/watch_bundled_import.test.mjs`（复制成功、幂等/删了不复活、
+无资源、读超时、复制失败/超时、摘要不符、书架后台集成）；
+`tests/watch_bundled_books.test.mjs` 做静态契约。
 
 ## 未完成
 

@@ -269,6 +269,34 @@ let baselineCount = 0;
   }
 }
 
+// ---- issue #7 真机修正：索引分块读取（books.json > 4 KB）----
+{
+  // Lite readText 单次文本上限 4 KB（超出报 302），
+  // 旧实现用 length:65536 在真机上会随索引变大而失败。
+  const ids = [];
+  const entries = [];
+  mkdirSync(sandboxFile('gt4reader/books'), { recursive: true });
+  for (let i = 0; i < 80; i++) {
+    const id = ('7'.repeat(16) + i.toString(16)).slice(-16);
+    ids.push(id);
+    writeFileSync(sandboxFile('gt4reader/books/' + id + '.txt'), 'x');
+    entries.push({ bookId: id, title: 'book-' + i,
+      encoding: 'utf-8', bytes: 1, sha256: 'a'.repeat(64),
+      chunks: 0, chunkBytes: 0, chapters: [] });
+  }
+  writeFileSync(sandboxFile('gt4reader/books.json'),
+    JSON.stringify(entries));
+  const size = readFileSync(
+    sandboxFile('gt4reader/books.json')).length;
+  assert.ok(size > 4096,
+    'fixture index must exceed 4 KB, got ' + size);
+  const listed = await wait((cb) => LibraryIndex.listBooks(cb));
+  assert.equal(listed.length, 80,
+    'chunked index read must not lose entries');
+  assert.deepEqual(listed.map((e) => e.bookId), ids,
+    'chunked index read must preserve order');
+}
+
 console.info('PASS: index rollback (alias-free snapshot, ' +
   'move-failure recovery, overwrite fallback) and ' +
   'single-transfer E_BUSY / file-ref probing');

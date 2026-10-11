@@ -167,6 +167,9 @@ const watchIndexStore = read('apps/watch/entry/src/main/js/MainAbility/storage/L
 assert.ok(watchIndexStore.includes('setQueueTimeout') &&
   watchIndexStore.includes("'missing'"),
   'index queue must expose a watchdog and distinguish missing vs error');
+assert.ok(watchIndexStore.includes('readIndexText') &&
+  !watchIndexStore.includes('length: 65536'),
+  'index read must be chunked within Lite 4 KB readText limit');
 
 // ---- Lite 运行时能力守门 ----
 // 依据（本机 HarmonyOS Command Line Tools 26.0.0 / API 26 实测）：

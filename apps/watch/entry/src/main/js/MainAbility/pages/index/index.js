@@ -12,7 +12,7 @@ import { ensureDirs, bookPath,
   from '../../storage/BookStorage';
 import { listBooks, addBook,
   removeBook } from '../../storage/LibraryIndex';
-import { importBundledBooks }
+import { importBundledBooks, cancelBundledImport }
   from '../../storage/BundledBookImporter';
 import { beginReceive, stopReceive } from '../../wear/WearReceiver';
 import { createSha256 } from '../../util/Sha256';
@@ -32,6 +32,7 @@ export default {
     status: '正在准备本地书库',
     transferStatus: '传书未配置',
     confirmId: '',
+    bundledStatus: '',
     initFailed: false
   },
   onInit() {
@@ -44,6 +45,7 @@ export default {
     this.initTimer = null;
     this.initStage = '进入首页';
     this.indexError = 0;
+    this.bundledStatus = '';
     this.status = '初始化 1/5：进入首页';
     try {
       this.prepareLibrary();
@@ -87,6 +89,7 @@ export default {
   },
   onDestroy() {
     this.clearInitTimer();
+    cancelBundledImport();
     stopReceive();
   },
   clearInitTimer() {
@@ -115,10 +118,12 @@ export default {
   },
   // 点击重试：不卸载应用也能重新初始化。
   retryInit() {
+    cancelBundledImport();
     this.libraryReady = false;
     this.initFailed = false;
     this.initStage = '进入首页';
     this.indexError = 0;
+    this.bundledStatus = '';
     try {
       this.prepareLibrary();
     } catch (error) {
@@ -150,14 +155,13 @@ export default {
             '书库目录创建失败：' + (dirs.stage || '') +
             ' code=' + (dirs.code || dirs.reason || '?'));
         }
-        // 构建期内置书籍（issue #7）：一次性、幂等导入桥。
-        // 读不到打包资源时安全 no-op，绝不阻塞书架。
+        // 构建期内置书籍（issue #7）：后台导入，绝不阻塞书架。
+        // 无论成功/失败/超时/无资源，readIndex 都立刻继续，
+        // 正常显示已有书架或空书架（issue #7 评论）。
         this.initStage = '导入内置书籍';
         this.status = '初始化 3/5：导入内置书籍';
-        importBundledBooks(() => {
-          if (token !== this.initToken) return;
-          this.readIndex(token);
-        });
+        this.startBundledImport(token);
+        this.readIndex(token);
       }, (stage) => {
         if (token !== this.initToken) return;
         this.initStage = '目录 ' + stage;
@@ -166,6 +170,53 @@ export default {
     } catch (error) {
       this.failInit('E_PREPARE_THROW', '初始化同步异常：' + error);
     }
+  },
+  // 后台内置书籍导入（issue #7）：只更新独立提示 bundledStatus，
+  // 绝不覆盖书架就绪文案，也绝不阻塞 readIndex。失败/超时会让
+  // 本回调收到 ok=false + 步骤 + 错误码，屏幕可见（issue #7 评论）。
+  startBundledImport(token) {
+    this.bundledStatus = '内置书籍：检查中…';
+    try {
+      importBundledBooks((res) => {
+        if (token !== this.initToken) return;
+        if (res && res.ok) {
+          if (res.imported > 0) {
+            this.bundledStatus = '内置书籍已导入 ' +
+              res.imported + ' 本' +
+              (res.failed ? '，失败 ' + res.failed + ' 本' : '');
+            this.refresh();
+          } else if (res.reason === 'resource_unavailable') {
+            this.bundledStatus = '未检测到内置书籍';
+          } else if (res.failed > 0) {
+            this.bundledStatus = '内置书籍导入失败 ' +
+              res.failed + ' 本' + this.bundledDetail(res.first);
+          } else {
+            this.bundledStatus = '';
+          }
+        } else {
+          this.bundledStatus = '内置书籍导入失败：' +
+            this.bundledDetail(res);
+          console.error('[suyue] E_BUNDLED_IMPORT ' +
+            (res && res.step) + ' ' + (res && res.reason) +
+            ' code=' + (res && res.code));
+        }
+      }, (stage, code) => {
+        if (token !== this.initToken) return;
+        this.bundledStatus = '内置书籍：' + stage +
+          (code ? '（code=' + code + '）' : '');
+      });
+    } catch (error) {
+      // 同步异常也不能拖死书架：只记录独立提示。
+      this.bundledStatus = '内置书籍导入异常';
+      console.error('[suyue] E_BUNDLED_THROW ' + error);
+    }
+  },
+  bundledDetail(info) {
+    if (!info) return '';
+    var text = (info.step ? info.step : '') +
+      (info.reason ? ' ' + info.reason : '');
+    if (info.code) text += '（code=' + info.code + '）';
+    return text;
   },
   // 读取真实索引：有书即就绪；索引读错则上屏；否则查旧 demo。
   readIndex(token) {

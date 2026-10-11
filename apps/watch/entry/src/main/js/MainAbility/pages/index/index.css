@@ -97,3 +97,12 @@
   text-align: center;
   color: #8b929d;
 }
+/* 内置书籍导入的后台进度/失败提示（issue #7 评论）：
+   独立一行，绝不覆盖书架就绪文案。 */
+.bundled {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 12px;
+  text-align: center;
+  color: #d1a24a;
+}

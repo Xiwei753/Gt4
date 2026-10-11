@@ -1,44 +1,72 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // 构建期内置书籍的一次性导入桥（issue #7）。
 //
-// 背景（必须如实说明，不伪造成功）：
-//   GT 4 是 Lite Wearable 的 **JS FA**（HML/CSS/JS，JerryScript）。
-//   本仓对本机 Lite SDK / OpenHarmony 源码核对后的结论是：
-//     · `@system.file` 只认 `internal://app/...` 私有数据目录
-//       （IsValidPath 要求前缀 internal://app、总长 <=128、
-//       禁止 "/./" 与 "/../"）；
-//     · 打包进 HAP 的 rawfile 在设备上留在 HAP zip 内，只有原生资源
-//       管理器能读，Lite JS 侧没有对应 API，也没有 $rawfile。
-//   所以这里对若干「打包资源可能被放到私有目录」的候选路径做**探测式**
-//   读取：在这个运行时版本上若真的可读就导入；读不到就记一条明确诊断
-//   `BUNDLED_IMPORT_UNAVAILABLE` 并安全 no-op——绝不假装导入成功，
-//   也绝不阻塞书架。详细说明见 apps/watch/README.md 的 issue #7 一节。
+// 真机教训（issue #7 评论，2026-10-11）：
+//   上一版在 `@system.file` 回调不执行时会让 "初始化 3/5：导入内置书籍"
+//   永远等下去（页面 10s 看门狗只报 E_INIT_TIMEOUT，readIndex 进不去）。
+//   本版要求：
+//     · 每一个文件操作都有**有限超时**且**只结算一次回调**；
+//     · 每一步上报**屏幕可见**的阶段 + 真实错误码；
+//     · 导入是**后台任务**，绝不阻塞书架：失败/超时/无资源都让
+//       index.js 继续 readIndex，正常显示已有书架或空书架；
+//     · 失败只显示在独立提示里（"内置书籍导入失败：步骤 + 原因"），
+//       不覆盖"本地书库就绪"。
 //
-// 幂等与「删了不复活」：
-//   处理过的内置书籍 bookId 记在 internal://app/gt4reader/bundled.json。
-//   已记账的（无论当时导入成功、发现已存在、还是用户后来删掉）永不再处理；
-//   只有**本次确实导入失败**的才不记账，下次再试。
+// 资源路线（按参考资料的 rawfile 复制流程，需真机实测）：
+//   rawfile 只读，不假设可按字节窗口直接读；改为
+//   `internal://app/rawfile/gt4books/<bookId>.txt`
+//     --file.copy--> `internal://app/gt4reader/temp/<bookId>`
+//   再从**私有暂存**分块读、校验字节数与 SHA-256，最后
+//   commitVerifiedBook + addBook。若某版本 SDK 不支持 rawfile 作 copy
+//   来源，就展示 fail(data, code) 的真实错误码，不静默吞掉。
 //
-// 内存：正文按 BUNDLE_WINDOW 分块 readWindow → writeArrayBuffer，
-//   峰值只有一个窗口；不使用 RegExp/replace/match 等 Lite 缺失能力。
+// 幂等与「删了不复活」：处理过的 bookId 记在
+// `internal://app/gt4reader/bundled.json`。已记账的永不再处理；
+// 只有**本次确实失败**的不记账，下次再试。
+//
+// 兼容：无 RegExp / 无 replace-match-search / 无 DataView；
+// 正文不整本进内存（分块窗口）。
 import file from '@system.file';
-import { ROOT, bookPath, tempPath, writeBytes,
-  deleteFile, readWindow, commitVerifiedBook,
-  ensureDirs, isSafeBookId } from './BookStorage.js';
+import { ROOT, bookPath, tempPath, deleteFile, readWindow,
+  commitVerifiedBook, ensureDirs, isSafeBookId } from './BookStorage.js';
 import { addBook } from './LibraryIndex.js';
 import { createSha256 } from '../util/Sha256.js';
 
 // 「已处理」标记文件（应用私有目录内）。
 var MARKER_FILE = ROOT + '/bundled.json';
-// 分块窗口：峰值内存只有一个窗口。
+// 校验分块窗口：峰值内存只有一个窗口。
 var WINDOW = 32 * 1024;
+// readText 受控长度（参考资料：默认 4096，超过可能报 302）。
+var TEXT_CHUNK = 4096;
+// manifest / marker 上限（分块累积，超过即明确报错）。
+var MAX_TEXT = 256 * 1024;
+
+// 单步后备超时：小文件操作（access/readText/writeText/readWindow）。
+export var OP_TIMEOUT_MS = 8000;
+// 整文件复制可能很慢（大 TXT），给更宽的有限上限。
+export var COPY_TIMEOUT_MS = 120000;
+
+export function setImportTimeout(ms) {
+  if (typeof ms === 'number' && ms > 0) OP_TIMEOUT_MS = ms;
+}
+export function setCopyTimeout(ms) {
+  if (typeof ms === 'number' && ms > 0) COPY_TIMEOUT_MS = ms;
+}
+
 // 候选资源基路径：谁先读出 manifest.json 就用谁。
-// 都以 '/' 结尾；bookId 为 16 位小写 hex，拼出的 URI 远小于 128。
+// 全部是 internal://app 前缀（@system.file 只认这个前缀）；
+// rawfile 是否落在这些位置、是否可读/可复制，需真机实测。
 var RESOURCE_BASES = [
   'internal://app/rawfile/gt4books/',
   'internal://app/assets/entry/resources/rawfile/gt4books/',
   'internal://app/entry/resources/rawfile/gt4books/'
 ];
+
+// 取消/代次：onDestroy 或重试时递增，令在途链安全停止。
+var generation = 0;
+export function cancelBundledImport() {
+  generation++;
+}
 
 function log(message) {
   if (typeof console !== 'undefined' && console &&
@@ -47,124 +75,126 @@ function log(message) {
   }
 }
 
-// 标记文件：失败一律当作「首次运行」，绝不因此挡书架。
-function loadMarker(cb) {
-  file.readText({
-    uri: MARKER_FILE,
-    length: 65536,
-    position: 0,
-    success: (data) => {
-      try {
-        var parsed = JSON.parse(data.text || '{}');
-        if (parsed && typeof parsed === 'object' &&
-            parsed.handled && typeof parsed.handled === 'object') {
-          return cb(parsed);
+// 单步执行器：settle-once + 有限超时 + 同步异常兜底。
+// 保证回调**至多一次**，任何一步都不会无限等待。
+function op(run, cb, timeoutMs) {
+  var settled = false;
+  var timer = null;
+  var limit = (typeof timeoutMs === 'number' && timeoutMs > 0) ?
+    timeoutMs : OP_TIMEOUT_MS;
+  function finish(res) {
+    if (settled) return;
+    settled = true;
+    if (timer !== null && timer !== undefined &&
+        typeof clearTimeout === 'function') {
+      clearTimeout(timer);
+    }
+    timer = null;
+    cb(res);
+  }
+  if (typeof setTimeout === 'function') {
+    timer = setTimeout(function () {
+      finish({ ok: false, reason: 'timeout', code: 'timeout' });
+    }, limit);
+  }
+  try {
+    run(finish);
+  } catch (error) {
+    finish({ ok: false, reason: 'throw', code: 'throw',
+      error: String(error) });
+  }
+}
+
+function tryParse(text) {
+  if (!text) return null;
+  try {
+    var value = JSON.parse(text);
+    return (value && typeof value === 'object') ? value : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// 分块 readText，边读边尝试 JSON.parse：解析成功即完成。
+// 这样无论 position 的单位是字节还是字符、文件多大，
+// 都能读到完整 JSON；既不整文件进内存，也不踩 4KB/302 限制。
+function readJson(uri, cb) {
+  var acc = '';
+  function step(pos) {
+    op(function (finish) {
+      file.readText({
+        uri: uri,
+        position: pos,
+        length: TEXT_CHUNK,
+        success: function (data) {
+          finish({ ok: true,
+            text: (data && typeof data.text === 'string') ?
+              data.text : '' });
+        },
+        fail: function (data, code) {
+          finish({ ok: false, reason: 'read', code: code });
         }
-      } catch (e) {
-        // 内容损坏：按首次运行处理，不抛错。
+      });
+    }, function (r) {
+      if (!r.ok) return cb(r);
+      acc += r.text;
+      var parsed = tryParse(acc);
+      if (parsed !== null) return cb({ ok: true, value: parsed });
+      if (r.text.length === 0) {
+        return cb({ ok: false, reason: 'empty', code: 'eof' });
       }
-      cb({ schema: 1, handled: {} });
-    },
-    fail: () => cb({ schema: 1, handled: {} })
+      if (acc.length >= MAX_TEXT) {
+        return cb({ ok: false, reason: 'too_long', code: 'too_long' });
+      }
+      step(pos + TEXT_CHUNK);
+    });
+  }
+  step(0);
+}
+
+// 标记文件：任何失败（不存在/损坏/超时）都按「首次运行」，
+// 绝不因此挡书架。
+function loadMarker(cb) {
+  readJson(MARKER_FILE, function (r) {
+    if (r.ok && r.value && r.value.handled &&
+        typeof r.value.handled === 'object') {
+      return cb(r.value);
+    }
+    cb({ schema: 1, handled: {} });
   });
 }
 
 function saveMarker(marker, cb) {
-  file.writeText({
-    uri: MARKER_FILE,
-    text: JSON.stringify(marker),
-    append: false,
-    success: () => cb({ ok: true }),
-    fail: () => cb({ ok: false })
-  });
+  op(function (finish) {
+    file.writeText({
+      uri: MARKER_FILE,
+      text: JSON.stringify(marker),
+      append: false,
+      success: function () { finish({ ok: true }); },
+      fail: function (data, code) {
+        finish({ ok: false, reason: 'write_marker', code: code });
+      }
+    });
+  }, function (r) { cb(!!r.ok); });
 }
 
-function probeBase(index, cb) {
-  if (index >= RESOURCE_BASES.length) {
-    return cb(null);
-  }
-  var base = RESOURCE_BASES[index];
-  file.readText({
-    uri: base + 'manifest.json',
-    length: 65536,
-    position: 0,
-    success: (data) => {
-      var manifest = null;
-      try {
-        manifest = JSON.parse(data.text || '{}');
-      } catch (e) {
-        manifest = null;
+// 依次探测候选基路径，返回第一个能读出合法 manifest 的。
+function probeBase(cb) {
+  var index = 0;
+  var last = null;
+  function step() {
+    if (index >= RESOURCE_BASES.length) return cb(null, last);
+    var base = RESOURCE_BASES[index];
+    index += 1;
+    readJson(base + 'manifest.json', function (r) {
+      if (r.ok && r.value && Array.isArray(r.value.books)) {
+        return cb({ base: base, books: r.value.books }, null);
       }
-      if (manifest && manifest.books &&
-          Array.isArray(manifest.books)) {
-        return cb({ base: base, books: manifest.books });
-      }
-      probeBase(index + 1, cb);
-    },
-    fail: () => probeBase(index + 1, cb)
-  });
-}
-
-// 单本导入失败：删掉半写的暂存，绝不留半成品。
-function failCopy(tmpUri, cb, reason) {
-  deleteFile(tmpUri, () => cb({ ok: false, reason: reason }));
-}
-
-// 分块读源资源 → 追加写暂存 → 边写边算摘要 → 校验字节数与 sha256
-// → 原子转正 → 登记索引。
-function copyBookResource(base, book, cb) {
-  // 不信任 manifest 里的文件名：由 bookId 推出，杜绝路径穿越。
-  var srcUri = base + book.bookId + '.txt';
-  var tmpUri = tempPath(book.bookId);
-  var hasher = createSha256();
-  var total = 0;
-  var offset = 0;
-
-  function next() {
-    if (offset >= book.bytes) {
-      if (total !== book.bytes) {
-        return failCopy(tmpUri, cb,
-          'size ' + total + ' != ' + book.bytes);
-      }
-      if (hasher.digest() !== book.sha256) {
-        return failCopy(tmpUri, cb, 'digest mismatch');
-      }
-      return commitVerifiedBook(book.bookId, book.bookId, (moved) => {
-        if (!moved.ok) {
-          return failCopy(tmpUri, cb, 'move_to_books');
-        }
-        addBook({
-          bookId: book.bookId,
-          title: book.title,
-          encoding: 'utf-8',
-          bytes: book.bytes,
-          sha256: book.sha256,
-          chunks: 0,
-          chunkBytes: 0,
-          chapters: []
-        }, (added) => {
-          cb(added && added.ok ?
-            { ok: true } : { ok: false, reason: 'add_book' });
-        });
-      });
-    }
-    var size = Math.min(WINDOW, book.bytes - offset);
-    readWindow(srcUri, offset, size, (r) => {
-      if (!r.ok) {
-        return failCopy(tmpUri, cb, 'read');
-      }
-      hasher.update(r.bytes);
-      writeBytes(tmpUri, r.bytes, offset > 0, (w) => {
-        if (!w.ok) {
-          return failCopy(tmpUri, cb, 'write');
-        }
-        total += r.bytes.length;
-        offset += r.bytes.length;
-        next();
-      });
+      last = r.ok ? 'manifest_parse' : r.code;
+      step();
     });
   }
-  next();
+  step();
 }
 
 function validBook(book) {
@@ -178,75 +208,235 @@ function validBook(book) {
   return true;
 }
 
+// 从私有暂存分块读，校验字节数与 SHA-256。
+function verifyTemp(tmpUri, book, cb) {
+  op(function (finish) {
+    file.get({
+      uri: tmpUri,
+      success: function (info) {
+        finish({ ok: true, size: (info && typeof info.length === 'number') ?
+          info.length : -1 });
+      },
+      fail: function (data, code) {
+        finish({ ok: false, reason: 'stat', code: code });
+      }
+    });
+  }, function (st) {
+    if (!st.ok) {
+      return cb({ ok: false, reason: '无法取得暂存大小', code: st.code });
+    }
+    if (st.size !== book.bytes) {
+      return cb({ ok: false,
+        reason: '字节数不符 ' + st.size + ' != ' + book.bytes });
+    }
+    var hasher = createSha256();
+    var offset = 0;
+    function next() {
+      if (offset >= book.bytes) {
+        return cb(hasher.digest() === book.sha256 ? { ok: true } :
+          { ok: false, reason: 'SHA-256 不符' });
+      }
+      var size = Math.min(WINDOW, book.bytes - offset);
+      op(function (finish) {
+        readWindow(tmpUri, offset, size, finish);
+      }, function (r) {
+        if (!r.ok) {
+          return cb({ ok: false, reason: '读取暂存失败', code: r.code });
+        }
+        if (!r.bytes || r.bytes.length === 0) {
+          return cb({ ok: false, reason: '暂存提前结束' });
+        }
+        hasher.update(r.bytes);
+        offset += r.bytes.length;
+        next();
+      });
+    }
+    next();
+  });
+}
+
+// 导入单本：清残留暂存 → copy 整文件 → 校验 → 落盘 → 写索引。
+function importOne(gen, base, book, report, cb) {
+  // 不信任 manifest 里的文件名：由 bookId 推出，杜绝路径穿越。
+  var srcUri = base + book.bookId + '.txt';
+  var tmpUri = tempPath(book.bookId);
+  var title = book.title;
+  deleteFile(tmpUri, function () {
+    if (gen !== generation) return cb({ cancelled: true });
+    report('复制第 ' + title + ' 本');
+    op(function (finish) {
+      file.copy({
+        srcUri: srcUri,
+        dstUri: tmpUri,
+        success: function () { finish({ ok: true }); },
+        fail: function (data, code) {
+          finish({ ok: false, reason: 'copy', code: code });
+        }
+      });
+    }, function (c) {
+      if (gen !== generation) {
+        deleteFile(tmpUri, function () {});
+        return cb({ cancelled: true });
+      }
+      if (!c.ok) {
+        return cb({ ok: false, step: '复制第 ' + title + ' 本',
+          reason: '从 rawfile 复制失败', code: c.code });
+      }
+      report('校验/落盘 ' + title);
+      verifyTemp(tmpUri, book, function (v) {
+        if (gen !== generation) {
+          deleteFile(tmpUri, function () {});
+          return cb({ cancelled: true });
+        }
+        if (!v.ok) {
+          // 失败只清本次暂存，绝不留半成品。
+          deleteFile(tmpUri, function () {});
+          return cb({ ok: false, step: '校验/落盘',
+            reason: v.reason, code: v.code });
+        }
+        report('写索引 ' + title);
+        op(function (finish) {
+          commitVerifiedBook(book.bookId, book.bookId, finish);
+        }, function (m) {
+          if (gen !== generation) return cb({ cancelled: true });
+          if (!m.ok) {
+            deleteFile(tmpUri, function () {});
+            return cb({ ok: false, step: '落盘到书库',
+              reason: '移动暂存失败', code: m.code });
+          }
+          op(function (finish) {
+            addBook({
+              bookId: book.bookId,
+              title: title,
+              encoding: 'utf-8',
+              bytes: book.bytes,
+              sha256: book.sha256,
+              chunks: 0,
+              chunkBytes: 0,
+              chapters: []
+            }, finish);
+          }, function (a) {
+            if (gen !== generation) return cb({ cancelled: true });
+            if (!a || !a.ok) {
+              return cb({ ok: false, step: '写索引',
+                reason: '登记索引失败', code: a && a.code });
+            }
+            report('标记已处理 ' + title);
+            cb({ ok: true });
+          });
+        });
+      });
+    });
+  });
+}
+
 // 串行处理清单（一次一本，避免并发写索引/文件）。
-function processBooks(base, books, marker, state, cb) {
+function processBooks(gen, base, books, marker, state, report, cb) {
+  if (gen !== generation) return cb(state);
   if (state.index >= books.length) {
-    return saveMarker(marker, () => cb(state));
+    return saveMarker(marker, function () { cb(state); });
   }
   var book = books[state.index];
   state.index += 1;
   if (!validBook(book)) {
+    state.failed += 1;
+    if (!state.first) {
+      state.first = { step: '检查清单', reason: '清单条目非法',
+        code: 'invalid_entry' };
+    }
     log('skip invalid manifest entry');
-    return processBooks(base, books, marker, state, cb);
+    return processBooks(gen, base, books, marker, state, report, cb);
   }
   if (marker.handled[book.bookId]) {
-    return processBooks(base, books, marker, state, cb);
+    state.skipped += 1;
+    return processBooks(gen, base, books, marker, state, report, cb);
   }
   // 已存在（用户自己的书或更早导入）：只记账，绝不覆盖、绝不动进度。
-  file.access({
-    uri: bookPath(book.bookId),
-    success: () => {
+  op(function (finish) {
+    file.access({
+      uri: bookPath(book.bookId),
+      success: function () { finish({ ok: true }); },
+      fail: function (data, code) { finish({ ok: false, code: code }); }
+    });
+  }, function (ex) {
+    if (gen !== generation) return cb(state);
+    if (ex.ok) {
       marker.handled[book.bookId] = true;
       state.skipped += 1;
-      saveMarker(marker,
-        () => processBooks(base, books, marker, state, cb));
-    },
-    fail: () => {
-      copyBookResource(base, book, (res) => {
-        if (res.ok) {
-          marker.handled[book.bookId] = true;
-          state.imported += 1;
-          log('imported ' + book.title + ' (' + book.bookId + ')');
-          saveMarker(marker,
-            () => processBooks(base, books, marker, state, cb));
-        } else {
-          // 失败不记账，下次再试；诊断可查，但不挡书架。
-          log('import failed ' + book.bookId + ': ' +
-            (res.reason || 'unknown'));
-          processBooks(base, books, marker, state, cb);
-        }
+      return saveMarker(marker, function () {
+        processBooks(gen, base, books, marker, state, report, cb);
       });
     }
+    importOne(gen, base, book, report, function (res) {
+      if (gen !== generation) return cb(state);
+      if (res.cancelled) return cb(state);
+      if (res.ok) {
+        marker.handled[book.bookId] = true;
+        state.imported += 1;
+        log('imported ' + book.bookId);
+        return saveMarker(marker, function () {
+          processBooks(gen, base, books, marker, state, report, cb);
+        });
+      }
+      // 失败不记账，下次再试；诊断可查，但不挡书架。
+      state.failed += 1;
+      if (!state.first) {
+        state.first = { step: res.step, reason: res.reason,
+          code: res.code };
+      }
+      log('import failed ' + book.bookId + ': ' + res.reason +
+        ' code=' + res.code);
+      processBooks(gen, base, books, marker, state, report, cb);
+    });
   });
 }
 
-// 唯一对外入口：在书架 prepareLibrary() 里调用一次。
-// 永远回调一次；任何失败都降级为安全 no-op。
-export function importBundledBooks(cb) {
-  var done = (result) => {
-    if (typeof cb === 'function') cb(result);
-  };
-  ensureDirs((dirs) => {
+// 唯一对外入口：在书架页调用，**后台**执行，永不阻塞。
+//   cb(result)：至多一次。result.ok=false 表示有明确错误（含 step/code）；
+//             result.ok=true 且 reason='resource_unavailable' 表示包内无
+//             可读内置资源，属正常情况。
+//   onStage(stage, code)：屏幕可见的阶段进度。
+export function importBundledBooks(cb, onStage) {
+  var gen = generation;
+  function report(stage, code) {
+    if (gen !== generation) return;
+    log('stage ' + stage + (code ? ' code=' + code : ''));
+    if (typeof onStage === 'function') onStage(stage, code);
+  }
+  function done(res) {
+    if (gen !== generation) return;
+    if (typeof cb === 'function') cb(res);
+  }
+  report('准备目录');
+  ensureDirs(function (dirs) {
+    if (gen !== generation) return;
     if (!dirs.ok) {
-      log('book dirs not ready, skip');
-      return done({ ok: true, imported: 0, reason: 'dirs' });
+      return done({ ok: false, step: '准备目录',
+        reason: '书库目录未就绪',
+        code: dirs.code || dirs.reason || 'dirs' });
     }
-    loadMarker((marker) => {
-      probeBase(0, (found) => {
+    report('读取 bundled.json');
+    loadMarker(function (marker) {
+      if (gen !== generation) return;
+      report('检查 rawfile/manifest');
+      probeBase(function (found, lastCode) {
+        if (gen !== generation) return;
         if (!found) {
-          log('BUNDLED_IMPORT_UNAVAILABLE: 打包的 rawfile 在此 Lite JS ' +
-            '运行时的 @system.file 下不可读（internal://app 仅指向私有数据目录）。' +
-            '内置书籍导入桥已就绪但本次 no-op；见 apps/watch/README.md issue #7。');
-          return done({ ok: true, imported: 0,
-            reason: 'resource_unavailable' });
+          log('BUNDLED_IMPORT_UNAVAILABLE 打包 rawfile 在此 Lite 运行时' +
+            '不可读或包内无内置书；本次安全 no-op。code=' + lastCode);
+          return done({ ok: true, imported: 0, skipped: 0, failed: 0,
+            reason: 'resource_unavailable', code: lastCode });
         }
-        var state = { index: 0, imported: 0, skipped: 0 };
+        var state = { index: 0, imported: 0, skipped: 0, failed: 0,
+          first: null };
         log('manifest found at ' + found.base +
           ' books=' + found.books.length);
-        processBooks(found.base, found.books, marker, state,
-          (final) => {
+        processBooks(gen, found.base, found.books, marker, state, report,
+          function (final) {
+            if (gen !== generation) return;
             done({ ok: true, imported: final.imported,
-              skipped: final.skipped });
+              skipped: final.skipped, failed: final.failed,
+              first: final.first, base: found.base });
           });
       });
     });

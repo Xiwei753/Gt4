@@ -24,6 +24,12 @@ var running = false;
 // listBooks 永久排队阻塞。释放不等于伪造成功：调用方
 // 的回调不会在这里被触发。默认 9s，测试可缩短。
 var QUEUE_TIMEOUT_MS = 9000;
+// 索引读取分块（issue #7 真机修正）：Lite `@system.file.readText`
+// 单次文本上限 4 KB，超过返回 302；旧的固定 65536 长度在真机上
+// 一旦索引正文超 4 KB 会直接失败。改为按 4096 字节分块读、
+// 边读边尝试解析，读到完整 JSON 数组即停。
+var TEXT_CHUNK = 4096;
+var MAX_INDEX_TEXT = 1024 * 1024;
 
 export function setQueueTimeout(ms) {
   if (typeof ms === 'number' && ms > 0) QUEUE_TIMEOUT_MS = ms;
@@ -60,29 +66,72 @@ export function loadIndex(cb, onDiag) {
     }
   };
   try {
-    file.readText({
-      uri: INDEX_FILE,
-      length: 65536,
-      position: 0,
-      success: (data) => {
-        const entries = parseEntries(data.text);
+    // 分块读索引：避免 length:65536 在真机上因正文超 4 KB 报 302。
+    readIndexText((r) => {
+      if (r.ok) {
+        const entries = parseEntries(r.text);
         lastGood = snapshot(entries);
         report('ok', 0);
-        complete(cb, snapshot(entries));
-      },
-      fail: (data, code) => {
-        // 301 = 从未创建过 books.json（首次安装，正常空库）；
-        // 其它（300/202 等）是真正的文件系统异常，必须如实
-        // 上报给启动页，不能混成"空书架"。
-        const state = (code === 301) ? 'missing' : 'error';
-        report(state, code);
-        complete(cb, []);
+        return complete(cb, snapshot(entries));
       }
+      // 301 = 从未创建过 books.json（首次安装，正常空库）；
+      // 其它（300/202 等）是真正的文件系统异常，必须如实
+      // 上报给启动页，不能混成"空书架"。
+      const state = (r.code === 301) ? 'missing' : 'error';
+      report(state, r.code || r.reason);
+      complete(cb, []);
     });
   } catch (error) {
     report('error', 'throw');
     complete(cb, []);
   }
+}
+
+// 累积文本是否为完整 JSON 数组（用于判断是否读全）。
+function isCompleteArrayText(text) {
+  if (!text) return false;
+  try {
+    return Array.isArray(JSON.parse(text));
+  } catch (e) {
+    return false;
+  }
+}
+
+// 分块读取 books.json：单次 4096 字节，边读边解析。
+// 每块都是一个有限操作；返回 { ok, text } 或
+// { ok:false, reason, code }。
+function readIndexText(cb) {
+  var acc = '';
+  function step(pos) {
+    try {
+      file.readText({
+        uri: INDEX_FILE,
+        length: TEXT_CHUNK,
+        position: pos,
+        success: (data) => {
+          var text = (data && typeof data.text === 'string') ?
+            data.text : '';
+          acc += text;
+          if (isCompleteArrayText(acc)) {
+            return complete(cb, { ok: true, text: acc });
+          }
+          if (text.length === 0) {
+            return complete(cb, { ok: false, reason: 'empty' });
+          }
+          if (acc.length >= MAX_INDEX_TEXT) {
+            return complete(cb, { ok: false, reason: 'too_long' });
+          }
+          step(pos + TEXT_CHUNK);
+        },
+        fail: (data, code) => {
+          complete(cb, { ok: false, reason: 'read', code: code });
+        }
+      });
+    } catch (error) {
+      complete(cb, { ok: false, reason: 'throw' });
+    }
+  }
+  step(0);
 }
 
 // 把 tmp 提交为正式索引：不假设 move 可以
@@ -178,22 +227,19 @@ function rollback(orphanEntry, cb) {
       return complete(cb, { restored: false,
         reason: 'E_ROLLBACK_FAILED' });
     }
-    // 回读校验：磁盘内容必须等于快照。
-    file.readText({
-      uri: INDEX_FILE,
-      length: 65536,
-      position: 0,
-      success: (data) => {
-        const onDisk = parseEntries(data.text);
-        if (JSON.stringify(onDisk) !==
-            JSON.stringify(restore)) {
-          return complete(cb, { restored: false,
-            reason: 'E_ROLLBACK_MISMATCH' });
-        }
-        finishRollback(orphanEntry, cb);
-      },
-      fail: () => complete(cb, { restored: false,
-        reason: 'E_ROLLBACK_FAILED' })
+    // 回读校验：磁盘内容必须等于快照（分块读，见 readIndexText）。
+    readIndexText((r) => {
+      if (!r.ok) {
+        return complete(cb, { restored: false,
+          reason: 'E_ROLLBACK_FAILED' });
+      }
+      const onDisk = parseEntries(r.text);
+      if (JSON.stringify(onDisk) !==
+          JSON.stringify(restore)) {
+        return complete(cb, { restored: false,
+          reason: 'E_ROLLBACK_MISMATCH' });
+      }
+      finishRollback(orphanEntry, cb);
     });
   });
 }

@@ -34,17 +34,30 @@ const WATCH_BUNDLE = 'con.xiwei.suyue.gt4';
   const importer = readFileSync(
     'apps/watch/entry/src/main/js/MainAbility/storage/BundledBookImporter.js',
     'utf8');
+  // 真机教训后：整文件 copy 到私有目录再分块校验（不假设 rawfile 可窗口直读），
+  // 且每一步都有有限超时与取消代次（issue #7 评论）。
   for (const token of ['importBundledBooks', 'BUNDLED_IMPORT_UNAVAILABLE',
-    'bundled.json', 'createSha256', 'writeBytes', 'readWindow',
-    'commitVerifiedBook', 'addBook']) {
+    'bundled.json', 'createSha256', 'readWindow', 'commitVerifiedBook',
+    'addBook', 'file.copy', 'cancelBundledImport', 'setImportTimeout',
+    'setCopyTimeout']) {
     assert.ok(importer.includes(token),
       'importer must use ' + token);
   }
+  assert.ok(!importer.includes('length: 65536'),
+    'readText must not request an out-of-spec 64 KiB chunk');
+  assert.ok(importer.includes('readText'),
+    'importer must read manifest/marker with the file API');
   assert.ok(importer.includes('internal://app/'),
     'importer must only probe the JS-readable private data dir');
   // 幂等与「删了不复活」靠标记文件；资源/正文绝不硬编码书 id 之外的内容。
   assert.ok(importer.includes('marker.handled'),
     'importer must record handled bookIds (no auto-resurrect)');
+  // 步骤文案必须覆盖施工要求的可见阶段。
+  for (const stage of ['读取 bundled.json', '检查 rawfile/manifest',
+    '复制第 ', '校验/落盘', '写索引', '标记已处理']) {
+    assert.ok(importer.includes(stage),
+      'importer must report the stage: ' + stage);
+  }
 
   const index = readFileSync(
     'apps/watch/entry/src/main/js/MainAbility/pages/index/index.js', 'utf8');
@@ -53,6 +66,16 @@ const WATCH_BUNDLE = 'con.xiwei.suyue.gt4';
   assert.ok(index.indexOf('importBundledBooks') <
     index.indexOf('this.migrateDemo'),
     'bundled import must run before the legacy demo migration');
+  // 后台导入：起导入后立即 readIndex，绝不阻塞书架（issue #7 评论）。
+  assert.ok(index.includes('startBundledImport'),
+    'index page must launch a background import');
+  assert.ok(index.includes('cancelBundledImport'),
+    'index page must cancel in-flight imports on destroy/retry');
+  assert.ok(index.includes('bundledStatus'),
+    'import progress/failure must be shown separately from shelf status');
+  assert.ok(index.indexOf('this.startBundledImport(token)') <
+    index.indexOf('this.readIndex(token)'),
+    'readIndex must run immediately, not behind the import');
 
   const storage = readFileSync(
     'apps/watch/entry/src/main/js/MainAbility/storage/BookStorage.js', 'utf8');
