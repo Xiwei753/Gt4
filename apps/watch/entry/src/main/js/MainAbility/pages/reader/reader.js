@@ -121,6 +121,21 @@ export default {
       if (!data.ok) {
         this.pageHint = '读取失败：' + (data.reason || data.api || 'unknown') +
           (data.code !== undefined ? ' code=' + data.code : '');
+        // 页面正文区足够大，显示真实失败阶段，避免只有一个“200”。
+        this.body = '正文读取失败' +
+          '\n阶段：' + (data.stage || data.api || 'read') +
+          '\n错误码：' + (data.code === undefined ? '?' : data.code) +
+          (data.cacheBufferCode === undefined ? '' :
+            '\n二进制读取：' + data.cacheBufferCode) +
+          (data.cacheTextCode === undefined ? '' :
+            '\n文本读取：' + data.cacheTextCode) +
+          (data.cacheGetCode === undefined ? '' :
+            '\n文件检查：' + data.cacheGetCode) +
+          (data.cacheBytes === undefined ? '' :
+            '\n文件字节数：' + data.cacheBytes +
+            ' / ' + data.expectedBytes) +
+          (data.rawCode === undefined ? '' :
+            '\n资源读取：' + data.rawCode);
         this.isBusy = false;
         if (done) done(false);
         return;

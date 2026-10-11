@@ -112,24 +112,56 @@ try {
   // ---- 2. rawfile 直接读不支持 → file.copy 到私有目录再读 ----
   {
     const original = systemFile.readArrayBuffer;
+    const originalText = systemFile.readText;
     systemFile.readArrayBuffer = (o) => {
       if (o.uri && o.uri.indexOf('rawfile/') >= 0) {
         return o.fail && o.fail({}, 300);
       }
       return original(o);
     };
+    systemFile.readText = (o) => {
+      if (o.uri && o.uri.indexOf('rawfile/') >= 0) {
+        return o.fail && o.fail({}, 300);
+      }
+      return originalText(o);
+    };
     try {
       eq(await read(250, 20), 250, 270);
     } finally {
       systemFile.readArrayBuffer = original;
+      systemFile.readText = originalText;
+    }
+  }
+
+  // ---- 3a. GT4 真机 code=200：私有副本二进制读失败，
+  // 文本读取成功时应能恢复正常正文；不再直接报告 read_failed。
+  {
+    const originalBuffer = systemFile.readArrayBuffer;
+    const originalText = systemFile.readText;
+    systemFile.readArrayBuffer = (o) => o.fail && o.fail(
+      { message: 'System error' }, 200);
+    systemFile.readText = (o) => {
+      if (o.uri && o.uri.indexOf('rawfile/') >= 0) {
+        return o.fail && o.fail({ message: 'System error' }, 200);
+      }
+      return originalText(o);
+    };
+    try {
+      eq(await read(0, 20), 0, 20);
+      eq(await read(250, 20), 250, 270);
+    } finally {
+      systemFile.readArrayBuffer = originalBuffer;
+      systemFile.readText = originalText;
     }
   }
 
   // ---- 3. 两条路都失败 → 结构化错误（真实 api/uri/code）----
   {
     const original = systemFile.readArrayBuffer;
+    const originalText = systemFile.readText;
     const originalCopy = systemFile.copy;
     systemFile.readArrayBuffer = (o) => o.fail && o.fail({}, 300);
+    systemFile.readText = (o) => o.fail && o.fail({}, 300);
     systemFile.copy = (o) => o.fail && o.fail({}, 300);
     try {
       const r = await read(0, 20);
@@ -140,6 +172,7 @@ try {
       assert.equal(r.code, 300);
     } finally {
       systemFile.readArrayBuffer = original;
+      systemFile.readText = originalText;
       systemFile.copy = originalCopy;
     }
   }
@@ -147,8 +180,10 @@ try {
   // ---- 4. 接口永不回调 → 有限超时，不卡死 ----
   {
     const original = systemFile.readArrayBuffer;
+    const originalText = systemFile.readText;
     const originalCopy = systemFile.copy;
     systemFile.readArrayBuffer = () => {};
+    systemFile.readText = () => {};
     systemFile.copy = () => {};
     bs.setBundledTimeout(40);
     try {
@@ -158,6 +193,7 @@ try {
     } finally {
       bs.setBundledTimeout(6000);
       systemFile.readArrayBuffer = original;
+      systemFile.readText = originalText;
       systemFile.copy = originalCopy;
     }
   }
