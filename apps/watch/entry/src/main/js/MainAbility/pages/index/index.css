@@ -27,6 +27,13 @@
      书目一条都看不见；超出可纵向滚动。 */
   height: 288px;
 }
+/* 关键：list-item 自身必须有非零高度（默认高度为 0），
+   否则列表容器可见但每行被压成 0。对照开源示例
+   sportwatch-how-to-implement-expandable-list-item 的 item 样式。 */
+.book-item {
+  width: 100%;
+  height: 74px;
+}
 .book-row {
   width: 100%;
   height: 66px;

@@ -5,7 +5,7 @@
     <!-- issue #10 真机修复：改用 <list>/<list-item> 实际列表容器，
          否则动态 for 内容在真机上不显示（只见"书架就绪（N 本）"）。 -->
     <list class="book-list">
-      <list-item for="{{ books }}" tid="bookId">
+      <list-item class="book-item" for="{{ books }}" tid="bookId">
         <div class="book-row">
           <div class="book-info" onclick="openBook($idx)">
             <text class="book-title">{{ $item.title }}</text>

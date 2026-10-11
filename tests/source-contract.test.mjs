@@ -157,6 +157,12 @@ assert.ok(shelfHml.includes('<list class="book-list"') &&
 const shelfCss = read('apps/watch/entry/src/main/js/MainAbility/pages/index/index.css');
 assert.ok(/\.book-list\s*\{[^}]*height:/.test(shelfCss),
   'shelf list must have an explicit height so rows are not collapsed');
+// issue #10 第二次真机回归：list-item 默认高度为 0，
+// 必须给它自己的 class 且该 class 有非零高度，否则容器可见但每行为 0。
+assert.ok(shelfHml.includes('<list-item class="book-item"'),
+  'list-item must carry its own class');
+assert.ok(/\.book-item\s*\{[^}]*height:\s*(?!0\b)\d/.test(shelfCss),
+  'list-item class must declare a non-zero height');
 assert.ok(watchIndex.includes("event.type === 'RESULT'") &&
   watchIndex.includes('this.loadExternal();'),
   'watch shelf must refresh external books after a successful receive');
