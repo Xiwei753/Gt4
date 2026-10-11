@@ -1,25 +1,39 @@
 <div class="screen" style="background-color: {{ theme === 'day' ? '#f5f4f0' : '#101114' }};">
-  <!-- 表冠代理：1×1 透明 slider，靠 rotation({focus}) 抢占表冠焦点，
-       旋转经 onchange 回调。做法来自上游 MIT 示例
-       sportwatch-how-to-use-crown，说明见 reader/CrownInput.js。
-       GT4 真机是否送达旋转事件尚未验证，触屏翻页保持可用。 -->
+  <!-- 1×1 隐形表冠代理：不在正文显示任何控件。 -->
   <slider class="proxy-slider" ref="crownProxy"
           min="0" max="6" onchange="onCrownChange"></slider>
-  <div class="reading-area">
-    <text class="book-title" style="color: {{ theme === 'day' ? '#5b6470' : '#9da3af' }};" onclick="backToLibrary">{{ title }}</text>
+
+  <!-- 阅读态：只有正文。左右点按/左滑翻页，右滑进设置；
+       系统手势抢占时可长按进入设置（不加可见按钮）。 -->
+  <div class="reading-area" if="{{ !settingsOpen }}"
+       onswipe="onReadingSwipe" onclick="onReaderTap"
+       onlongpress="openSettings">
     <text class="book-text" style="font-size: {{ fontSize }}px; line-height: {{ fontSize * lineHeightRatio }}px; color: {{ theme === 'day' ? '#1c1e22' : '#f3f3f3' }};">{{ body }}</text>
-    <!-- 主操作：仅上页/下页（P2-13），不挤占正文区 -->
-    <div class="controls">
-      <text class="nav" style="color: {{ theme === 'day' ? '#1c1e22' : '#e8edf5' }};" onclick="previousPage">上页</text>
-      <text class="nav" style="color: {{ theme === 'day' ? '#1c1e22' : '#e8edf5' }};" onclick="toggleSettings">设置</text>
-      <text class="nav" style="color: {{ theme === 'day' ? '#1c1e22' : '#e8edf5' }};" onclick="nextPage">下页</text>
+  </div>
+
+  <!-- 同一路由内的设置页：左滑返回阅读，不销毁阅读位置。 -->
+  <div class="settings-area" if="{{ settingsOpen }}" onswipe="onSettingsSwipe">
+    <text class="settings-heading">阅读设置</text>
+    <text class="settings-book">{{ title }}</text>
+    <div class="settings-row">
+      <div class="settings-action" onclick="fontSmaller"><text class="settings-label">A−</text></div>
+      <text class="settings-value">{{ fontSize }}px</text>
+      <div class="settings-action" onclick="fontLarger"><text class="settings-label">A+</text></div>
     </div>
-    <!-- 二级交互：字号与主题，收起时不渲染 -->
-    <div class="controls" if="{{ settingsOpen }}">
-      <text class="nav" style="color: {{ theme === 'day' ? '#1c1e22' : '#e8edf5' }};" onclick="changeFont(-1)">A-</text>
-      <text class="nav" style="color: {{ theme === 'day' ? '#1c1e22' : '#e8edf5' }};" onclick="toggleTheme">{{ theme === 'day' ? '夜间' : '日间' }}</text>
-      <text class="nav" style="color: {{ theme === 'day' ? '#1c1e22' : '#e8edf5' }};" onclick="changeFont(1)">A+</text>
+    <div class="settings-row">
+      <div class="settings-action" onclick="spacingTighter"><text class="settings-label">行距−</text></div>
+      <text class="settings-value">{{ lineHeightRatio }}</text>
+      <div class="settings-action" onclick="spacingLooser"><text class="settings-label">行距+</text></div>
     </div>
-    <text class="page-number" style="color: {{ theme === 'day' ? '#8a919c' : '#858b96' }};">{{ pageHint }}</text>
+    <div class="settings-wide-action" onclick="toggleTheme">
+      <text class="settings-label">{{ theme === 'day' ? '切换夜间模式' : '切换日间模式' }}</text>
+    </div>
+    <div class="settings-wide-action" onclick="closeSettings">
+      <text class="settings-label">继续阅读</text>
+    </div>
+    <div class="settings-wide-action" onclick="backToLibrary">
+      <text class="settings-label">返回书架</text>
+    </div>
+    <text class="settings-hint">{{ pageHint }}</text>
   </div>
 </div>

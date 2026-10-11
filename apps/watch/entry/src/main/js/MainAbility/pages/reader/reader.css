@@ -7,56 +7,94 @@
   align-items: center;
   justify-content: center;
 }
-/* 表冠代理 slider：占位 1×1 且完全透明，
-   只为接收 rotation 事件，不参与排版。 */
+/* 沿用原表冠实现，1×1 透明且不可见。 */
 .proxy-slider {
   width: 1px;
   height: 1px;
   opacity: 0;
 }
+/* 纯文本阅读页：圆屏安全区内不显示标题、翻页按钮、状态栏。 */
 .reading-area {
   width: 316px;
-  height: 400px;
+  height: 330px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
   align-items: center;
-}
-.book-title {
-  width: 100%;
-  height: 25px;
-  font-size: 17px;
-  color: #9da3af;
-  text-align: center;
 }
 .book-text {
   width: 100%;
-  height: 280px;
+  height: 330px;
   font-size: 20px;
   line-height: 31px;
   color: #f3f3f3;
   text-align: left;
 }
-.controls {
+/* 设置独立占据一屏，避免在阅读页插入底栏或浮层。 */
+.settings-area {
+  width: 310px;
+  height: 390px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.settings-heading {
   width: 100%;
   height: 32px;
+  font-size: 24px;
+  text-align: center;
+  color: #f3f3f3;
+}
+.settings-book {
+  width: 100%;
+  height: 25px;
+  font-size: 14px;
+  text-align: center;
+  color: #b6c1d0;
+}
+.settings-row {
+  width: 100%;
+  height: 58px;
   display: flex;
   flex-direction: row;
   justify-content: space-around;
+  align-items: center;
 }
-/* 主操作行（上页/设置/下页）与二级
-   设置行（A-/主题/A+）均不超过
-   正文区 316px 宽度。 */
-.nav {
-  width: 70px;
-  color: #e8edf5;
-  font-size: 19px;
+.settings-action {
+  width: 85px;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #273140;
+  border-radius: 10px;
+}
+.settings-label {
+  font-size: 18px;
+  color: #f2f2f2;
   text-align: center;
 }
-.page-number {
+.settings-value {
+  width: 100px;
+  font-size: 18px;
+  color: #f2f2f2;
+  text-align: center;
+}
+.settings-wide-action {
+  width: 244px;
+  height: 43px;
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #273140;
+  border-radius: 10px;
+}
+.settings-hint {
   width: 100%;
-  height: 20px;
-  font-size: 13px;
-  color: #858b96;
+  height: 21px;
+  margin-top: 7px;
+  font-size: 12px;
+  color: #9da8b7;
   text-align: center;
 }

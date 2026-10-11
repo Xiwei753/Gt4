@@ -13,10 +13,10 @@ export var MAX_FONT_SIZE = 32;
 export var MIN_LINE_RATIO = 1.3;
 export var MAX_LINE_RATIO = 2.0;
 
-// 圆屏 466×466：正文区宽 316px、高 280px
-// （上下留安全边距，不裁字）。
+// 圆屏 466×466：纯文本阅读态不再占用顶栏/底栏，
+// 正文区宽 316px、高 330px（与 reader.css 一致）。
 export var TEXT_WIDTH = 316;
-export var TEXT_HEIGHT = 280;
+export var TEXT_HEIGHT = 330;
 
 export function normalizeSettings(raw) {
   var settings = {

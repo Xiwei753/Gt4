@@ -42,8 +42,7 @@ export default {
     crownMounted: false,
     crownStatus: 'unverified',
     isBusy: true,
-    // 设置收进二级交互（P2-13）：主操作
-    // 只保留上页/下页，避免控件互相挤占。
+    // 正文与设置互斥显示。默认只展示文字，右滑/长按进入设置。
     settingsOpen: false
   },
   onInit() {
@@ -214,9 +213,58 @@ export default {
     this.theme = this.theme === 'night' ? 'day' : 'night';
     this.scheduleSave();
   },
-  // 展开/收起设置行（字号、主题）。
-  toggleSettings() {
-    this.settingsOpen = !this.settingsOpen;
+  // 展开/收起设置行（现在是独占一屏的设置页，阅读位置不变）。
+  openSettings() {
+    this.settingsOpen = true;
+  },
+  closeSettings() {
+    this.settingsOpen = false;
+  },
+  // 官方 Lite HML 的 onswipe 回调带方向；右=手指向右滑。
+  // 右滑打开设置，左滑翻下一页；书页上无可见控制。
+  onReadingSwipe(e) {
+    if (!e) return;
+    if (e.direction === 'right') {
+      this.openSettings();
+    } else if (e.direction === 'left') {
+      this.nextPage();
+    }
+  },
+  onSettingsSwipe(e) {
+    if (e && e.direction === 'left') this.closeSettings();
+  },
+  // 点击正文左半边回上一页，右半边进入下一页。
+  // 坐标不可用时默认下一页，确保还能翻页。
+  onReaderTap(e) {
+    if (this.settingsOpen || this.isBusy) return;
+    var x = e && typeof e.globalX === 'number' ?
+      e.globalX : (e && typeof e.localX === 'number' ?
+        e.localX + 75 : null);
+    if (x !== null && x < 233) {
+      this.previousPage();
+    } else {
+      this.nextPage();
+    }
+  },
+  fontSmaller() {
+    this.changeFont(-1);
+  },
+  fontLarger() {
+    this.changeFont(1);
+  },
+  spacingTighter() {
+    this.changeSpacing(-0.1);
+  },
+  spacingLooser() {
+    this.changeSpacing(0.1);
+  },
+  changeSpacing(delta) {
+    if (this.isBusy || !this.bookId) return;
+    var next = Math.round((this.lineHeightRatio + delta) * 100) / 100;
+    if (next < 1.3 || next > 2.0) return;
+    this.userMoved = true;
+    this.lineHeightRatio = next;
+    this.loadPage(this.offset);
   },
   // ---- 表冠（机制来自上游 MIT 示例，见 reader/CrownInput.js）----
   // 隐藏 slider 挂载后抢占表冠焦点；设备上若 $refs.crownProxy
@@ -243,7 +291,7 @@ export default {
   // 每个回调最多翻一页（翻页本身是异步读+写进度）。
   // GT4 真机是否送达此回调、每页阈值多少，均待实测。
   onCrownChange(e) {
-    if (!e) return;
+    if (!e || this.settingsOpen) return;
     const pages = this.crownTracker.push(e.value);
     if (pages > 0) this.nextPage();
     else if (pages < 0) this.previousPage();

@@ -556,21 +556,47 @@ assert.ok(libraryIndex.includes('enqueue'),
 assert.ok(libraryIndex.includes('rollback'),
   'index must roll back on write failure');
 
-// P2-13：阅读器设置收进二级交互。
+// #10 GT4 阅读界面：正文页只有正文；右滑进设置、左滑返回。
+// 不能再把页码、书名、上/下页、字号或主题按钮塞到阅读页。
 const readerJs = read(
   'apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.js');
 const readerHml = read(
   'apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.hml');
-assert.ok(readerJs.includes('settingsOpen'),
-  'reader must gate settings behind a toggle');
-const mainControls = readerHml.slice(
-  readerHml.indexOf('主操作'),
-  readerHml.indexOf('二级交互'));
-assert.ok(mainControls.includes('上页') &&
-  mainControls.includes('下页'),
-  'reader main row must keep prev/next');
-assert.ok(!mainControls.includes('A+'),
-  'reader main row must not hold font controls');
+const readerCss = read(
+  'apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.css');
+assert.ok(readerJs.includes('settingsOpen') &&
+  readerJs.includes("e.direction === 'right'") &&
+  readerJs.includes("e.direction === 'left'"),
+  'reader must open settings on right swipe and return on left swipe');
+const readStart = readerHml.indexOf('<div class="reading-area"');
+const settingsStart = readerHml.indexOf('<div class="settings-area"');
+assert.ok(readStart >= 0 && settingsStart > readStart,
+  'reader must have exclusive reading and settings areas');
+const textOnly = readerHml.slice(readStart, settingsStart);
+assert.ok(textOnly.includes('{{ body }}') &&
+  textOnly.includes('onswipe="onReadingSwipe"') &&
+  textOnly.includes('onlongpress="openSettings"') &&
+  textOnly.includes('onclick="onReaderTap"'),
+  'reading screen must show body and provide gesture controls');
+assert.ok(!textOnly.includes('{{ title }}') &&
+  !textOnly.includes('{{ pageHint }}') &&
+  !textOnly.includes('上页') && !textOnly.includes('下页') &&
+  !textOnly.includes('字号') && !textOnly.includes('设置') &&
+  !textOnly.includes('class="controls"'),
+  'text reading area must be pure content, no visible toolbar');
+const settingsArea = readerHml.slice(settingsStart);
+for (const action of ['fontSmaller', 'fontLarger',
+  'spacingTighter', 'spacingLooser', 'toggleTheme',
+  'closeSettings', 'backToLibrary']) {
+  assert.ok(settingsArea.includes('onclick="' + action + '"'),
+    'settings must retain ' + action);
+}
+assert.ok(settingsArea.includes('onswipe="onSettingsSwipe"'),
+  'settings must support swipe-left back to reading');
+assert.ok(readerCss.includes('height: 330px') &&
+  read('apps/watch/entry/src/main/js/MainAbility/reader/ReaderSettings.js')
+    .includes('TEXT_HEIGHT = 330'),
+  'visible text height and paging model must stay aligned');
 
 // issue #10：内置书单取代旧的 demo 迁移作为书架先决条件；
 // 仍不得回造假元数据。
