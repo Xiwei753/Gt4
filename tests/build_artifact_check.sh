@@ -355,9 +355,10 @@ PY
   echo "WARN: 单 .bin HAP 不含顶层 manifest/.bc；包名、指纹、设备类型仅根据本次源码 config.json 校验，不能冒充已验证 bin 内数据。" >&2
 fi
 
-# 8) 内置书籍（issue #10）：必须核对**内层 entry.bin** 真的带了每本内置书
-#    的 bookId / 书名 / 正文块（chunk0 base64 前缀）。只看源码目录或外层
-#    ZIP 都不算数——这正是"构建成功其实没打进去"最容易漏掉的地方。
+# 8) 内置书籍（issue #10 复核后）：必须核对**内层 entry.bin** 真的带了每本
+#    内置书的 rawfile 资源（目录 / 文件名 / bookId / 书名 / 正文前若干字节）。
+#    正文走 rawfile 资源、不进 JS；只看源码目录或外层 ZIP 都不算数——
+#    这正是"构建成功其实没打进去"最容易漏掉的地方。
 if [ -n "$EXPECT_BOOKS_REPORT" ]; then
   if [ "$SINGLE_BIN" != "1" ]; then
     echo "FAIL: --expect-books-report requires a Lite single-bin HAP (inner entry.bin): $HAP" >&2
@@ -368,7 +369,7 @@ if [ -n "$EXPECT_BOOKS_REPORT" ]; then
     exit 1
   fi
   if ! BOOKS_OUT="$(python3 - "$HAP" "$EXPECT_BOOKS_REPORT" <<'PY'
-import json, sys, zipfile
+import base64, json, sys, zipfile
 
 hap, report_path = sys.argv[1], sys.argv[2]
 with open(report_path, encoding="utf-8") as fh:
@@ -384,6 +385,9 @@ with zipfile.ZipFile(hap) as z:
     bin_bytes = z.read(infos[0])
 
 missing = []
+# 资源目录必须真的在内层 bin 里（正文走 rawfile，不再走 JS）。
+if b"rawfile/gt4books" not in bin_bytes:
+    missing.append("rawfile-dir")
 for book in books:
     bid = str(book.get("bookId", ""))
     if bid.encode("utf-8") not in bin_bytes:
@@ -391,16 +395,25 @@ for book in books:
     title = str(book.get("title", ""))
     if title and title.encode("utf-8") not in bin_bytes:
         missing.append("title:" + bid)
-    # 不只是元数据：该书第一块的 base64 正文也必须真的在 bin 里。
-    prefix = str(book.get("chunk0Prefix", ""))
-    if len(prefix) < 32:
-        missing.append("short-prefix:" + bid)
-    elif prefix.encode("ascii", "ignore") not in bin_bytes:
-        missing.append("chunk0:" + bid)
+    fname = str(book.get("file", ""))
+    if fname and fname.encode("utf-8") not in bin_bytes:
+        missing.append("file:" + bid)
+    # 不只是元数据：该书正文的真实字节（前 64 字节）也必须真的在 bin 里。
+    probe = str(book.get("probeB64", ""))
+    if len(probe) < 16:
+        missing.append("short-probe:" + bid)
+    else:
+        try:
+            raw = base64.b64decode(probe)
+        except Exception:
+            raw = b""
+            missing.append("bad-probe:" + bid)
+        if raw and raw not in bin_bytes:
+            missing.append("content:" + bid)
 
 if missing:
     sys.stderr.write(
-        "FAIL: inner entry.bin is missing bundled books: %s\n"
+        "FAIL: inner entry.bin is missing bundled book resources: %s\n"
         % ", ".join(missing))
     sys.exit(1)
 print("BOOKS_IN_BIN_OK count=%d" % len(books))

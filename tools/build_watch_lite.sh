@@ -15,7 +15,7 @@ PRODUCT="${PRODUCT:-default}"
 if [ "$MODE" != "debug" ] && [ "$MODE" != "release" ]; then
   echo "usage: $0 [debug|release]" >&2
   echo "       (optional) WATCH_BOOKS_DIR=/path/to/txt-dir $0 debug" >&2
-  echo "       把选定 TXT 编译成内置 JS 数据模块，见 issue #10。" >&2
+  echo "       把选定 TXT 放进内置 rawfile 资源（JS 保持很小），见 issue #10。" >&2
   exit 2
 fi
 
@@ -33,18 +33,21 @@ OUT_DIR="entry/build/default/outputs/default"
 rm -rf entry/build
 mkdir -p "$OUT_DIR"
 
-# ---- 内置书籍（issue #10）---------------------------------------------
+# ---- 内置书籍（issue #10 复核后）--------------------------------------
 # 可选入口（向后兼容，不带变量＝与以前完全一致）：
 #   WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
-# 构建期把选定 TXT 生成为 **JS 数据模块**写入
-#   apps/watch/entry/src/main/js/MainAbility/books/
-#   （BookCatalog.g.js 仅元数据 / BookText_<id>.g.js 分块正文 /
-#     BookRegistry.g.js 访问器），由 webpack 真正打包进 entry.bin。
-# 为什么不用 rawfile：官方 Lite 示例只用 internal://app/... 私有目录，
-# JS 没有读 internal://app/rawfile/... 的通路（issue #10 实测结论）。
-# 仓库里的 books/ 是空默认值：带书构建前先备份、构建后由 trap 还原，
-# 私人正文既不进仓库、也不进日志（只打印书名与字节数）。
+# 构建期把选定 TXT **规范化后放进临时 rawfile 资源**
+#   apps/watch/entry/src/main/resources/rawfile/gt4books/<bookId>.txt
+# 并生成**仅元数据**的
+#   apps/watch/entry/src/main/js/MainAbility/books/BookCatalog.g.js
+# 正文不进 JS（避免巨型 reader.js）——那被证明与本机 GT4 安装失败
+# （错误 34）时间相关；设备侧 storage/BundledBookSource.js 按需窗口读
+# rawfile，必要时先 file.copy 到私有目录再读。
+# 仓库里的 books/ 与 rawfile/ 都是可还原的临时区：带书构建前先备份，
+# 构建后由 trap 还原；私人正文既不进仓库、也不进日志（只打印书名与字节数）。
 BOOKS_JS_DIR="$REPO_ROOT/apps/watch/entry/src/main/js/MainAbility/books"
+RAWFILE_ROOT="$REPO_ROOT/apps/watch/entry/src/main/resources/rawfile"
+BOOKS_RESOURCE_DIR="$RAWFILE_ROOT/gt4books"
 BOOKS_REPORT=""
 BOOKS_BACKUP=""
 
@@ -55,18 +58,21 @@ cleanup_books() {
     rm -rf "$BOOKS_BACKUP"
     BOOKS_BACKUP=""
   fi
+  # 临时 rawfile 资源：构建结束一律清掉，避免上次的书污染下次构建。
+  rm -rf "$BOOKS_RESOURCE_DIR"
+  rmdir "$RAWFILE_ROOT" 2>/dev/null || true
 }
 trap cleanup_books EXIT
 
 if [ -n "${WATCH_BOOKS_DIR:-}" ]; then
-  # 先备份提交的默认空实现：generator 会清空并重建该目录，
-  # 中途失败也要由 trap 还原。
+  # 先备份提交的默认空书单：generator 会清空并重建目录，中途失败也要还原。
   BOOKS_BACKUP="$(mktemp -d)"
   cp -a "$BOOKS_JS_DIR" "$BOOKS_BACKUP/books"
   python3 "$REPO_ROOT/tools/generate_watch_book_modules.py" \
     --books-dir "$WATCH_BOOKS_DIR" \
-    --out-dir "$BOOKS_JS_DIR"
-  BOOKS_REPORT="$BOOKS_JS_DIR/books_report.json"
+    --resource-dir "$BOOKS_RESOURCE_DIR" \
+    --catalog-dir "$BOOKS_JS_DIR"
+  BOOKS_REPORT="$BOOKS_RESOURCE_DIR/books_report.json"
   echo "WATCH_BOOKS_STAGED=1"
 fi
 
@@ -267,6 +273,18 @@ if [ -n "$BOOKS_REPORT" ]; then
     'import json,sys; print(len(json.load(open(sys.argv[1])).get("books", [])))' \
     "$BOOKS_REPORT" 2>/dev/null || echo unknown)"
   echo "WATCH_BOOKS_BAKED=${BOOKS_COUNT:-unknown}"
+fi
+
+# 单页最终 JS 大小：用于证明「没有巨型 reader.js」（issue #10 复核）。
+# 正文应在 rawfile 资源里，页面 JS 只带书单元数据。
+PAGE_JS_DIR="$REPO_ROOT/apps/watch/entry/build/default/intermediates/lite_source/default/assets/js/MainAbility"
+if [ -d "$PAGE_JS_DIR" ]; then
+  for page in index/index reader/reader; do
+    js="$PAGE_JS_DIR/pages/$page.js"
+    if [ -f "$js" ]; then
+      echo "WATCH_PAGE_JS page=$page size=$(stat -c%s "$js" 2>/dev/null || stat -f%z "$js")"
+    fi
+  done
 fi
 
 if [ "$UNSIGNED" = "0" ]; then

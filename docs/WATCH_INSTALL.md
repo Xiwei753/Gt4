@@ -183,19 +183,22 @@ type        : debug
 # 1) 构建（产出单 BIN 的 Debug 签名 HAP）
 #    不带书（与原命令一致，书架为空）：
 tools/build_watch_lite.sh debug
-#    带内置书（把目录里顶层 *.txt 编译成内置 JS 数据模块，见 issue #10）：
+#    带内置书（把目录里顶层 *.txt 规范化后放进内置 rawfile 资源，见 issue #10 复核后）：
 WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 # 2) 推到已授权、且已配对手表的中间手机（示例：nova 7 Pro）
 adb -s TNL0220908013936 push \
   apps/watch/entry/build/default/outputs/default/entry-default-debug-signed.hap \
-  /sdcard/haps/suyue-watch-issue10-con.xiwei.suyue.gt4-debug-signed.hap
+  /sdcard/haps/suyue-issue10b-rawfile-3books.hap
 ```
 
-**带内置书要点（issue #10）**：正文以 16 KiB/块的 base64 JS 数据模块**只进入阅读页
-bundle**（书架 bundle 仍很小、**启动不加载正文**）；`BOOKS_IN_BIN_OK count=N` 证明内容
-真的进了内部单 BIN；`WATCH_BOOKS_BAKED=N` 为内置本数。合计 >2 MiB 时生成器打印告警
-（真机内存占用未验证，建议先用小书/单本验证再扩容）。**私人正文不进 git/CI/日志。**
+**带内置书要点（issue #10 复核后）**：正文以**规范化 UTF-8 真实字节**放进
+`entry/src/main/resources/rawfile/gt4books/<bookId>.txt`，书单
+`books/BookCatalog.g.js` **只含元数据**——页面 JS 保持 ~60 KB（构建脚本打印
+`WATCH_PAGE_JS` 佐证，**不再产生 2 MB 巨型 reader.js**，那对应 GT4 安装错误 34）；
+`BOOKS_IN_BIN_OK count=N` 证明正文真的进了内部单 BIN；`WATCH_BOOKS_BAKED=N` 为内置本数。
+设备侧按需窗口读 rawfile，读不到再 `file.copy` 到私有目录读，都失败就显示真实错误码。
+**私人正文不进 git/CI/日志。**
 
 3) 打开手机「应用调测助手」→ 该文件 → 选择配对的 HUAWEI WATCH GT 4 →
    解包 → 蓝牙传输 → 手表安装。`/sdcard/haps/` 里**只保留这一个**签名包，
@@ -218,6 +221,7 @@ bundle**（书架 bundle 仍很小、**启动不加载正文**）；`BOOKS_IN_BI
 - [ ] 应用出现在手表桌面，名称为「素阅」
 - [ ] **启动立即出现书架**，不再停在「正在准备本地书库 / 导入内置书籍 / 读取 books.json 第 4 步」
 - [ ] 内置书（标题旁标「内置」）出现在书架，点开显示**真实正文**；内置书不能删除（提示不可删除）
+- [ ] 若内置书点开显示空白或报错，请记下屏幕上的**接口名 + 错误码**（`internal://app/rawfile/...` 能否被读/复制只能由 GT4 固件判定，失败会如实显示而不是卡住）
 - [ ] 触屏前后翻页正确，无吞字/重字/中文乱码；字号 14–32 能连续调整且重排正确
 - [ ] 日/夜切换正常；退出重进、切换书目后**各自进度独立恢复**（字号/主题/位置）
 - [ ] 覆盖安装（不卸载）后已有书与进度仍在；不内置任何书时不破坏手机传书路径

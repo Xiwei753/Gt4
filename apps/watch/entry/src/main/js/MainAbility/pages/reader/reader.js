@@ -5,6 +5,11 @@
 // 分页唯一真相：reader/PageLayout.takePage
 // （字节偏移、列数、行数）；列数/行数由
 // ReaderSettings 推导。
+//
+// issue #10 复核：正文显示与翻页**绝不依赖进度文件读写完成**。
+// - 打开即从头分页显示；进度在后台加载，回来时若用户还没翻页才跳过去；
+// - 翻页渲染完成立刻解锁并后台串行保存，进度写不回调也不卡阅读；
+// - 迟到的保存回调不会倒退已变化的阅读位置。
 import router from '@system.router';
 import { getBook } from '../../storage/LibraryIndex';
 import { openBook, readBytes } from '../../storage/BookStorage';
@@ -44,6 +49,10 @@ export default {
     this.settings = normalizeSettings(null);
     this.crownStatus = crownStatus();
     this.crownTracker = createCrownTracker(null);
+    // issue #10：用户是否已经翻过页；决定迟到的进度是否还能应用。
+    this.userMoved = false;
+    this.saving = false;
+    this.saveWanted = false;
     const params = router.getParams() || {};
     const bookId = params.bookId;
     if (typeof bookId !== 'string' ||
@@ -53,17 +62,13 @@ export default {
       return;
     }
     this.bookId = bookId;
-    // 内置书（issue #10）：正文来自构建期 JS 数据块，无需文件接口；
-    // 直接读进度并分页。外部书仍走原有文件通路。
+    // 内置书（issue #10）：正文来自 rawfile 资源，按需窗口读取；
+    // 外部书仍走原有文件通路。两者都**先出正文**再看进度。
     this.bundled = isBundled(bookId);
     if (this.bundled) {
       const entry = bundledEntry(bookId);
       this.title = entry ? entry.title : '内置书籍';
-      loadProgress(bookId, (progress) => {
-        this.history = progress.history;
-        this.applySettings(progress.settings);
-        this.loadPage(progress.offset);
-      });
+      this.startReading();
       return;
     }
     openBook(bookId, (state) => {
@@ -74,11 +79,20 @@ export default {
       }
       getBook(bookId, (entry) => {
         this.title = entry ? entry.title : '未知书名';
-        loadProgress(bookId, (progress) => {
-          this.history = progress.history;
-          this.applySettings(progress.settings);
+        this.startReading();
+      });
+    });
+  },
+  // 立刻从头显示一页，再后台加载进度（进度不阻塞阅读）。
+  startReading() {
+    this.loadPage(0, undefined, () => {
+      loadProgress(this.bookId, (progress) => {
+        if (this.userMoved) return;   // 用户已翻页，不倒退
+        this.history = progress.history;
+        this.applySettings(progress.settings);
+        if (progress.offset !== this.offset) {
           this.loadPage(progress.offset);
-        });
+        }
       });
     });
   },
@@ -95,7 +109,7 @@ export default {
       theme: this.theme
     };
   },
-  loadPage(offset, previousOffset) {
+  loadPage(offset, previousOffset, done) {
     if (this.isLoading || !this.bookId) return;
     this.isLoading = true;
     this.isBusy = true;
@@ -103,8 +117,10 @@ export default {
     readSource(this.bookId, offset, 2048, (data) => {
       this.isLoading = false;
       if (!data.ok) {
-        this.pageHint = '读取失败：' + data.reason;
+        this.pageHint = '读取失败：' + (data.reason || data.api || 'unknown') +
+          (data.code !== undefined ? ' code=' + data.code : '');
         this.isBusy = false;
+        if (done) done(false);
         return;
       }
       const page = takePage(data.bytes, data.offset,
@@ -113,6 +129,7 @@ export default {
       if (!page.text) {
         this.pageHint = '已经读到末尾';
         this.isBusy = false;
+        if (done) done(false);
         return;
       }
       if (typeof previousOffset === 'number') {
@@ -124,19 +141,41 @@ export default {
       this.nextOffset = page.nextOffset;
       this.pageHint = '字节位置 ' + this.offset +
         (this.crownMounted ? ' · 表冠待真机验证' : '');
-      // 进度写完才允许继续翻页，避免多个异步写覆盖更晚的进度。
-      saveProgress(this.bookId, this.offset, this.history,
-        this.currentSettings(), (state) => {
-          if (!state.ok) this.pageHint = '进度保存失败';
-          this.isBusy = false;
-        });
+      // 渲染完成即解锁：不等进度写完，翻页不被进度锁死（issue #10）。
+      this.isBusy = false;
+      this.scheduleSave();
+      if (done) done(true);
     });
   },
+  // 后台**串行**保存进度：同一时刻只有一个写，避免多个异步写
+  // 乱序覆盖更晚的进度；失败只记诊断、不回退已读位置。
+  scheduleSave() {
+    if (!this.bookId) return;
+    this.saveWanted = true;
+    if (this.saving) return;
+    this.saveNext();
+  },
+  saveNext() {
+    this.saving = true;
+    this.saveWanted = false;
+    saveProgress(this.bookId, this.offset, this.history,
+      this.currentSettings(), (state) => {
+        this.saving = false;
+        if (!state.ok) {
+          this.pageHint = '进度保存失败' +
+            (state.code !== undefined && state.code !== 'fail' ?
+              '（' + state.code + '）' : '');
+        }
+        if (this.saveWanted) this.saveNext();
+      });
+  },
   nextPage() {
+    this.userMoved = true;
     if (this.isBusy || this.nextOffset <= this.offset) return;
     this.loadPage(this.nextOffset, this.offset);
   },
   previousPage() {
+    this.userMoved = true;
     if (this.isBusy || !this.history.length) return;
     const previous = this.history.pop();
     this.loadPage(previous);
@@ -144,26 +183,19 @@ export default {
   // 改变字号：列数/行数随之变化，按当前字节
   // 位置重排，不丢字、不跳页。
   changeFont(delta) {
+    this.userMoved = true;
     if (this.isBusy || !this.bookId) return;
     const next = this.fontSize + delta;
     if (next < 14 || next > 32) return;
     this.fontSize = next;
     this.loadPage(this.offset);
   },
-  // 切换主题不重新分页，但要立即保存：用户可能直接返回书架。
+  // 切换主题不重新分页，后台保存（不阻塞）。
   toggleTheme() {
-    if (this.isBusy || !this.bookId) return;
-    const oldTheme = this.theme;
-    this.theme = oldTheme === 'night' ? 'day' : 'night';
-    this.isBusy = true;
-    saveProgress(this.bookId, this.offset, this.history,
-      this.currentSettings(), (state) => {
-        if (!state.ok) {
-          this.theme = oldTheme;
-          this.pageHint = '主题保存失败';
-        }
-        this.isBusy = false;
-      });
+    this.userMoved = true;
+    if (!this.bookId) return;
+    this.theme = this.theme === 'night' ? 'day' : 'night';
+    this.scheduleSave();
   },
   // 展开/收起设置行（字号、主题）。
   toggleSettings() {

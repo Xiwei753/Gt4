@@ -99,7 +99,6 @@ const watchFiles = [
   'storage/ProgressStore.js',
   'storage/BundledBookSource.js',
   'books/BookCatalog.g.js',
-  'books/BookRegistry.g.js',
   'wear/IncomingBookReceiver.js',
   'wear/TransferLogic.js',
   'wear/WearReceiver.js',
@@ -126,9 +125,10 @@ assert.ok(watchReader.includes('createCrownTracker'),
 const toggleThemeBody = watchReader.slice(
   watchReader.indexOf('  toggleTheme() {'),
   watchReader.indexOf('  // 展开/收起设置行'));
-assert.ok(toggleThemeBody.includes('saveProgress(') &&
-  toggleThemeBody.includes('this.currentSettings()'),
-  'theme switch must persist settings without waiting for another page turn');
+assert.ok(toggleThemeBody.includes('scheduleSave()'),
+  'theme switch must persist settings (background, non-blocking)');
+assert.ok(watchReader.includes('saveProgress('),
+  'reader must persist progress through ProgressStore');
 assert.ok(watchReader.includes('crownProxy'),
   'reader must own the hidden slider ref used as crown proxy');
 const crownInput = read('apps/watch/entry/src/main/js/MainAbility/reader/CrownInput.js');
@@ -164,21 +164,31 @@ assert.ok(watchIndex.includes('loadExternal'),
 const bookSource = read(
   'apps/watch/entry/src/main/js/MainAbility/storage/BundledBookSource.js');
 assert.ok(bookSource.includes('readBundledWindow') &&
-  bookSource.includes('decodeBase64') &&
-  bookSource.includes('CHUNK_BYTES'),
-  'bundled source must read byte windows from JS chunks');
+  bookSource.includes('rawfile/gt4books') &&
+  bookSource.includes('file.copy'),
+  'bundled source must read rawfile windows on demand (with copy fallback)');
+assert.ok(bookSource.includes('setBundledTimeout') &&
+  bookSource.includes('timeout'),
+  'bundled source must have a no-callback timeout so reading never hangs');
+assert.ok(!bookSource.includes('getChunk') &&
+  !bookSource.includes('decodeBase64'),
+  'bundled text must NOT be compiled into JS data modules');
 const catalogSrc = read(
   'apps/watch/entry/src/main/js/MainAbility/books/BookCatalog.g.js');
 assert.ok(catalogSrc.includes('export var BOOKS'),
   'catalog module must export BOOKS metadata');
-const registrySrc = read(
-  'apps/watch/entry/src/main/js/MainAbility/books/BookRegistry.g.js');
-assert.ok(registrySrc.includes('export function getChunk') &&
-  registrySrc.includes('CHUNK_BYTES'),
-  'registry must expose chunk access');
 assert.ok(watchReader.includes('isBundled') &&
   watchReader.includes('readBundledWindow'),
-  'reader must read bundled text from JS chunks (not file API)');
+  'reader must read bundled text via the rawfile window accessor');
+// issue #10 复核：正文显示/翻页绝不依赖进度读写完成。
+assert.ok(watchReader.includes('startReading') &&
+  watchReader.includes('scheduleSave'),
+  'reader must render before progress and save progress in the background');
+const watchProgress = read(
+  'apps/watch/entry/src/main/js/MainAbility/storage/ProgressStore.js');
+assert.ok(watchProgress.includes('setProgressTimeout') &&
+  watchProgress.includes('timeout'),
+  'progress store must not block reading when the file API never calls back');
 const watchStorage = read('apps/watch/entry/src/main/js/MainAbility/storage/BookStorage.js');
 assert.ok(watchStorage.includes('setOperationTimeout'),
   'storage file ops must have a no-callback timeout guard');

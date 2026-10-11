@@ -1,17 +1,32 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 内置书正文数据源（issue #10）：从构建期生成的 JS 数据块按需取窗口，
-// 供阅读页分页使用。**只有阅读页 import 本模块**（书架页只读
-// BookCatalog.g.js 的元数据），因此正文数据不进书架 bundle。
+// 内置书正文**按需**访问器（issue #10 复核后）。
 //
-// 与文件通路（BookStorage.readBytes）语义一致：给定字节偏移与长度，
-// 返回该窗口的 Uint8Array；进度仍是**字节偏移**，可跨块拼接，
-// 切块边界不会切断已拼出的窗口（总是解码整块再切片）。
-import { BOOKS, CHUNK_BYTES, getChunk } from '../books/BookRegistry.g.js';
-import { decodeBase64 } from '../util/Base64.js';
+// 正文不再编译进 JS：它作为 rawfile 资源随包打进内层 entry.bin，
+// 本模块在设备上**只读取当前页所在的小窗口**（不把整本解码进 JS 内存）：
+//   1) 先尝试直接以窗口读 rawfile：internal://app/rawfile/gt4books/<file>；
+//   2) 不行再尝试 file.copy 把**当前这一本**复制到私有目录
+//      internal://app/gt4reader/cache/<bookId>.txt，再窗口读该副本；
+//   3) 两步都失败：如实回报真实接口名 / URI / 错误码 / 是否无回调超时，
+//      由阅读页显示**简短**错误，不假装读到了正文。
+//
+// 每个文件调用都有有限超时（settle-once），任何一步不回调都不会
+// 让阅读页永久卡住。书单元数据来自 BookCatalog.g.js（不含正文）。
+import file from '@system.file';
+import { BOOKS } from '../books/BookCatalog.g.js';
+import { ROOT, complete } from './BookStorage.js';
 
-// 元数据表：bookId -> {bookId,title,bytes,chunks}
+// rawfile 资源基路径（与构建期 resourceDir 一致）。
+var RAWFILE_DIR = 'internal://app/rawfile/gt4books/';
+// 私有缓存目录（复制出来的副本放这里，可窗口读）。
+var CACHE_DIR = ROOT + '/cache';
+
+var OP_TIMEOUT_MS = 6000;
+export function setBundledTimeout(ms) {
+  OP_TIMEOUT_MS = ms;
+}
+
+// 元数据表：bookId -> {bookId,title,bytes,file}
 var META = {};
-// 书架用的列表（含 origin 便于界面区分内置/外部）。
 var LIST = [];
 var i;
 for (i = 0; i < BOOKS.length; i++) {
@@ -24,6 +39,9 @@ for (i = 0; i < BOOKS.length; i++) {
     origin: 'builtin'
   });
 }
+
+// 已确认可用的读取位置：bookId -> true 表示私有副本可用。
+var CACHED = {};
 
 export var BUNDLED_BOOKS = LIST;
 
@@ -42,46 +60,152 @@ export function bundledEntry(bookId) {
   };
 }
 
-// 读取 [offset, offset+size) 的正文窗口，语义同 BookStorage.readBytes。
-// cb({ok:true, offset, bytes:Uint8Array}) 或 cb({ok:false, reason, chunk?})。
+function rawUri(meta) {
+  return RAWFILE_DIR + meta.file;
+}
+
+function cacheUri(meta) {
+  return CACHE_DIR + '/' + meta.bookId + '.txt';
+}
+
+// settle-once + 有限超时包装：任何分支都只回调一次。
+function withTimeout(api, uri, cb, startFn) {
+  var done = false;
+  var timer = setTimeout(function () {
+    if (done) return;
+    done = true;
+    cb({ ok: false, api: api, uri: uri, code: 'timeout' });
+  }, OP_TIMEOUT_MS);
+  function finish(res) {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    cb(res);
+  }
+  try {
+    startFn(finish);
+  } catch (e) {
+    finish({ ok: false, api: api, uri: uri, code: 'throw' });
+  }
+}
+
+function toBytes(data, want) {
+  if (!data || !data.buffer) return new Uint8Array(0);
+  var all = new Uint8Array(data.buffer);
+  if (want > 0 && all.length > want) return all.subarray(0, want);
+  return all;
+}
+
+// 直接窗口读某个 URI：成功 cb({ok:true,bytes})，失败 cb({ok:false,api,uri,code})。
+function readWindow(uri, start, len, cb) {
+  withTimeout('readArrayBuffer', uri, cb, function (finish) {
+    file.readArrayBuffer({
+      uri: uri,
+      position: start,
+      length: len,
+      success: function (data) {
+        finish({ ok: true, bytes: toBytes(data, len) });
+      },
+      fail: function (d, code) {
+        finish({ ok: false, api: 'readArrayBuffer', uri: uri,
+          code: (code === undefined ? 'fail' : code) });
+      }
+    });
+  });
+}
+
+// 确保私有缓存目录存在（失败不致命，copy 会再报真实错误）。
+function ensureCacheDir(cb) {
+  withTimeout('mkdir', CACHE_DIR, function () { cb(); }, function (finish) {
+    file.mkdir({
+      uri: CACHE_DIR,
+      recursive: true,
+      success: function () { finish({}); },
+      fail: function () { finish({}); }  // 已存在/失败都继续
+    });
+  });
+}
+
+// 把当前这一本从 rawfile 复制到私有缓存目录。
+function copyToCache(meta, cb) {
+  var src = rawUri(meta);
+  var dst = cacheUri(meta);
+  ensureCacheDir(function () {
+    withTimeout('copy', src, cb, function (finish) {
+      file.copy({
+        srcUri: src,
+        dstUri: dst,
+        success: function () { finish({ ok: true }); },
+        fail: function (d, code) {
+          finish({ ok: false, api: 'copy', uri: src, dstUri: dst,
+            code: (code === undefined ? 'fail' : code) });
+        }
+      });
+    });
+  });
+}
+
+function okResult(bytes, start) {
+  return { ok: true, offset: start, bytes: bytes };
+}
+
+// 读取 [start, start+len) 的正文窗口（字节偏移语义同 BookStorage.readBytes）。
+// 成功 cb({ok:true,offset,bytes:Uint8Array})；
+// 失败 cb({ok:false,reason,api,uri,code})。
 export function readBundledWindow(bookId, offset, size, cb) {
   var meta = META[bookId];
   if (!meta) {
-    cb({ ok: false, reason: 'not_bundled' });
-    return;
+    return complete(cb, { ok: false, reason: 'not_bundled' });
   }
   var total = meta.bytes;
   var start = offset || 0;
   var want = size || 0;
   if (start >= total || want <= 0) {
-    cb({ ok: true, offset: start, bytes: new Uint8Array(0) });
-    return;
+    return complete(cb, { ok: true, offset: start, bytes: new Uint8Array(0) });
   }
   var end = Math.min(total, start + want);
-  var first = Math.floor(start / CHUNK_BYTES);
-  var last = Math.floor((end - 1) / CHUNK_BYTES);
-  var parts = [];
-  var collected = 0;
-  var c;
-  for (c = first; c <= last; c++) {
-    var b64 = getChunk(bookId, c);
-    if (b64 === null || b64 === undefined) {
-      cb({ ok: false, reason: 'missing_chunk', chunk: c });
-      return;
-    }
-    var bytes = decodeBase64(b64);
-    parts.push(bytes);
-    collected += bytes.length;
+  var len = end - start;
+
+  function fromCacheOrRaw() {
+    if (!CACHED[bookId]) return fromRaw();
+    readWindow(cacheUri(meta), start, len, function (r) {
+      if (r.ok) return complete(cb, okResult(r.bytes, start));
+      CACHED[bookId] = false;
+      fromRaw();
+    });
   }
-  var all = new Uint8Array(collected);
-  var pos = 0;
-  for (c = 0; c < parts.length; c++) {
-    all.set(parts[c], pos);
-    pos += parts[c].length;
+
+  function fromRaw() {
+    readWindow(rawUri(meta), start, len, function (r) {
+      if (r.ok) return complete(cb, okResult(r.bytes, start));
+      // rawfile 直接读不行 → 复制当前一本到私有目录再读。
+      copyToCache(meta, function (c) {
+        if (!c.ok) {
+          return complete(cb, {
+            ok: false,
+            reason: 'unreadable',
+            api: c.api,
+            uri: c.uri,
+            code: c.code,
+            rawCode: r.code
+          });
+        }
+        readWindow(cacheUri(meta), start, len, function (r2) {
+          if (r2.ok) {
+            CACHED[bookId] = true;
+            return complete(cb, okResult(r2.bytes, start));
+          }
+          complete(cb, {
+            ok: false,
+            reason: 'read_failed',
+            api: r2.api,
+            uri: r2.uri,
+            code: r2.code
+          });
+        });
+      });
+    });
   }
-  // 块起点相对窗口的偏移；总是解码整块再切片，边界安全。
-  var base = first * CHUNK_BYTES;
-  var sliceStart = start - base;
-  var windowBytes = all.subarray(sliceStart, sliceStart + (end - start));
-  cb({ ok: true, offset: start, bytes: windowBytes });
+
+  fromCacheOrRaw();
 }

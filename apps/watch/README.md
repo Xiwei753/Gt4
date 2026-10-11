@@ -131,13 +131,13 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 后台合并外部书、二次删除确认、传书状态隔离）；`tests/watch_index_read.test.mjs`、
 `tests/watch_library_index.test.mjs`。
 
-## 内置 TXT：编译期 JS 数据模块（issue #10）
+## 内置 TXT：rawfile 资源 + 仅元数据书单（issue #10 复核后）
 
-**为什么不用 rawfile**：官方 Lite 示例（`sportwatch-how-to-read-large-text-files`、
-`sportwatch-how-to-do-file-operations`）全部只用 `internal://app/...`，**没有一个读
-`internal://app/rawfile/...`**；与更早的源码结论一致——Lite `@system.file` 只把
-`internal://app` 映射到应用私有数据目录，**打包进 HAP 的 rawfile 没有 JS 可读接口**。
-因此按既定决定改为**编译期把正文切成小 JS 数据模块**直接读，**不**先写入 `internal://app` 再 `readText`。
+**路线修正**：#10 最初把正文编译成 JS 数据模块（`BookText_*.g.js` + `BookRegistry.g.js`，
+静态 import 全部正文）。实测：3 本书时 `pages/reader/reader.js` 达 **2.1 MB**，对应 HAP 装到
+GT 4 报 **错误 34（内部错误）**；而旧 5 本 4.83 MB（正文在 rawfile、JS 很小）能装。
+=> 巨型 `reader.js` 与安装失败高度相关（**未证明存在具体字节上限**，不写成"已证实 JS 大小限制"）。
+因此改为：**正文放进 rawfile 资源，书单只留元数据，页面 JS 保持 ~60 KB**。
 
 用法：
 
@@ -145,7 +145,7 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 # 不带书：与原命令一致，使用仓库里的空书单（书架为空）
 tools/build_watch_lite.sh debug
 
-# 带书：把目录里顶层 *.txt 编译成内置 JS 数据模块
+# 带书：把目录里顶层 *.txt 规范化后放进内置 rawfile 资源
 WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 ```
 
@@ -153,38 +153,46 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 - 只认顶层 `*.txt`，稳定排序；UTF-8（含 BOM）/ UTF-16(BOM) / **确定性回退 GB18030**，都失败即非零退出；
   `bookId` = 规范化 UTF-8 的 SHA-256 前 16 位；同内容去重、同名加 ` (2)`；单本上限默认 8 MiB。**从不打印正文**。
-- 生成到 `apps/watch/entry/src/main/js/MainAbility/books/`（构建后 trap 还原为空默认值）：
-  - `BookCatalog.g.js` = `export var BOOKS = [{bookId,title,bytes,chunks}]` —— **仅元数据**；
-  - `BookText_<bookId>.g.js` = 16 KiB/块，base64 放在**函数体内**（`{0:function(){return '<b64>';},...}` + `getChunk(index)`）；
-  - `BookRegistry.g.js` = `getChunk(bookId,index)` 按 id 分发；另有 `books_report.json` 供产物校验。
+- 正文写入临时资源 `entry/src/main/resources/rawfile/gt4books/<bookId>.txt`（真实规范化字节，
+  hvigor 会真正打进内层 `entry.bin`）；`books/BookCatalog.g.js` = `export var BOOKS =
+  [{bookId,title,bytes,file,sha256}]` —— **仅元数据，不含正文**；另有 `books_report.json`
+  （含每本前 64 字节 base64 `probeB64`）供产物校验。
+- 仓库里的 `books/` 与 `rawfile/` 都是临时区：构建前备份、`trap ... EXIT` 还原/清理，
+  `.gitignore` 屏蔽之，**私人正文不进公开仓库也不进日志**。
 - 产物校验：`tests/build_artifact_check.sh --expect-books-report <json>` 解出内部唯一 `*.bin`，
-  逐本确认 `bookId`、`title` 与 `chunk0Prefix`（真实 base64 前缀）字节都在，打印 `BOOKS_IN_BIN_OK count=N`。
-- `.gitignore` 屏蔽 `books/BookText_*.g.js` 与 `books_report.json`，**私人正文不进公开仓库**。
+  逐本确认 `rawfile/gt4books`、`<file>`、`bookId`、`title` 与正文前 64 字节都在，
+  打印 `BOOKS_IN_BIN_OK count=N`。
+- 构建脚本会打印 `WATCH_PAGE_JS page=... size=...`，用于证明**没有巨型 reader.js**。
 
-阅读（`storage/BundledBookSource.js` + `pages/reader/reader.js`）：
+阅读（`storage/BundledBookSource.js` + `pages/reader/reader.js`），**按需、只读当前页窗口**：
 
-- 书架只 import `BookCatalog.g.js`；**只有阅读页**才 import `BookRegistry.g.js`（含全部正文）。
-- `readBundledWindow(bookId, offset, size, cb)` 按**字节**取窗口：整块解码所涉 chunk（`decodeBase64`）再拼接，
-  保证中文跨块边界不截断；进度仍是字节 offset，兼容现有 `progress/<bookId>.json`。
-- 内置书用 `readBundledWindow` 分页，手机书仍走原 `readBytes`；字号 14–32、日夜、触屏翻页、按书独立进度均已具备。
-
-**内存诚实结论（尚未真机验证）**：Node/V8 实测 `import BookRegistry` 会把**模块源文本**留在堆里
-（≈2× 源大小；5.4 MB 正文 → +13.9 MB 堆），单次 `getChunk` 只再 +0.18 MB。JerryScript 快照的字面量
-驻留方式**只能在真机测**。缓解：正文**只**进阅读页 bundle（实测书架 bundle 70 KB、阅读页 bundle 2.1 MB），
-**启动不加载正文**；`WATCH_BOOKS_DIR` 合计 >2 MiB 时生成器打印告警，建议先小书实测再扩容。
+- 先直接窗口读 `internal://app/rawfile/gt4books/<file>`；不行再 `file.copy` 把**当前这一本**
+  复制到 `internal://app/gt4reader/cache/<bookId>.txt` 后窗口读；两步都失败就显示**真实的接口名 /
+  URI / 错误码**（含无回调 `timeout`），**不假装读到**。每次只读窗口，不把整本解码进内存。
+- 每个文件调用都有 settle-once 有限超时（`setBundledTimeout`，默认 6s），阅读页不会永久卡住。
+- **阅读与进度解耦**：打开即从头出正文，进度后台加载、回来时若用户还没翻页才跳过去；
+  翻页渲染完成立刻解锁，进度**后台串行**保存，写不回调也不锁死翻页；迟到的保存回调不倒退位置。
+  `storage/ProgressStore.js` 加了 `setProgressTimeout`（默认 6s）兜底。
+- 书架只 import `BookCatalog.g.js`；**阅读页也不再 import 任何正文 JS**。进度仍是字节 offset，
+  兼容 `progress/<bookId>.json`。
 
 构建实测（本机 Hvigor，单 BIN 签名，bundle `con.xiwei.suyue.gt4`）：
 
-| 构建 | 正文合计 | HAP 大小 |
-| --- | --- | --- |
-| 不带书 | 0 | 345,732 B |
-| 1 本小书 | 355,144 B | 823,090 B |
-| 1 本长篇 | 1,156,256 B | 1,895,534 B |
-| 3 本（本次交付） | 1,558,122 B | 2,436,710 B |
+| 构建 | 正文合计 | HAP 大小 | reader 页 JS |
+| --- | --- | --- | --- |
+| 不带书 | 0 | 352,463 B | 61,227 B |
+| 3 本（本次交付） | 1,558,122 B | 1,915,308 B | **61,864 B** |
 
+对照：#10 早期 JS 数据模块路线下，3 本的 reader 页 JS 为 **2,140,985 B**（HAP 2.44 MB，GT4 装报 34）。
+
+**未验证**：GT 4 真机上 `internal://app/rawfile/...` 能否被 `@system.file` 读/复制，只能由目标固件判定；
+若两步都失败，阅读页会显示真实错误码（不再"看起来成功"）。真机只要两本内置书能打开看到正文即通过。
 **GT 4 真机闭环（打开内置书、翻页、字号、日夜、进度）仍待实测，本 issue 暂不可关闭。**
 ## 未完成
 
+- **内置书 rawfile 读取未真机验证**（issue #10）：`internal://app/rawfile/...` 能否被
+  `@system.file` 直接读、或被 `file.copy` 复制到私有目录，只能由 GT4 目标固件判定；
+  失败时阅读页显示真实接口名与错误码（不假装读到）。
 - 手机发书 → 手表接收文件 → 校验 → 加入书架的完整闭环；Wear Engine 文件通道回调字段待真机确认。
 - **真机安装与运行**：签名已跑通、包名与 profile 一致，但从未装到
   GT 4 上跑过，`crownStatus()` 仍是 `'unverified'`。
