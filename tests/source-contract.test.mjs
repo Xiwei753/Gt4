@@ -152,9 +152,9 @@ assert.ok(watchIndex.includes('askDelete'),
 const shelfHml = read('apps/watch/entry/src/main/js/MainAbility/pages/index/index.hml');
 assert.ok(!/<div class="book-row"[^>]*onclick=/.test(shelfHml),
   'book row must not open when the child delete button is clicked');
-assert.ok(shelfHml.includes('class="book-info" onclick="openBook($item.bookId)"'),
+assert.ok(shelfHml.includes('class="book-info" onclick="openBook({{$item.bookId}})"'),
   'book info must open by the unique bookId (not $idx)');
-assert.ok(shelfHml.includes('class="book-delete" onclick="askDelete($item.bookId)"'),
+assert.ok(shelfHml.includes('class="book-delete" onclick="askDelete({{$item.bookId}})"'),
   'delete must have its own click target bound to bookId');
 // issue #10 第三次真机回归：点击无响应，且误用了 Lite 不支持的路由 API。
 assert.ok(watchIndex.includes('router.replace('),
@@ -181,6 +181,13 @@ assert.ok(shelfHml.includes('<list-item class="book-item"'),
   'list-item must carry its own class');
 assert.ok(/\.book-item\s*\{[^}]*height:\s*(?!0\b)\d/.test(shelfCss),
   'list-item class must declare a non-zero height');
+// GT4 真机第四轮：上版将 220px 改成 flex:1 后正文卡片文字消失；
+// 必须保持经真机验证过的宽度，且列表事件参数用官方 HML 插值写法。
+assert.ok(/\.book-info\s*\{[^}]*width:\s*220px;/.test(shelfCss),
+  'book-info must keep fixed non-zero width validated on GT4');
+assert.ok(!shelfHml.includes('openBook($item.bookId)') &&
+  !shelfHml.includes('askDelete($item.bookId)'),
+  'list event arguments must use HML interpolation, not raw $item.property');
 assert.ok(watchIndex.includes("event.type === 'RESULT'") &&
   watchIndex.includes('this.loadExternal();'),
   'watch shelf must refresh external books after a successful receive');

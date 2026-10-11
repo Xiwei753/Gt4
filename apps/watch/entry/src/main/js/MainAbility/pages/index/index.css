@@ -48,7 +48,7 @@
 /* 316px 内容区：书籍信息 220 + 删除 64 + 左右内边距 16，
    不再把三个横排文字栏挤出圆屏。 */
 .book-info {
-  flex: 1;
+  width: 220px;
   height: 50px;
   display: flex;
   flex-direction: column;
