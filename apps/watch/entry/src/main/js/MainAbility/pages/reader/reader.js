@@ -220,18 +220,11 @@ export default {
   closeSettings() {
     this.settingsOpen = false;
   },
-  // 官方 Lite HML 的 onswipe 回调带方向；右=手指向右滑。
-  // 右滑打开设置，左滑翻下一页；书页上无可见控制。
+  // 左滑进入设置；右滑保留给 GT4 系统返回手势，不在应用拦截。
+  // 左滑不再翻页，翻页用点按正文两侧或表冠。
   onReadingSwipe(e) {
-    if (!e) return;
-    if (e.direction === 'right') {
-      this.openSettings();
-    } else if (e.direction === 'left') {
-      this.nextPage();
-    }
-  },
-  onSettingsSwipe(e) {
-    if (e && e.direction === 'left') this.closeSettings();
+    if (this.settingsOpen || !e) return;
+    if (e.direction === 'left') this.openSettings();
   },
   // 点击正文左半边回上一页，右半边进入下一页。
   // 坐标不可用时默认下一页，确保还能翻页。

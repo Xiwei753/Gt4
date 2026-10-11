@@ -3,16 +3,17 @@
   <slider class="proxy-slider" ref="crownProxy"
           min="0" max="6" onchange="onCrownChange"></slider>
 
-  <!-- 阅读态：只有正文。左右点按/左滑翻页，右滑进设置；
-       系统手势抢占时可长按进入设置（不加可见按钮）。 -->
+  <!-- 阅读态：只有正文。左滑进设置，右滑留给 GT4 系统返回；
+       两侧点按翻页，长按也可进入设置，均无可见按钮。 -->
   <div class="reading-area" if="{{ !settingsOpen }}"
        onswipe="onReadingSwipe" onclick="onReaderTap"
        onlongpress="openSettings">
     <text class="book-text" style="font-size: {{ fontSize }}px; line-height: {{ fontSize * lineHeightRatio }}px; color: {{ theme === 'day' ? '#1c1e22' : '#f3f3f3' }};">{{ body }}</text>
   </div>
 
-  <!-- 同一路由内的设置页：左滑返回阅读，不销毁阅读位置。 -->
-  <div class="settings-area" if="{{ settingsOpen }}" onswipe="onSettingsSwipe">
+  <!-- 同一路由内的设置页：点击“继续阅读”返回原位置；
+       不抢占系统右滑返回手势。 -->
+  <div class="settings-area" if="{{ settingsOpen }}">
     <text class="settings-heading">阅读设置</text>
     <text class="settings-book">{{ title }}</text>
     <div class="settings-row">

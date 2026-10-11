@@ -39,21 +39,27 @@ try {
   p.onReadingSwipe({ direction: 'up' });
   assert.equal(p.settingsOpen, false);
   p.onReadingSwipe({ direction: 'right' });
-  assert.equal(p.settingsOpen, true,
-    'right swipe must open full-screen settings');
-  p.onSettingsSwipe({ direction: 'left' });
   assert.equal(p.settingsOpen, false,
-    'left swipe from settings must return to reading');
+    'right swipe must remain available to GT4 system back gesture');
   p.onReadingSwipe({ direction: 'left' });
+  assert.equal(p.settingsOpen, true,
+    'left swipe must open full-screen settings');
+  p.onReadingSwipe({ direction: 'left' });
+  assert.equal(p.settingsOpen, true,
+    'reading swipe handler must not change settings page');
+  p.onReaderTap({ globalX: 350 });
+  assert.deepEqual(p.__counts(), { prev: 0, next: 0, repaint: 0 },
+    'opening settings must not flip a page');
+  p.closeSettings();
+  assert.equal(p.settingsOpen, false,
+    'continue-reading action must return to the same reading page');
   p.onReaderTap({ globalX: 350 });
   p.onReaderTap({ globalX: 80 });
-  assert.deepEqual(p.__counts(), { prev: 1, next: 2, repaint: 0 });
+  assert.deepEqual(p.__counts(), { prev: 1, next: 1, repaint: 0 });
   p.openSettings();
   p.onReaderTap({ globalX: 350 });
-  assert.equal(p.__counts().next, 2,
-    'reading gestures must not flip pages in settings');
-  p.onSettingsSwipe({ direction: 'up' });
-  assert.equal(p.settingsOpen, true);
+  assert.equal(p.__counts().next, 1,
+    'reading taps must not flip pages in settings');
   p.closeSettings();
   p.fontLarger();
   assert.equal(p.fontSize, 21);
@@ -67,7 +73,7 @@ try {
   p.isBusy = true;
   p.onReaderTap({ globalX: 80 });
   assert.equal(p.__counts().prev, 1);
-  console.info('PASS: 纯正文、右滑设置、左滑返回、点按翻页、设置调整');
+  console.info('PASS: 纯正文、左滑进入设置、右滑保留系统、按钮返回、点按翻页、设置调整');
 } finally {
   rmSync(temp, { recursive: true, force: true });
   rmSync(fsRoot, { recursive: true, force: true });

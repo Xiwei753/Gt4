@@ -565,9 +565,10 @@ const readerHml = read(
 const readerCss = read(
   'apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.css');
 assert.ok(readerJs.includes('settingsOpen') &&
-  readerJs.includes("e.direction === 'right'") &&
-  readerJs.includes("e.direction === 'left'"),
-  'reader must open settings on right swipe and return on left swipe');
+  readerJs.includes("e.direction === 'left'") &&
+  !readerJs.includes("e.direction === 'right'") &&
+  !readerJs.includes('onSettingsSwipe('),
+  'left swipe must open settings without intercepting OS right swipe');
 const readStart = readerHml.indexOf('<div class="reading-area"');
 const settingsStart = readerHml.indexOf('<div class="settings-area"');
 assert.ok(readStart >= 0 && settingsStart > readStart,
@@ -593,8 +594,9 @@ for (const action of ['fontSmaller', 'fontLarger',
   assert.ok(settingsArea.includes('onclick="' + action + '"'),
     'settings must retain ' + action);
 }
-assert.ok(settingsArea.includes('onswipe="onSettingsSwipe"'),
-  'settings must support swipe-left back to reading');
+assert.ok(!settingsArea.includes('onswipe="onSettingsSwipe"') &&
+  settingsArea.includes('onclick="closeSettings"'),
+  'settings must return via continue-reading button, not an OS-conflicting swipe');
 assert.ok(readerCss.includes('height: 330px') &&
   read('apps/watch/entry/src/main/js/MainAbility/reader/ReaderSettings.js')
     .includes('TEXT_HEIGHT = 330'),
