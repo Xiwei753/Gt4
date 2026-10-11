@@ -11,7 +11,8 @@ const phoneIndex = read('apps/phone/entry/src/main/ets/pages/Index.ets');
 const phoneAppJson = JSON.parse(read('apps/phone/AppScope/app.json5'));
 const watchPages = watchConfig.module.js[0].pages;
 assert.equal(watchConfig.module.deviceType[0], 'liteWearable');
-assert.deepEqual(watchPages, ['pages/index/index', 'pages/reader/reader']);
+assert.deepEqual(watchPages, ['pages/index/index',
+  'pages/reader/reader', 'pages/probe/probe']);
 for (const page of watchPages) {
   for (const ext of ['js', 'hml', 'css']) {
     assert.ok(existsSync('apps/watch/entry/src/main/js/MainAbility/' + page + '.' + ext));
@@ -176,6 +177,39 @@ assert.ok(!watchIndexStore.includes('length: 65536'),
 assert.ok(watchIndex.includes('indexApi') &&
   watchIndex.includes('索引读取失败'),
   'shelf must show the failing interface and real code on index error');
+// issue #9：启动不得被内置导入拖死；内置导入走独立 bundledStatus 提示，
+// 且 readIndex 紧跟其后（后台导入，非阻塞）。
+assert.ok(watchIndex.includes('startBundledImport') &&
+  watchIndex.includes('cancelBundledImport'),
+  'shelf must run bundled import as a cancellable background task');
+assert.ok(watchIndex.includes('bundledStatus') &&
+  shelfHml.includes('bundledStatus'),
+  'bundled import status must be rendered separately');
+assert.ok(watchIndex.indexOf('this.startBundledImport(token)') <
+  watchIndex.indexOf('this.readIndex(token)'),
+  'readIndex must not be blocked by bundled import');
+assert.ok(watchIndex.includes('openProbe') &&
+  shelfHml.includes('onclick="openProbe"'),
+  'shelf must offer an on-screen file self-check entry (issue #9 A6)');
+// issue #9 A2-A4：索引先探测、小文件 readText、大文件分块；
+// 安全替换用 .bak 备份，绝不删除原索引。
+assert.ok(watchIndexStore.includes('probeIndex') &&
+  watchIndexStore.includes('readIndexFrom') &&
+  watchIndexStore.includes('readTextWhole'),
+  'index read must probe first and use readText for small files');
+assert.ok(watchIndexStore.includes('INDEX_BAK') &&
+  watchIndexStore.includes('backupCurrent'),
+  'index replace must keep a backup, never delete the original');
+assert.ok(watchIndexStore.includes('timed(') &&
+  watchIndexStore.includes('abort'),
+  'every index op must have exactly one timed structured result');
+const watchProbe = read('apps/watch/entry/src/main/js/MainAbility/storage/WatchFileProbe.js');
+assert.ok(watchProbe.includes('runFileProbe') &&
+  watchProbe.includes('formatProbe'),
+  'file self-check module must exist');
+const watchProbePage = read('apps/watch/entry/src/main/js/MainAbility/pages/probe/probe.js');
+assert.ok(watchProbePage.includes('runFileProbe'),
+  'probe page must run the file self-check');
 
 // ---- Lite 运行时能力守门 ----
 // 依据（本机 HarmonyOS Command Line Tools 26.0.0 / API 26 实测）：

@@ -119,7 +119,9 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
   `E_PREPARE_THROW` / `E_DIRS_books|temp|progress` / `E_INDEX_READ`
   / `E_INIT_TIMEOUT` / `E_DEMO_MOVE_<code>` / `E_DEMO_STAT` / `E_DEMO_DIGEST`。
 - 索引读取失败时上屏**真实接口名与错误码**，例如
-  `索引读取失败 readArrayBuffer 302`，而不是笼统的"初始化失败"。
+  `索引读取失败 readText 302` / `索引读取失败 readArrayBuffer 300`。
+  `LibraryIndex` 的 `onDiag` 会带 `api` 字段（`access`/`readText`/
+  `readArrayBuffer`），页面据实显示，而不是笼统的"初始化失败"。
   同步异常由 try/catch 兜底，异步结果带 token 校验，过时回调不会覆盖
   新状态；`onDestroy` 清理定时器。
 - 失败时屏幕出现"重试"文本按钮（`retryInit`），不必卸载应用。
@@ -130,25 +132,41 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
 `setOperationTimeout`（默认 8s）无回调兜底，并保留真实错误 code；目录创建
 失败会带上阶段名。
 
-`storage/LibraryIndex.js` 读取 `books.json` **不再用单次
-`file.readText({length: 65536})`**（Lite `readText` 上限 4 KB，超过即 302，
-且多本内置书会让索引超过 4 KB）。改为**分块 `file.readArrayBuffer`**：
-以 4 KB（`TEXT_CHUNK`）从位置 0 逐块读字节，边读边解析，累积到能
-`JSON.parse` 出数组即停；整体拼接后再用 `util/Utf8.js` 的 `decodeUtf8Bytes`
-**一次性解码**，因此中文标题跨块边界也不会被截断。上限 `MAX_INDEX_TEXT`
-= 1 MiB，超限报 `too_long`。`onDiag` 现在带 `api` 字段，区分**首次安装的
-301（missing）**与真正的 **I/O/参数错误（error，附真实 code 与 api）**，
-不再把两者都当成空书架；读失败时**不会**用 `[]` 覆盖旧索引、不会清理
-目录、不会删除 `books/<id>.txt` 或 `progress/<id>.json`。
-队列加 `setQueueTimeout`（默认 9s）看门狗，单个操作不回调只释放队列、
-不伪造成功，后续 `listBooks` 不会被永久卡住。
+`storage/LibraryIndex.js` 读取 `books.json` 走**先探测、再分级读**（issue #9 A2）：
 
-回归：`tests/watch_init_diagnostics.test.mjs`（空书架、已有书、301→mkdir、
-mkdir 202、readArrayBuffer 300、无回调超时、重试、Wear Engine 隔离、队列
-看门狗）与 `tests/watch_index_read.test.mjs`（分块读；区分 301/202/300/超时；
->4 KB 与中文跨块边界均不丢条目）。`tests/helpers/system_file_stub.mjs` 已
-模拟真机 `readText` 的 4 KB 上限（超限返回 302，可用 `.readtext_max` /
-`.readtext_302` 注入）。
+1. 先 `file.access` 判断是否存在：真实 301 = 首次安装，立即视为**正常空书架**，
+   不阻塞、不重造、不误报错误；再用 `file.get` 取大小（`get` 失败不致命）。
+2. 小文件（≤ 4 KB）：用上游 Lite 示例的 `file.readText({uri})`（**不传固定的
+   65536**）。
+3. 大文件或 `readText` 报 302：改为**分块 `file.readArrayBuffer`**（4 KB/块，
+   累积后整体用 `util/Utf8.js` 的 `decodeUtf8Bytes` 一次性解码，中文标题跨块
+   边界不截断），上限 `MAX_INDEX_TEXT` = 1 MiB，超限报 `too_long`。
+
+每次读/写都**恰好一次**结构化回调（`timed()` 保证 `{ok|api|stage|code}`，含
+`timeout` 兜底）；`onDiag` 区分**首次安装的 301（missing）**、真正的
+**I/O/参数错误（error，附真实 code 与 api）**、以及**备份回退成功（recovered）**，
+不再把三者都当成空书架。读失败时**不会**用 `[]` 覆盖旧索引、不会清理目录、
+不会删除 `books/<id>.txt` 或 `progress/<id>.json`。
+
+**安全替换（issue #9 A4）**：写索引先写 `books.json.tmp` → 回读校验 →
+把现有 `books.json` 备份到 `books.json.bak` → `move` 提交；**绝不**出现
+"move 失败 → 删除原索引 → 再 move" 的数据丢失路径：`move` 失败时改为
+**覆盖写**，原内容在 `.bak` 里可回退（`loadIndex` 在主索引缺失/损坏时自动
+尝试 `.bak`）。写操作经同一队列串行化。
+
+队列看门狗 `setQueueTimeout`（默认 12s）在极端不回调时释放队列，并**向等待方
+回报结构化超时**（不再只释放队列、让 `listBooks` 永久悬空）；`listBooks` 对每本
+书的 `file.access` 也各自带超时，超时按"仍在"处理，宁可保留也不误删用户的书。
+
+回归：`tests/watch_index_read.test.mjs`（探测优先；missing 301 / readText 202 /
+readText 300 / 无回调超时 / 302 回退分块；>4 KB 与中文跨块边界不丢条目）与
+`tests/watch_init_diagnostics.test.mjs`（空书架、已有书、mkdir 202、readText 300、
+无回调超时、重试、Wear Engine 隔离、队列看门狗 + 诊断分类）。
+`tests/watch_library_index.test.mjs` 覆盖回滚、`move` 失败改为覆盖写（不丢数据）、
+并发增删无 `.tmp` 残留。`tests/helpers/system_file_stub.mjs` 模拟真机限制：
+`readText` 4 KB 上限（超限 302，`.readtext_max`/`.readtext_302` 注入）、
+`mkdir` 已存在返回 300、`writeText`/`move` 失败注入（`.fail_write_count`/
+`.fail_move_count`）。
 
 **这些均以 Node 文件桩验证；GT 4 真机最终验证仍待完成，故本 issue 暂不可关闭。**
 
@@ -216,6 +234,37 @@ issue #4 的 `errorCode 10` 阻断，因此**内置书是否真的能在真机�
 验证**。回归：`tests/watch_bundled_import.test.mjs`（复制成功、幂等/删了不复活、
 无资源、读超时、复制失败/超时、摘要不符、书架后台集成）；
 `tests/watch_bundled_books.test.mjs` 做静态契约。
+
+## 完整版一次性交付（issue #9）
+
+真机反馈无法只靠日志定位（手表无 HiLog），因此本 issue 把关键结论**做成屏幕可见**：
+
+- **启动不再被内置导入拖死**：`pages/index/index.js` 在目录就绪后**先把书架相关步骤
+  跑完**（`startBundledImport` 与 `readIndex` 解耦，导入在后台、可取消），空书库
+  立即得到"书库为空"，有任何文件错误都上屏真实接口名 + 错误码并提供"重试"。
+- **额外一行内置导入状态**：`index.hml` 新增 `bundledStatus` 文本（之前 JS 计算了
+  但没渲染），与书架就绪文案**分开显示**，例如"内置书籍：检查中… / 已导入 N 本 /
+  未检测到内置书籍 / 导入失败：<步骤> <原因>（code=）"。
+- **文件接口自检页**（issue #9 A6）：书架底部"文件自检"按钮进入 `pages/probe/probe`，
+  点"开始自检"后逐项显示 `mkdir / writeText / access / get / readText / readText(位置/长度)
+  / writeArrayBuffer / readArrayBuffer / copy / move / delete` 以及 **rawfile 可读性**
+  每一项的**通过/失败 + 真实 code + 无回调超时**（`storage/WatchFileProbe.js`，
+  `runFileProbe` 每项独立发起、各自 4s 有限超时，整份报告一定在有限时间内完成；
+  只在 `internal://app/gt4probe/` 下操作，绝不动书籍/进度/索引）。
+  - 它也是确认 **B2 资源路线**的关键：真机上先看"rawfile 内置资源可读性"是否通过，
+    再决定导入桥路线，而不是继续尝试臆测路径。
+- **阅读进度/设置的读写也有超时兜底**：`storage/ProgressStore.js` 的
+  `loadProgress`/`saveProgress` 各带 `setProgressTimeout`（默认 6s）settle-once；
+  不回调时读回默认值、写返回 `{ok:false,reason:'timeout'}`，阅读页据此解除忙态，
+  绝不停在无限等待。
+
+回归：`tests/watch_file_probe.test.mjs`（全项完成、rawfile 缺失只单项失败、无回调
+单项超时、真实错误码上屏、绝不触碰书库）。`tests/source-contract.test.mjs` 断言
+probe 页/模块存在、`bundledStatus` 已渲染、`startBundledImport` 在 `readIndex` 之前、
+索引探测/备份/超时契约齐备，且手表 JS 全树**无正则**（JerryScript 快照要求）。
+
+**真机闭环（装最新签名 HAP、看内置书、翻页、改字号、日夜、记住进度）仍待 GT 4 实测，
+暂不可关闭。**
 
 ## 未完成
 

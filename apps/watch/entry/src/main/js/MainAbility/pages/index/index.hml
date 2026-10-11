@@ -12,7 +12,9 @@
     </div>
     <text class="empty" if="{{ books.length === 0 }}">书库为空：请从手机发送 TXT / EPUB</text>
     <text class="hint">{{ status }}</text>
+    <text class="bundled" if="{{ bundledStatus }}">{{ bundledStatus }}</text>
     <text class="retry" if="{{ initFailed }}" onclick="retryInit">重试</text>
+    <text class="diag" onclick="openProbe">文件自检</text>
     <text class="foot">{{ transferStatus }}</text>
   </div>
 </div>

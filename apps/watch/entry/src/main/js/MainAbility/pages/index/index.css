@@ -106,3 +106,15 @@
   text-align: center;
   color: #d1a24a;
 }
+/* 文件自检入口（issue #9 A6）：把 @system.file 真实结果
+   显示到屏幕，供无 HiLog 的真机排查。 */
+.diag {
+  width: 120px;
+  height: 30px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #a7f3d0;
+  text-align: center;
+  border-radius: 10px;
+  background-color: #1f2937;
+}

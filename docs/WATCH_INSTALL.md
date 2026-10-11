@@ -218,6 +218,42 @@ adb -s TNL0220908013936 push \
       30px 和 38px"，该说明归属哪个组件尚不明确，需真机核对；
       `line-height` 在编译期会出非致命告警）
 
+## 带内置书打包 + 真机自检（issue #9）
+
+真机排查无 HiLog，因此 issue #9 把"资源/文件接口能不能用"做成屏幕可见，并按
+下面顺序做**一次**完整真机测试（不要中途零散反馈）：
+
+```bash
+# 1) 不带书：验证基础包仍正常
+tools/build_watch_lite.sh debug
+
+# 2) 带内置书：把一个目录里的顶层 *.txt 打进内部 entry.bin
+WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
+#    日志必须出现 BOOKS_IN_BIN_OK count=N 与 WATCH_BOOKS_BAKED=N
+```
+
+产物仍是**单 BIN 的 Debug 签名 HAP**：
+`apps/watch/entry/build/default/outputs/default/entry-default-debug-signed.hap`
+（本次含 5 本内置书实测大小约 4.89 MB，sha256 随打包/签名变化，验收请比结构而非摘要）。
+推包仍用上面 `adb push` 到 `/sdcard/haps/`，`/sdcard/haps/` 只留这一个包。
+
+装到 GT 4 后按屏幕操作并记录：
+
+1. **文件自检**：首页底部「文件自检」→「开始自检」，逐项看
+   `mkdir/writeText/access/get/readText/readText(位置/长度)/writeArrayBuffer/
+   readArrayBuffer/copy/move/delete/rawfile` 的通过/失败与真实 code。
+   其中 **「rawfile 内置资源可读性」**是判定 issue #9 B2 资源路线的关键证据。
+2. **书架**：内置书应出现在书架并显示标题/字节；点开能读，前后翻页、字号
+   14–32、日/夜主题、退出重进恢复本本进度。
+3. 失败时屏幕会显示 `<步骤> + <接口名> + <错误码>`（如
+   `索引读取失败 readText 302`、`内置书籍导入失败：复制第 n 本 …（code=…）`），
+   请把**屏幕文案 + 自检各项结果**作为反馈，而不是只说"卡住了"。
+
+> 说明：本机（Node 桩）只能证明逻辑正确；**rawfile 在真机是否可 `copy`/`readText`、
+> 内置书是否真能打开**必须由上面这次 GT 4 实测给出结论。GT 4 安装本身仍受
+> issue #4 `errorCode 10` 影响，若本次仍装不上，请以 HDEA 的手机日志
+> （`AppManagerReceiver errorCode`）为准反馈。
+
 ## 已知未决
 
 - `targetSdkVersion` = `5.1.0(18)`、`compatibleSdkVersion` = `4.0.0(10)`

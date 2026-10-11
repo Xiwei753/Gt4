@@ -133,12 +133,14 @@ const meta = (id, title) => ({ bookId: id, title,
   }
 }
 
-// ---- 4b. readArrayBuffer 报 300 → 不伪装成空书架，给出错误码 ----
-// issue #8：索引改用分块 readArrayBuffer，不再用超过 4KB 的 readText。
+// ---- 4b. readText 报 300 → 不伪装成空书架，给出错误码 ----
+// issue #9 A2：小索引走 readText({uri})，失败必须上屏而不是当空库。
 {
   clearLibrary();
-  const original = systemFile.readArrayBuffer;
-  systemFile.readArrayBuffer = (o) => o.fail && o.fail({}, 300);
+  writeIndex([meta('4444444444444444', '保留')]);
+  writeBook('4444444444444444', 'DDDDD');
+  const original = systemFile.readText;
+  systemFile.readText = (o) => o.fail && o.fail({}, 300);
   try {
     const page = await initPage(newPage());
     assert.equal(page.initFailed, true,
@@ -147,10 +149,10 @@ const meta = (id, title) => ({ bookId: id, title,
       'status must flag the index read error, got: ' + page.status);
     assert.ok(page.status.includes('300'),
       'status must carry the read error code, got: ' + page.status);
-    assert.ok(page.status.includes('readArrayBuffer'),
+    assert.ok(page.status.includes('readText'),
       'status must name the failing interface, got: ' + page.status);
   } finally {
-    systemFile.readArrayBuffer = original;
+    systemFile.readText = original;
   }
 }
 
@@ -218,9 +220,11 @@ const meta = (id, title) => ({ bookId: id, title,
   assert.equal(missingDiag.state, 'missing',
     'absent index from a fresh install must be classified missing');
 
-  // error：readArrayBuffer 报 300（issue #8：索引走分块 readArrayBuffer）。
-  const original = systemFile.readArrayBuffer;
-  systemFile.readArrayBuffer = (o) => o.fail && o.fail({}, 300);
+  // error：readText 报 300（issue #9 A2：小索引走 readText）。
+  writeIndex([meta('9999999999999999', '异常')]);
+  writeBook('9999999999999999', 'EEEEE');
+  const original = systemFile.readText;
+  systemFile.readText = (o) => o.fail && o.fail({}, 300);
   try {
     let errDiag = null;
     const err = await wait((cb) => LibraryIndex.listBooks(cb,
@@ -230,24 +234,26 @@ const meta = (id, title) => ({ bookId: id, title,
       'a real I/O failure must be classified error, not empty');
     assert.equal(errDiag.code, 300);
   } finally {
-    systemFile.readArrayBuffer = original;
+    systemFile.readText = original;
   }
 
-  // 无回调：看门狗释放队列，后续 listBooks 不再永久阻塞。
-  let firstCalled = false;
-  systemFile.readArrayBuffer = () => {};
-  LibraryIndex.listBooks(() => { firstCalled = true; },
-    () => {});
-  await new Promise((r) => setTimeout(r, 120));
-  assert.equal(firstCalled, false,
-    'a hung index read must not fake a callback');
-  systemFile.readArrayBuffer = original;
+  // 无回调：看门狗释放队列并回报结构化超时，后续 listBooks 不再阻塞。
+  let firstDiag = null;
+  let firstBooks = null;
+  systemFile.readText = () => {};
+  LibraryIndex.listBooks((b) => { firstBooks = b; },
+    (d) => { firstDiag = d; });
+  await new Promise((r) => setTimeout(r, 150));
+  assert.ok(firstDiag && firstDiag.state === 'error',
+    'a hung index read must report a structured error');
+  assert.deepEqual(firstBooks, []);
+  systemFile.readText = original;
   const after = await Promise.race([
     wait((cb) => LibraryIndex.listBooks(cb, () => {})),
     new Promise((_, rej) => setTimeout(
       () => rej(new Error('queue stuck after watchdog')), 1000))
   ]);
-  assert.deepEqual(after, [],
+  assert.ok(Array.isArray(after),
     'watchdog must release the queue for the next listBooks');
 }
 

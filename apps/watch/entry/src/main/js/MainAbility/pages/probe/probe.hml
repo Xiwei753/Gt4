@@ -1,0 +1,15 @@
+<div class="screen">
+  <div class="panel">
+    <text class="heading">{{ title }}</text>
+    <text class="summary">{{ summary }}</text>
+    <div class="row-list">
+      <div class="row" for="{{ rows }}">
+        <text class="row-name">{{ $item.name }}</text>
+        <text class="row-ok" if="{{ $item.ok }}">{{ $item.result }} {{ $item.detail }}</text>
+        <text class="row-bad" if="{{ !$item.ok }}">{{ $item.result }} {{ $item.detail }}</text>
+      </div>
+    </div>
+    <text class="run" onclick="runProbe">{{ running ? '自检中…' : '开始自检' }}</text>
+    <text class="back" onclick="backToLibrary">返回书架</text>
+  </div>
+</div>

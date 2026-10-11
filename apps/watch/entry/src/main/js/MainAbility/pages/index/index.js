@@ -380,5 +380,10 @@ export default {
         this.status = '删除失败：' + state.reason;
       }
     });
+  },
+  // 打开文件自检页（issue #9 A6）：无 HiLog 时用屏幕拿到
+  // @system.file 每个操作的真实结果。
+  openProbe() {
+    router.push({ uri: 'pages/probe/probe' });
   }
 };

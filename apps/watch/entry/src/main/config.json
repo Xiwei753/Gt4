@@ -41,7 +41,8 @@
       {
         "pages": [
           "pages/index/index",
-          "pages/reader/reader"
+          "pages/reader/reader",
+          "pages/probe/probe"
         ],
         "name": ".MainAbility"
       }
