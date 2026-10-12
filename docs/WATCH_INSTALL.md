@@ -254,3 +254,12 @@ adb -s TNL0220908013936 push \
 - 手机包名已改为 `com.xiwei.suyue`（对应现有 AGC 应用与证书），
   但**手机 HAP 仍未构建**；手表包名已改为 `con.xiwei.suyue.gt4`，
   需要在 AGC 注册相同包名并签发包含 GT4 UDID 的独立调试 Profile。
+
+
+### #11 安装停在手表阶段的检查要求（2026-10-12）
+
+- 最新源码已将 `config.json` 版本由 `1000001 / 0.1.1` 升到 `1000002 / 0.1.2`，打包脚本明确打印 `WATCH_BUILD_SOURCE_SHA` 和 `WATCH_BUILD_SOURCE_VERSION`。之前大量修复一直使用相同的版本号，是确实存在的升级标识问题；**尚无手表侧证据证明它就是这次卡安装的根因**。
+- 不能把 GitHub `Source-only checks` 成功说成 HAP 构建通过。真正的 `watch_lite_hap.yml` 需要注册了 `self-hosted,hmos-deveco` 的 runner，否则任务一直 `queued`、根本没有生成这次提交的 HAP。手工本地构建时必须保存 `SIGNED_LITE_HAP_PATH`、`WATCH_HAP_SIZE`、`WATCH_BUILD_SOURCE_SHA`、`WATCH_BUILD_SOURCE_VERSION` 和最终 HAP SHA256。
+- 提交给 DevEco Assistant 的必须是同一轮构建生成的 `entry-default-debug-signed.hap`；不要拿 unsigned 包、旧版同名缓存、Release 包或只通过 Node 测试的源码测试产物。签名 profile 必须是 GT4 的 debug profile，bundleName 仍为 `con.xiwei.suyue.gt4`。
+- 手机日志或 Wear Engine 返回“发送成功”**不能证明手表侧已经校验/安装完成**。下一次卡住请固定手表屏幕提示、失败代码和安装时间，并记录该 HAP 的 SHA256；不需要反复抓整份无关手机日志。
+- 当前不要随便卸载旧版或清除手表数据：卸载可能丢失应用私有阅读位置和字号。若后续设备明确返回版本/签名冲突，再根据具体错误码评估是否需要卸载。

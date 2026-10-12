@@ -27,6 +27,19 @@ fi
 
 HVIGORW="$(command -v hvigorw || echo ./hvigorw)"
 
+# 此信息只证明本次构建选择了哪个源码版本；最终可安装性
+# 仍必须以签名 HAP/内层 BIN 检查及 GT4 真机安装结果为准。
+WATCH_SOURCE_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+WATCH_SOURCE_VERSION="$(python3 - "$REPO_ROOT/apps/watch/entry/src/main/config.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    v = json.load(f)['app']['version']
+print(str(v['code']) + '/' + str(v['name']))
+PY
+)"
+echo "WATCH_BUILD_SOURCE_SHA=$WATCH_SOURCE_SHA"
+echo "WATCH_BUILD_SOURCE_VERSION=$WATCH_SOURCE_VERSION"
+
 # 清理本次输出：不能从历史产物中
 # 捡到旧 HAP（施工单 P1-8）。
 OUT_DIR="entry/build/default/outputs/default"

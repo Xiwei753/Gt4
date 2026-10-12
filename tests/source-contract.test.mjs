@@ -113,6 +113,18 @@ for (const rel of watchFiles) {
   assert.ok(existsSync('apps/watch/entry/src/main/js/MainAbility/' + rel),
     'watch module missing: ' + rel);
 }
+const watchManifest = JSON.parse(read(
+  'apps/watch/entry/src/main/config.json'));
+assert.equal(watchManifest.app.bundleName, 'con.xiwei.suyue.gt4',
+  'watch bundle identity must not change when updating the package');
+assert.ok(Number.isInteger(watchManifest.app.version.code) &&
+  watchManifest.app.version.code > 1000001,
+  'watch package update must increment version code beyond original 0.1.1');
+assert.ok(typeof watchManifest.app.version.name === 'string' &&
+  watchManifest.app.version.name !== '0.1.1',
+  'watch package update must carry a new version name');
+assert.ok(read('tools/build_watch_lite.sh').includes('WATCH_BUILD_SOURCE_VERSION='),
+  'local watch build must report the manifest version it built');
 const watchReader = read('apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.js');
 assert.ok(!watchReader.includes('getDemoBook'),
   'reader must open by bookId, not the demo getter');
