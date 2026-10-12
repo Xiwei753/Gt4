@@ -13,6 +13,15 @@
   height: 1px;
   opacity: 0;
 }
+/* 在 stack 上放置 Canvas、兼容文字及设置，避开 Lite 有条件组件不挂载问题。 */
+.reader-stack {
+  width: 420px;
+  height: 420px;
+}
+.reading-layer {
+  width: 420px;
+  height: 420px;
+}
 /* 圆形安全区：正文由 Canvas 按圆弦逐行排版（issue #11）。 */
 .reading-area {
   width: 420px;
@@ -27,9 +36,19 @@
   width: 420px;
   height: 420px;
 }
+.compat-text {
+  width: 310px;
+  height: 330px;
+  left: 55px;
+  top: 45px;
+  font-size: 20px;
+  text-align: left;
+}
 .read-error {
   width: 335px;
   height: 330px;
+  top: 45px;
+  left: 42px;
   font-size: 18px;
   color: #f3f3f3;
 }
@@ -37,6 +56,8 @@
 .settings-area {
   width: 310px;
   height: 390px;
+  left: 55px;
+  top: 15px;
   display: flex;
   flex-direction: column;
   align-items: center;

@@ -22,7 +22,8 @@ export function measureWith(ctx) {
       return null;
     }
     if (!result || typeof result.width !== 'number' ||
-        !isFinite(result.width)) {
+        !isFinite(result.width) ||
+        (text.length > 0 && result.width <= 0)) {
       return null;
     }
     return result.width;
@@ -85,4 +86,38 @@ export function drawPage(ctx, viewport, lines, style) {
   } catch (e) {
     return { ok: false, reason: 'draw_throw' };
   }
+}
+
+
+// 验证在字形区域内有非背景像素。fillText 没抛错并不代表手表真有字。
+// 不支持 getImageData 时返回 false，由 reader 的 HML 正文自动接管。
+export function hasVisibleTextPixels(ctx, viewport, lines, style) {
+  if (!ctx || typeof ctx.getImageData !== 'function') return false;
+  var isDay = style && style.theme === 'day';
+  var bg = isDay ? [245, 244, 240] : [16, 17, 20];
+  var glyphHeight = Math.max(10, Math.floor((style && style.fontSize) || 20));
+  try {
+    var checked = 0;
+    for (var n = 0; n < lines.length && checked < 4; n++) {
+      var line = lines[n];
+      if (!line || !line.text) continue;
+      var x = Math.max(0, Math.floor(line.x));
+      var y = Math.max(0, Math.floor(line.baselineY));
+      var w = Math.max(1, Math.min(96, Math.floor(viewport.width - x)));
+      var h = Math.max(1, Math.min(glyphHeight, Math.floor(viewport.height - y)));
+      if (w <= 1 || h <= 1) continue;
+      checked++;
+      var img = ctx.getImageData(x, y, w, h);
+      if (!img || !img.data || img.data.length < w * h * 4) continue;
+      for (var i = 0; i < img.data.length; i += 4) {
+        var contrast = Math.abs(img.data[i] - bg[0]) +
+          Math.abs(img.data[i + 1] - bg[1]) +
+          Math.abs(img.data[i + 2] - bg[2]);
+        if (img.data[i + 3] > 0 && contrast > 80) return true;
+      }
+    }
+  } catch (e) {
+    return false;
+  }
+  return false;
 }

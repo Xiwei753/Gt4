@@ -85,12 +85,38 @@ try {
     const ctx = ref.getContext(); // 仅用于断言：上下文已可用
     assert.equal(p.pending, null, 'pending page must be consumed');
     assert.equal(p.readingError, false);
+    assert.equal(p.canvasVerified, false, 'without pixel readback HML must remain visible');
+    assert.ok(p.body.includes('圆屏正文测试内容'),
+      'successful Canvas call is not proof of pixels: retain actual text fallback');
     assert.equal(p.offset, 0, 'first page starts at the requested offset');
     assert.ok(p.nextOffset > 0, 'a page must advance the byte offset');
     assert.ok(p.pageHint.includes('字节位置'), 'page hint must show byte position');
     assert.equal(p.saveCount, 1, 'a drawn page must schedule a progress save');
     assert.equal(p.isBusy, false, 'drawing must release the busy state');
     assert.ok(ctx, 'context must be obtainable');
+  }
+
+  // ---- 1a. Canvas readback 确有非背景字像素时才能关闭 HML 回退 ----
+  {
+    const ref = makeRef();
+    const original = ref.getContext;
+    ref.getContext = function (kind) {
+      const ctx = original.call(this, kind);
+      ctx.getImageData = (x, y, w, h) => {
+        const data = new Uint8Array(w * h * 4);
+        data[0] = 250;
+        data[1] = 250;
+        data[2] = 250;
+        data[3] = 255;
+        return { width: w, height: h, data };
+      };
+      return ctx;
+    };
+    const p = page(ref);
+    p.pending = pending(0);
+    p.renderPending();
+    assert.equal(p.canvasVerified, true,
+      'verified non-background glyph pixels may disable compatibility text');
   }
 
   // ---- 2. 画布先到：无待画页时不报错、不取上下文 ----

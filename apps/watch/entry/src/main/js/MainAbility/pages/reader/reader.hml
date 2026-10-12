@@ -3,18 +3,24 @@
   <slider class="proxy-slider" ref="crownProxy"
           min="0" max="6" onchange="onCrownChange"></slider>
 
+  <!-- Canvas 持续挂载；旧方案在 if 内销毁 Canvas，context 可能取不到。 -->
   <!-- 阅读态：只有正文（issue #11：Canvas 圆形测字排版，不再用方形 list-item）。
        左滑进设置，右滑留给 GT4 系统返回；
        两侧点按翻页，长按也可进入设置，均无可见按钮。 -->
-  <div class="reading-area" if="{{ !settingsOpen }}"
+  <stack class="reader-stack">
+    <div class="reading-area" style="opacity: {{ settingsOpen ? 0 : 1 }};"
        onswipe="onReadingSwipe" onclick="onReaderTap"
        onlongpress="openSettings">
-    <canvas ref="readerCanvas" class="reader-canvas"></canvas>
-    <text class="read-error" if="{{ readingError }}">{{ body }}</text>
-  </div>
+    <stack class="reading-layer">
+      <canvas ref="readerCanvas" class="reader-canvas"></canvas>
+      <text class="compat-text" if="{{ !canvasVerified && !readingError }}"
+            style="color: {{ theme === 'day' ? '#1c1e22' : '#f3f3f3' }};
+                   background-color: {{ theme === 'day' ? '#f5f4f0' : '#101114' }};">{{ body }}</text>
+      <text class="read-error" if="{{ readingError }}">{{ body }}</text>
+    </stack>
+    </div>
 
-  <!-- 同一路由内的设置页：点击“继续阅读”返回原位置；
-       不抢占系统右滑返回手势。 -->
+    <!-- 设置覆盖于阅读画布之上，不卸载 Canvas。 -->
   <div class="settings-area" if="{{ settingsOpen }}">
     <text class="settings-heading">阅读设置</text>
     <text class="settings-book">{{ title }}</text>
@@ -38,5 +44,6 @@
       <text class="settings-label">返回书架</text>
     </div>
     <text class="settings-hint">{{ pageHint }}</text>
-  </div>
+    </div>
+  </stack>
 </div>

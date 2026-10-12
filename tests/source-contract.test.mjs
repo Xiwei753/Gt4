@@ -574,7 +574,7 @@ const settingsStart = readerHml.indexOf('<div class="settings-area"');
 assert.ok(readStart >= 0 && settingsStart > readStart,
   'reader must have exclusive reading and settings areas');
 // 截取阅读区域本身，避免后面的注释误算成阅读页可见内容。
-const readEnd = readerHml.indexOf('<!-- 同一路由内的设置页', readStart);
+const readEnd = readerHml.indexOf('</div>', readStart) + 6;
 const textOnly = readerHml.slice(readStart, readEnd);
 assert.ok(textOnly.includes('ref="readerCanvas"') &&
   textOnly.includes('class="reader-canvas"') &&
@@ -608,6 +608,11 @@ assert.ok(readerCss.includes('.reader-canvas') &&
   readerCss.includes('height: 420px') &&
   !readerCss.includes('.reading-line'),
   'round reader must size the canvas inside the circular safe area');
+assert.ok(readerHml.includes('class="reading-layer"') &&
+  readerHml.includes('if="{{ !canvasVerified && !readingError }}"') &&
+  !readerHml.includes('if="{{ !settingsOpen }}"') &&
+  readerJs.includes('hasVisibleTextPixels('),
+  'canvas must stay mounted and retain visible text fallback until pixel proof');
 assert.ok(readerJs.includes('takeCanvasPage(') &&
   readerJs.includes('getContext(') &&
   readerJs.includes('drawPage(') &&

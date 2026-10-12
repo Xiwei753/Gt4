@@ -22,7 +22,8 @@ import { isBundled, bundledEntry,
 import { loadProgress,
   saveProgress } from '../../storage/ProgressStore';
 import { takeCanvasPage } from '../../reader/PageLayout';
-import { measureWith, drawPage } from '../../reader/CanvasTextRenderer';
+import { measureWith, drawPage, fontString, hasVisibleTextPixels }
+  from '../../reader/CanvasTextRenderer';
 import { loadReaderPreferences, saveReaderPreferences }
   from '../../storage/ReaderPreferences.js';
 import { normalizeSettings } from '../../reader/ReaderSettings';
@@ -35,8 +36,8 @@ var CANVAS_SIZE = 420;
 // 圆屏安全内边距：留出边缘，避免贴边裁切。
 var EDGE_PADDING = 12;
 // 画布未就绪时的延迟重绘间隔与最大次数（超过后上屏明确错误）。
-var DRAW_RETRY_MS = 10;
-var DRAW_MAX_RETRY = 20;
+var DRAW_RETRY_MS = 80;
+var DRAW_MAX_RETRY = 50;
 
 export default {
   data: {
@@ -47,6 +48,8 @@ export default {
     // 仅用于“读取失败”纯文字提示（正常阅读时不可见）。
     body: '正在读取本地文本……',
     readingError: false,
+    // 未经像素回读确认时 HML 文字兜底保持可见，不给用户一张黑画布。
+    canvasVerified: false,
     pageHint: '请稍候',
     offset: 0,
     nextOffset: 0,
@@ -257,7 +260,8 @@ export default {
     }
     this.drawRetries = 0;
     const view = this.viewport();
-    // 真实测量优先；不可用时回退估算并在提示里说明（不假装原生测量）。
+    // 必须先指定本页实际字号，再测量。原实现先测默认字体导致行宽错误。
+    try { ctx.font = fontString(this.fontSize); } catch (fontError) {}
     const measure = measureWith(ctx);
     const usable = !!measure && measure('测') !== null;
     const layout = takeCanvasPage(pending.data.bytes, 0, {
@@ -293,6 +297,13 @@ export default {
       this.history.push(pending.previousOffset);
       this.history = this.history.slice(-60);
     }
+    // 仅在 Canvas 像素读回确认文字确实绘出后，关闭 HML 兜底。
+    // 部分 Lite 固件不提供 getImageData：这时保留兼容正文，不假装成功。
+    this.canvasVerified = hasVisibleTextPixels(ctx, view, layout.lines, {
+      theme: this.theme,
+      fontSize: this.fontSize
+    });
+    this.body = layout.text;
     this.readingError = false;
     // takeCanvasPage 的偏移/消耗量是相对**本次窗口**的索引，
     // 加上窗口起始绝对偏移才是书内真实字节位置。
@@ -300,7 +311,9 @@ export default {
     this.offset = base + layout.offset;
     this.nextOffset = base + layout.nextOffset;
     this.pending = null;
-    this.renderNote = usable ? '' : 'measureText 不可用：已用估算行宽绘制';
+    this.renderNote = (usable ? '' : 'measureText 不可用：估算字宽') +
+      (!this.canvasVerified ?
+        (usable ? '' : ' · ') + 'Canvas 未确认：兼容文字显示' : '');
     this.pageHint = '字节位置 ' + this.offset +
       (this.renderNote ? ' · ' + this.renderNote : '') +
       (this.crownMounted ? ' · 表冠待真机验证' : '');
