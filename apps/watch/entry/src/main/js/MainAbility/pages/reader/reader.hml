@@ -3,7 +3,7 @@
   <slider class="proxy-slider" ref="crownProxy"
           min="0" max="6" onchange="onCrownChange"></slider>
 
-  <!-- Canvas 持续挂载；旧方案在 if 内销毁 Canvas，context 可能取不到。 -->
+  <!-- Canvas 常驻，阅读与设置共用页面，只有绘制这一条正文路线。 -->
   <!-- 阅读态：只有正文（issue #11：Canvas 圆形测字排版，不再用方形 list-item）。
        左滑进设置，右滑留给 GT4 系统返回；
        两侧点按翻页，长按也可进入设置，均无可见按钮。 -->
@@ -13,9 +13,7 @@
        onlongpress="openSettings">
     <stack class="reading-layer">
       <canvas ref="readerCanvas" class="reader-canvas"></canvas>
-      <text class="compat-text" if="{{ !canvasVerified && !readingError }}"
-            style="color: {{ theme === 'day' ? '#1c1e22' : '#f3f3f3' }};
-                   background-color: {{ theme === 'day' ? '#f5f4f0' : '#101114' }};">{{ body }}</text>
+      <!-- Canvas 初始化或绘制失败才提示，绝不再起第二套正文渲染。 -->
       <text class="read-error" if="{{ readingError }}">{{ body }}</text>
     </stack>
     </div>

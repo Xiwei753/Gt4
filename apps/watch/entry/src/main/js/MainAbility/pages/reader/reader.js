@@ -8,7 +8,7 @@
 //   按每行字形上下边缘取圆弦宽度），输出可直接绘制的行坐标；
 // - 绘制：reader/CanvasTextRenderer.drawPage（clearRect/fillRect/fillText）；
 // - 数据先到 / 画布先到都会正确绘制（pending + 延迟重绘）；
-// - 画布上下文每次使用前重新获取（设置页会用 if 销毁重建画布）。
+// - Context 只在 onShow 取一次；无像素回读、无文字备份层、无重试定时器。
 //
 // issue #10 复核：正文显示与翻页**绝不依赖进度文件读写完成**。
 // - 打开即从头分页显示；进度在后台加载，回来时若用户还没翻页才跳过去；
@@ -22,8 +22,7 @@ import { isBundled, bundledEntry,
 import { loadProgress,
   saveProgress } from '../../storage/ProgressStore';
 import { takeCanvasPage } from '../../reader/PageLayout';
-import { measureWith, drawPage, fontString, hasVisibleTextPixels }
-  from '../../reader/CanvasTextRenderer';
+import { drawPage } from '../../reader/CanvasTextRenderer';
 import { loadReaderPreferences, saveReaderPreferences }
   from '../../storage/ReaderPreferences.js';
 import { normalizeSettings } from '../../reader/ReaderSettings';
@@ -35,9 +34,6 @@ import { isLowerHex } from '../../util/Validate';
 var CANVAS_SIZE = 420;
 // 圆屏安全内边距：留出边缘，避免贴边裁切。
 var EDGE_PADDING = 12;
-// 画布未就绪时的延迟重绘间隔与最大次数（超过后上屏明确错误）。
-var DRAW_RETRY_MS = 80;
-var DRAW_MAX_RETRY = 50;
 
 export default {
   data: {
@@ -48,8 +44,6 @@ export default {
     // 仅用于“读取失败”纯文字提示（正常阅读时不可见）。
     body: '正在读取本地文本……',
     readingError: false,
-    // 未经像素回读确认时 HML 文字兜底保持可见，不给用户一张黑画布。
-    canvasVerified: false,
     pageHint: '请稍候',
     offset: 0,
     nextOffset: 0,
@@ -62,7 +56,7 @@ export default {
     crownMounted: false,
     crownStatus: 'unverified',
     isBusy: true,
-    // 正文与设置互斥显示。默认只展示文字，右滑/长按进入设置。
+    // 正文与设置互斥显示。左滑设置，系统右滑返回。
     settingsOpen: false
   },
   onInit() {
@@ -82,10 +76,8 @@ export default {
     // 待绘制的页（数据先到、画布后到时先存这里）。
     this.pending = null;
     this.ctx = null;
-    this.ctxRef = null;
-    this.drawTimer = null;
-    this.drawRetries = 0;
-    this.renderNote = '';
+    // onShow 才允许取得 Canvas context；数据提前到达只保留 pending。
+    this.canvasReady = false;
     // Lite 通过目标页 data 同名字段注入 bookId（不再用旧的取参接口）；
     // 切勿在这里重置 this.bookId，否则会把收到的参数清空。
     const bookId = this.bookId;
@@ -159,21 +151,19 @@ export default {
     };
   },
   // ---- 画布上下文与视口 ----
-  // 每次使用前重新获取：设置页会销毁并重建 canvas，旧 ctx 不可再用。
+  // Lite Canvas 文档：onInit/onReady 不能拿 Context。只在 onShow 获取，
+  // 一个展示周期缓存一次，分页绝不重复 getContext。
   acquireContext() {
+    if (!this.canvasReady) return null;
+    if (this.ctx) return this.ctx;
     const ref = this.$refs && this.$refs.readerCanvas;
     if (!ref || typeof ref.getContext !== 'function') return null;
-    if (this.ctx && this.ctxRef === ref) return this.ctx;
-    let ctx = null;
     try {
-      ctx = ref.getContext('2d');
+      this.ctx = ref.getContext('2d');
     } catch (e) {
-      ctx = null;
+      this.ctx = null;
     }
-    if (!ctx) return null;
-    this.ctx = ctx;
-    this.ctxRef = ref;
-    return ctx;
+    return this.ctx;
   },
   // 真实画布尺寸优先；取不到时退回 HML 绑定的初始尺寸。
   viewport() {
@@ -218,7 +208,7 @@ export default {
         if (done) done(false);
         return;
       }
-      // 数据到手：先存待画页，再（重）取上下文绘制。
+      // 文件数据可能比 onShow 早到，暂存等待画布就绪。
       this.pending = {
         data: data,
         offset: offset,
@@ -228,33 +218,43 @@ export default {
       this.renderPending();
     });
   },
-  // 需要一次延迟重绘（画布可能还没创建好）。
-  drawSoon() {
-    if (this.drawTimer) return;
-    const self = this;
-    this.drawTimer = setTimeout(function () {
-      self.drawTimer = null;
-      self.renderPending();
-    }, DRAW_RETRY_MS);
+  // 绘制失败就是失败：不启动另一套正文组件、不用像素回读或计时重试。
+  failCanvas(message, pending) {
+    this.readingError = true;
+    this.body = '无法使用 Canvas 阅读\n' + message;
+    this.pageHint = 'Canvas 绘制不可用：' + message;
+    this.pending = null;
+    this.isBusy = false;
+    if (pending && pending.done) pending.done(false);
   },
-  // 窗口里的当前页必须随时有可读文字：绘图只是可选加速/圆屏模式。
-  pageLayoutFor(pending, measure) {
+  // 只按需绘制：载入一本、翻页、设置字号/主题后返回、恢复前台。
+  renderPending() {
+    const pending = this.pending;
+    if (!pending || !this.canvasReady || this.settingsOpen) return;
+    const ctx = this.acquireContext();
+    if (!ctx) {
+      this.failCanvas('getContext(2d) 不可用', pending);
+      return;
+    }
     const view = this.viewport();
-    return takeCanvasPage(pending.data.bytes, 0, {
-      width: view.width,
-      height: view.height,
-      fontSize: this.fontSize,
-      lineHeightRatio: this.lineHeightRatio,
-      padding: EDGE_PADDING,
-      measure: measure
+    // 手表轻量模式：线性、确定性的中文字格计算，不对每个文字前缀测量。
+    const layout = takeCanvasPage(pending.data.bytes, 0, {
+      width: view.width, height: view.height,
+      fontSize: this.fontSize, lineHeightRatio: this.lineHeightRatio,
+      padding: EDGE_PADDING
     });
-  },
-  finishPending(pending, layout, verified, diagnostic) {
-    if (!layout.text) {
+    if (!layout.text || layout.nextOffset <= 0) {
       this.pending = null;
-      this.pageHint = '已经读到末尾';
       this.isBusy = false;
+      this.pageHint = '已经读到末尾';
       if (pending.done) pending.done(false);
+      return;
+    }
+    const result = drawPage(ctx, view, layout.lines, {
+      fontSize: this.fontSize, theme: this.theme
+    });
+    if (!result.ok) {
+      this.failCanvas(result.reason, pending);
       return;
     }
     if (typeof pending.previousOffset === 'number') {
@@ -264,67 +264,12 @@ export default {
     const base = pending.data.offset || 0;
     this.offset = base + layout.offset;
     this.nextOffset = base + layout.nextOffset;
-    this.body = layout.text;
-    this.canvasVerified = verified;
-    this.readingError = false;
     this.pending = null;
+    this.readingError = false;
     this.isBusy = false;
-    this.pageHint = '字节位置 ' + this.offset +
-      (diagnostic ? ' · ' + diagnostic : '');
+    this.pageHint = '字节位置 ' + this.offset;
     this.scheduleSave();
     if (pending.done) pending.done(true);
-  },
-  // 数据一到就先准备文本回退。Canvas 不能绘制时仍完成同一页阅读。
-  renderPending() {
-    const pending = this.pending;
-    if (!pending) return;
-    const ctx = this.acquireContext();
-    if (!ctx) {
-      const preview = this.pageLayoutFor(pending, null);
-      if (preview.text) {
-        this.body = preview.text;
-        this.canvasVerified = false;
-        this.readingError = false;
-      }
-      this.drawRetries += 1;
-      if (this.drawRetries > DRAW_MAX_RETRY) {
-        this.drawRetries = 0;
-        this.finishPending(pending, preview, false,
-          'Canvas 无法初始化，已切换文字阅读');
-        return;
-      }
-      this.drawSoon();
-      return;
-    }
-    this.drawRetries = 0;
-    const view = this.viewport();
-    // 用即将实际绘制的字体测量，不能先测默认字体、后设 20px。
-    try { ctx.font = fontString(this.fontSize); } catch (e) {}
-    const measure = measureWith(ctx);
-    const usable = !!measure && measure('测') !== null;
-    const layout = this.pageLayoutFor(pending, usable ? measure : null);
-    if (!layout.text) {
-      this.finishPending(pending, layout, false, '');
-      return;
-    }
-    this.body = layout.text;
-    const result = drawPage(ctx, view, layout.lines, {
-      fontSize: this.fontSize,
-      theme: this.theme
-    });
-    if (!result.ok) {
-      this.finishPending(pending, layout, false,
-        'Canvas 绘制失败（' + result.reason + '），已切换文字阅读');
-      return;
-    }
-    const verified = hasVisibleTextPixels(ctx, view, layout.lines, {
-      theme: this.theme,
-      fontSize: this.fontSize
-    });
-    this.finishPending(pending, layout, verified,
-      (usable ? '' : 'measureText 不可用：估算字宽') +
-      (!verified ?
-        (usable ? '' : ' · ') + 'Canvas 未确认：兼容文字显示' : ''));
   },
   // 重绘当前页（设置返回 / 画布重建 / 主题变化后调用）。
   redraw() {
@@ -375,7 +320,8 @@ export default {
     this.settingsTouched = true;
     this.savePreferences();
     this.scheduleSave();
-    this.loadPage(this.offset);
+    // 设置页隐藏了 Canvas，不在后台白白重绘；返回阅读时统一排版。
+    if (!this.settingsOpen) this.redraw();
   },
   // 切换主题：Canvas 不用 CSS，必须重绘（同一位置，不分页变化）。
   toggleTheme() {
@@ -385,16 +331,17 @@ export default {
     this.settingsTouched = true;
     this.savePreferences();
     this.scheduleSave();
-    this.redraw();
+    if (!this.settingsOpen) this.redraw();
   },
   // 展开/收起设置行（现在是独占一屏的设置页，阅读位置不变）。
   openSettings() {
     this.settingsOpen = true;
   },
-  // 返回阅读：设置页会销毁并重建 canvas，必须重新取上下文并重绘当前页。
+  // Canvas 始终挂载，返回阅读后只绘制一次当前页。
   closeSettings() {
     this.settingsOpen = false;
-    this.redraw();
+    if (this.pending) this.renderPending();
+    else if (!this.isLoading) this.redraw();
   },
   // 左滑进入设置；右滑保留给 GT4 系统返回手势，不在应用拦截。
   // 左滑不再翻页，翻页用点按正文两侧或表冠。
@@ -437,7 +384,7 @@ export default {
     this.settingsTouched = true;
     this.savePreferences();
     this.scheduleSave();
-    this.loadPage(this.offset);
+    if (!this.settingsOpen) this.redraw();
   },
   // Lite FA @system.storage 独立保存阅读设置，连续调整串行落盘。
   savePreferences() {
@@ -460,20 +407,25 @@ export default {
   // 隐藏 slider 挂载后抢占表冠焦点；设备上若 $refs.crownProxy
   // 不存在则静默跳过，触屏「上页/下页」照常可用。
   onShow() {
+    this.canvasReady = true;
+    this.ctx = null;
     this.focusCrown(true);
-    // 画布可能在隐藏/重建后需要重绘（Lite 只在此刻保证可拿上下文）。
-    if (this.bookId) this.redraw();
+    const ctx = this.acquireContext();
+    if (!ctx) {
+      this.failCanvas('onShow 无法获取 getContext(2d)', this.pending);
+      return;
+    }
+    if (this.pending) this.renderPending();
+    else if (this.bookId && !this.isLoading && !this.settingsOpen) this.redraw();
   },
   onHide() {
+    this.canvasReady = false;
+    this.ctx = null;
     this.focusCrown(false);
   },
   onDestroy() {
-    if (this.drawTimer) {
-      clearTimeout(this.drawTimer);
-      this.drawTimer = null;
-    }
+    this.canvasReady = false;
     this.ctx = null;
-    this.ctxRef = null;
     this.pending = null;
     this.focusCrown(false);
   },

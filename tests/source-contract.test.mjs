@@ -609,17 +609,31 @@ assert.ok(readerCss.includes('.reader-canvas') &&
   !readerCss.includes('.reading-line'),
   'round reader must size the canvas inside the circular safe area');
 assert.ok(readerHml.includes('class="reading-layer"') &&
-  readerHml.includes('if="{{ !canvasVerified && !readingError }}"') &&
-  !readerHml.includes('if="{{ !settingsOpen }}"') &&
-  readerJs.includes('hasVisibleTextPixels('),
-  'canvas must stay mounted and retain visible text fallback until pixel proof');
+  readerHml.includes('ref="readerCanvas"') &&
+  !readerHml.includes('compat-text') &&
+  !readerHml.includes('canvasVerified') &&
+  !readerHml.includes('if="{{ !settingsOpen }}"'),
+  'the Canvas must stay mounted; no second HML novel renderer');
+assert.ok(!readerCss.includes('compat-text') &&
+  !readerCss.includes('.reading-line'),
+  'no rectangular fallback text CSS or list-item route');
 assert.ok(readerJs.includes('takeCanvasPage(') &&
   readerJs.includes('getContext(') &&
   readerJs.includes('drawPage(') &&
-  readerJs.includes('measureWith(') &&
   !readerJs.includes('takeRoundPage(') &&
-  !readerJs.includes('pageLines'),
-  'reader must paginate with real measurement and draw on canvas');
+  !readerJs.includes('measureWith(') &&
+  !readerJs.includes('canvasVerified') &&
+  !readerJs.includes('drawSoon(') &&
+  !readerJs.includes('getImageData(') &&
+  !readerJs.includes('setTimeout('),
+  'one Canvas draw path without pixel readback, fallback, or retry timers');
+assert.ok(!read(
+  'apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js')
+  .includes('getImageData(') &&
+  !read(
+    'apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js')
+  .includes('measureText('),
+  'Lite reader must not use expensive native pixel or measurement loops');
 assert.ok(readerJs.includes('progressReady') &&
   readerJs.includes('loadReaderPreferences') &&
   readerJs.includes('saveReaderPreferences'),

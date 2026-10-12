@@ -202,8 +202,8 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
   GT 4 上跑过，`crownStatus()` 仍是 `'unverified'`。
 - 表冠翻页：机制已接入并通过纯逻辑单测，但 **GT4 是否真的下发旋转事件、
   每页阈值多少，必须真机实测**（见 `reader/CrownInput.js` 顶部说明）。
-- 圆屏真实像素分页：issue #11 已改为 `<canvas>` + `measureText` 实测字形宽度排版
-  （见文末「圆形正文」段），但 **GT4 固件上 Canvas/measureText 的实际能力与坐标单位仍未真机验证**。
+- 圆屏正文：Issue #11 使用常驻 `<canvas>` + 轻量字格计算，一页只绘制一次；
+  GT4 固件能否实际显示中文仍须真机验证。
 - 在 GT 4 46mm 上安装、启动、翻页、恢复进度，并核对
   `targetSdkVersion`/`compatibleSdkVersion` 的 `6.1.1(24)`
   是否为 GT 4 开发安装实际可用的版本。**编译通过不等于真机适配通过。**
@@ -217,40 +217,30 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 使用支持 Lite Wearable 的 DevEco 打开本目录，配置本机签名以及匹配的 Lite Wearable SDK。`readArrayBuffer` 字节窗口、FA HML 的 `for` 循环与 `$idx` 事件参数、中文分页均需真机测试。不提交签名密钥。
 
-## 圆形正文：Canvas 逐行量字绘制（Issue #11）
+## 圆屏正文：唯一 Canvas 渲染路线（Issue #11）
 
-- **为什么换渲染层**：之前把正文放进 `420×420` 的方形 `<list>` + 多个 `<list-item>`，
-  Lite HML 仍按矩形定位/裁剪，只是"看起来在圆里"。issue #11 要求**真正用 JS FA
-  `<canvas>` + `CanvasRenderingContext2D` 在圆屏安全范围内逐行量字、排字、绘字**；
-  `<canvas>` 只作背景而文字交给 list-item 不算完成。
-- **分页**（`reader/PageLayout.js`）：`takeCanvasPage(bytes, offset, options)` 接收
-  **实际测量函数**（`options.measure`）与**实际画布尺寸**，圆心 `cx=w/2,cy=h/2`、
-  安全半径 `r=min(w,h)/2-padding`；每行按**字形盒上下缘**（不是仅中点）取圆弦
-  `dy=max(|top-cy|,|bottom-cy|)`、半宽 `sqrt(r²-dy²)`，得到 `{text,x,baselineY,maxWidth}`
-  与真正被渲染消耗的 `nextOffset`。**上短、中宽、下短**；字宽逐字用
-  `measureText().width` 实测，不在正常路径用估算冒充。
-  只有 `measure` 缺失时才回退到 `createEstimator(fontSize)`（CJK 1.1×、ASCII 0.62×、
-  emoji 1.2×），并在设置页提示 `measureText 不可用：已用估算行宽绘制`。
-  `offset`/`nextOffset` 都是**相对传入 bytes 的窗口内偏移**（调用方加窗口起始绝对偏移）；
-  跨 2048 字节窗口不完整的 UTF-8 字符留给下一页，绝不吞字或重复。
-- **绘制**（`reader/CanvasTextRenderer.js`）：只负责绘制，`clearPage`/`drawPage` 先
-  `clearRect`+`fillRect` 清上一页，再设 `font/fillStyle/textBaseline='top'/textAlign='left'`
-  `fillText` 逐行画（左对齐、在每行安全左边界起笔，不逐行居中）。暗/亮只换画布背景与字色
-  （day `#f5f4f0`/`#1c1e22`，night `#101114`/`#f3f3f3`）。无 `fall` 者返回结构化失败
-  （`no_context`/`clear_throw`/`draw_throw`），不静默用列表冒充成功。
-- **生命周期**（`pages/reader/reader.js`）：**不在 `onInit` 取上下文**；读取成功先把待画页
-  存在 `pending`，再由 `renderPending()` 拿 `$refs.readerCanvas.getContext('2d')` 后分页绘制
-  （带 10ms/最多 20 次的短重试，避免"数据早于画布"竞态）。上下文按 ref 缓存复用；
-  翻页、字号/行距变化、日夜切换、从设置页返回（会销毁重建 Canvas）都会**重取上下文并重绘**，
-  不逐帧重绘。`onShow` 也重绘一次，避免"第一眼空白，重进才有字"。
-  取不到上下文超过重试上限时上屏 `绘制初始化失败：未取到画布上下文`，
-  `drawPage` 失败上屏 `绘制失败：<reason>`，不黑屏、不新增手动自检按钮。
-- **交互不变**：左滑进设置、右侧点按下页/左侧点按上页（按**实际画布宽度**分半，
-  不再写死 233px）、长按进设置、系统右滑返回、表冠翻页、进度/设置持久化照旧；
-  正文界面只有正文，不显示书名/页码/底栏。
-- **字号与设置持久化**：`storage/ReaderPreferences.js` 用 Lite 可用
-  **`@system.storage`** 按书保存字号/行距/日夜主题，并记录最近一次默认值给新书；
-  **读取存档前禁止把默认字号写回**（避免覆盖旧设置），文件进度与 KV 设置分离。
-- **GT4 真机待验证（未夸称已通过）**：`<canvas>`/`getContext('2d')`/`measureText`/`fillText`
-  在目标固件上是否可用、坐标单位与 466×466 物理分辨率的关系、`if="{{ !settingsOpen }}"`
-  销毁重建后 ref 生命周期，都必须真机确认；本机只能保证失败时给出可定位的真实原因。
+- **删除旧方案**：已去除圆形模拟的 `<list-item>` 正文、矩形 `compat-text`、
+  `canvasVerified`、`getImageData` 像素回读、`measureText` 逐前缀测字、
+  `drawSoon` 定时重试、旧矩形分页 `takePage`。**不保留双重渲染/自动回退。**
+- **分页**：`reader/PageLayout.takeCanvasPage` 用圆弦安全区域计算每行左右边界；
+  文字位置采用单次线性字格计算（中文约 1.14em、西文约 0.72em），在边缘留余量。
+  字格是本渲染算法的一部分，而不是字体测量失败后才走的隐藏替代方案。
+  UTF-8 按字节推进，换行/跨窗口多字节字符不丢失，`nextOffset` 与阅读存档一致。
+- **绘制**：`reader/CanvasTextRenderer.drawPage` 只调用
+  `clearRect`、`fillRect`、设置字体/颜色和每行一次 `fillText`。
+  参考早期 HarmonyOS Lite 手表 Canvas 游戏 `onShow` 设置字体后绘字的方式，
+  不调用像素回读、离屏画布、动画帧或多重 Context。
+- **生命周期**：`onInit` 接到文件数据仅保存 `pending`；
+  `onShow` 获取一次 `getContext('2d')` 后绘制。
+  如果先有画布、后有数据，则数据回调绘制。设置页打开时不额外绘图；
+  返回正文时按最新字号、行距、主题重绘当前页一次。
+- **失败行为**：Canvas 初始化或绘制报错，仅显示一次明确错误提示；
+  **不试图自动改回矩形 HML 阅读、不死循环重试、不清除原书或进度**。
+- **交互保留**：左滑设置、右滑留给系统、点按两侧翻页、表冠机制、
+  `@system.storage` 的字号/行距/主题记忆均保留。
+- **真机验收**：重点核对启动即有中文、圆周文字不裁切、字体 14/20/32px
+  实际变化、设置退出/重开仍保持、连续翻页不死机。
+  Node 假 Canvas 测试只覆盖逻辑，**不能代替 Lite Hvigor 和真实 GT4**。
+
+参考旧版手表 JS Canvas 绘字案例：
+https://www.cnblogs.com/HarmonyOS/p/14109033.html
