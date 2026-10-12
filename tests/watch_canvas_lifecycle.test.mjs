@@ -161,10 +161,12 @@ try {
     p.drawRetries = 100;
     p.pending = pending(0);
     p.renderPending();
-    assert.equal(p.readingError, true, 'missing context must be reported, not silent');
-    assert.ok(p.body.includes('绘制初始化失败'),
-      'screen must name the failed canvas initialisation');
-    assert.ok(p.body.includes('getContext'), 'screen must name the failing interface');
+    assert.equal(p.readingError, false,
+      'missing Canvas context must not hide readable novel text');
+    assert.ok(p.body.includes('圆屏正文测试内容'),
+      'when canvas is missing, automatically show real novel text');
+    assert.ok(p.pageHint.includes('Canvas 无法初始化'),
+      'settings diagnostics must explain the non-Canvas fallback');
     assert.equal(p.pending, null);
   }
 
@@ -185,9 +187,11 @@ try {
     const p = page(ref);
     p.pending = pending(0);
     p.renderPending();
-    assert.equal(p.readingError, true);
-    assert.ok(p.body.includes('绘制失败') && p.body.includes('no_context'),
-      'screen must name the drawing failure reason');
+    assert.equal(p.readingError, false);
+    assert.ok(p.body.includes('圆屏正文测试内容'),
+      'missing fillText must still display real novel body');
+    assert.ok(p.pageHint.includes('no_context'),
+      'diagnostic must retain failure cause');
   }
 
   // ---- 8. 绘制抛异常：报 draw_throw 而非崩溃 ----
@@ -196,8 +200,11 @@ try {
     const p = page(ref);
     p.pending = pending(0);
     assert.doesNotThrow(() => p.renderPending());
-    assert.equal(p.readingError, true);
-    assert.ok(p.body.includes('draw_throw'), 'screen must name the throwing step');
+    assert.equal(p.readingError, false);
+    assert.ok(p.body.includes('圆屏正文测试内容'),
+      'drawing errors must not discard the text page');
+    assert.ok(p.pageHint.includes('draw_throw'),
+      'diagnostic must name the throwing step');
   }
 
   // ---- 9. 设置开关返回 / 主题 / 字号 / onShow 都要重绘当前页 ----

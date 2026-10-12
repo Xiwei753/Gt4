@@ -237,58 +237,22 @@ export default {
       self.renderPending();
     }, DRAW_RETRY_MS);
   },
-  // 把待画页画到画布上（分页 → 绘制）。
-  renderPending() {
-    const pending = this.pending;
-    if (!pending) return;
-    const ctx = this.acquireContext();
-    if (!ctx) {
-      this.drawRetries += 1;
-      if (this.drawRetries > DRAW_MAX_RETRY) {
-        this.drawRetries = 0;
-        this.pending = null;
-        this.readingError = true;
-        this.body = '绘制初始化失败：未取到画布上下文' +
-          '\n接口：readerCanvas.getContext(\'2d\')';
-        this.pageHint = '绘制初始化失败';
-        this.isBusy = false;
-        if (pending.done) pending.done(false);
-        return;
-      }
-      this.drawSoon();
-      return;
-    }
-    this.drawRetries = 0;
+  // 窗口里的当前页必须随时有可读文字：绘图只是可选加速/圆屏模式。
+  pageLayoutFor(pending, measure) {
     const view = this.viewport();
-    // 必须先指定本页实际字号，再测量。原实现先测默认字体导致行宽错误。
-    try { ctx.font = fontString(this.fontSize); } catch (fontError) {}
-    const measure = measureWith(ctx);
-    const usable = !!measure && measure('测') !== null;
-    const layout = takeCanvasPage(pending.data.bytes, 0, {
+    return takeCanvasPage(pending.data.bytes, 0, {
       width: view.width,
       height: view.height,
       fontSize: this.fontSize,
       lineHeightRatio: this.lineHeightRatio,
       padding: EDGE_PADDING,
-      measure: usable ? measure : null
+      measure: measure
     });
+  },
+  finishPending(pending, layout, verified, diagnostic) {
     if (!layout.text) {
+      this.pending = null;
       this.pageHint = '已经读到末尾';
-      this.pending = null;
-      this.isBusy = false;
-      if (pending.done) pending.done(false);
-      return;
-    }
-    const result = drawPage(ctx, view, layout.lines, {
-      fontSize: this.fontSize,
-      theme: this.theme
-    });
-    if (!result.ok) {
-      this.pending = null;
-      this.readingError = true;
-      this.body = '绘制失败：' + result.reason +
-        '\n接口：ctx.fillText / clearRect';
-      this.pageHint = '绘制失败：' + result.reason;
       this.isBusy = false;
       if (pending.done) pending.done(false);
       return;
@@ -297,30 +261,70 @@ export default {
       this.history.push(pending.previousOffset);
       this.history = this.history.slice(-60);
     }
-    // 仅在 Canvas 像素读回确认文字确实绘出后，关闭 HML 兜底。
-    // 部分 Lite 固件不提供 getImageData：这时保留兼容正文，不假装成功。
-    this.canvasVerified = hasVisibleTextPixels(ctx, view, layout.lines, {
-      theme: this.theme,
-      fontSize: this.fontSize
-    });
-    this.body = layout.text;
-    this.readingError = false;
-    // takeCanvasPage 的偏移/消耗量是相对**本次窗口**的索引，
-    // 加上窗口起始绝对偏移才是书内真实字节位置。
     const base = pending.data.offset || 0;
     this.offset = base + layout.offset;
     this.nextOffset = base + layout.nextOffset;
+    this.body = layout.text;
+    this.canvasVerified = verified;
+    this.readingError = false;
     this.pending = null;
-    this.renderNote = (usable ? '' : 'measureText 不可用：估算字宽') +
-      (!this.canvasVerified ?
-        (usable ? '' : ' · ') + 'Canvas 未确认：兼容文字显示' : '');
-    this.pageHint = '字节位置 ' + this.offset +
-      (this.renderNote ? ' · ' + this.renderNote : '') +
-      (this.crownMounted ? ' · 表冠待真机验证' : '');
-    // 渲染完成即解锁：不等进度写完，翻页不被进度锁死（issue #10）。
     this.isBusy = false;
+    this.pageHint = '字节位置 ' + this.offset +
+      (diagnostic ? ' · ' + diagnostic : '');
     this.scheduleSave();
     if (pending.done) pending.done(true);
+  },
+  // 数据一到就先准备文本回退。Canvas 不能绘制时仍完成同一页阅读。
+  renderPending() {
+    const pending = this.pending;
+    if (!pending) return;
+    const ctx = this.acquireContext();
+    if (!ctx) {
+      const preview = this.pageLayoutFor(pending, null);
+      if (preview.text) {
+        this.body = preview.text;
+        this.canvasVerified = false;
+        this.readingError = false;
+      }
+      this.drawRetries += 1;
+      if (this.drawRetries > DRAW_MAX_RETRY) {
+        this.drawRetries = 0;
+        this.finishPending(pending, preview, false,
+          'Canvas 无法初始化，已切换文字阅读');
+        return;
+      }
+      this.drawSoon();
+      return;
+    }
+    this.drawRetries = 0;
+    const view = this.viewport();
+    // 用即将实际绘制的字体测量，不能先测默认字体、后设 20px。
+    try { ctx.font = fontString(this.fontSize); } catch (e) {}
+    const measure = measureWith(ctx);
+    const usable = !!measure && measure('测') !== null;
+    const layout = this.pageLayoutFor(pending, usable ? measure : null);
+    if (!layout.text) {
+      this.finishPending(pending, layout, false, '');
+      return;
+    }
+    this.body = layout.text;
+    const result = drawPage(ctx, view, layout.lines, {
+      fontSize: this.fontSize,
+      theme: this.theme
+    });
+    if (!result.ok) {
+      this.finishPending(pending, layout, false,
+        'Canvas 绘制失败（' + result.reason + '），已切换文字阅读');
+      return;
+    }
+    const verified = hasVisibleTextPixels(ctx, view, layout.lines, {
+      theme: this.theme,
+      fontSize: this.fontSize
+    });
+    this.finishPending(pending, layout, verified,
+      (usable ? '' : 'measureText 不可用：估算字宽') +
+      (!verified ?
+        (usable ? '' : ' · ') + 'Canvas 未确认：兼容文字显示' : ''));
   },
   // 重绘当前页（设置返回 / 画布重建 / 主题变化后调用）。
   redraw() {
