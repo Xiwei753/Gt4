@@ -11,14 +11,13 @@ import { createWatchLoader, writeRouterStub, writeStorageStub }
 const tmp=mkdtempSync(join(tmpdir(),'suyue-onlycanvas-'));
 const disk=mkdtempSync(join(tmpdir(),'suyue-onlycanvas-fs-'));
 function canvas(options={}) {
-  const state={gets:0,draws:0,clears:0,metrics:0};
+  const state={gets:0,draws:0,backgrounds:0,metrics:0};
   return {width:420,height:420,state,
     getContext(){
       state.gets++;
       if(options.noContext)return null;
       const ctx={
-        clearRect(){state.clears++},
-        fillRect(){},
+        fillRect(){state.backgrounds++},
         fillText(){state.draws++;if(options.throwDraw)throw Error('draw')}
       };
       if(options.missingFillText)delete ctx.fillText;
@@ -64,12 +63,14 @@ try {
     assert.equal(p.readingError,false);
     assert.ok(p.nextOffset>p.offset);
     assert.ok(ref.state.draws>0);
-    assert.equal(ref.state.clears,1);
+    assert.equal(ref.state.backgrounds,1,
+      'one background fill per page without clearRect');
     assert.equal(ref.state.metrics,0,'no measureText and no pixel readback');
     assert.equal(ref.state.gets,1,'context only once for active page');
     pending(p,p.nextOffset);p.renderPending();
     assert.equal(ref.state.gets,1,'reuse context across page flips');
-    assert.equal(ref.state.clears,2);
+    assert.equal(ref.state.backgrounds,2,
+      'two page paints use two background fills');
     assert.equal(p.saved,2);
   }
   // Canvas before data: keep cached context; wait for actual file callback.
@@ -93,7 +94,7 @@ try {
     assert.equal(ref.state.gets,1);
     assert.equal(p.saved,0);
   }
-  // Failed fillText also fails clearly, never reads/prints fallback paragraphs.
+  // 真正缺少必需的 fillText 才失败；无 clearRect 的 context 正常阅读。
   for(const mode of [{missingFillText:true},{throwDraw:true}]) {
     const ref=canvas(mode),p=page(ref);
     pending(p);p.onShow();

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// GT4 Lite JS FA：唯一 Canvas 绘字器。参考旧版手表 Canvas 游戏的
-// onShow -> getContext('2d') -> ctx.font -> fillText 固定坐标路径。
-// 不执行 getImageData、measureText 或逐帧监控。
+// GT4 Lite JS FA：唯一 Canvas 绘字器。
+// 对照实际支持 GT4 的开源 sportwatch-cacti-hop：fillRect 覆盖旧帧，
+// 然后设置 ctx.font 并 fillText；不能将未验证的 clearRect 设为必需。
+// 不执行 getImageData、measureText 或定时重试。
 export function pageColors(theme) {
   return theme === 'day'
     ? { background: '#f5f4f0', color: '#1c1e22' }
@@ -9,20 +10,22 @@ export function pageColors(theme) {
 }
 
 export function fontString(fontSize) {
-  return Math.floor(fontSize) + 'px HYQiHei-65S';
+  return Math.floor(fontSize) + 'px';
 }
 
-// 每次翻页恰好一次清屏、一次背景填充，每个非空行一次 fillText。
+// 每页只用 fillRect 覆盖上一页，再以 fillText 绘制各行。
 export function drawPage(ctx, viewport, lines, style) {
-  if (!ctx || typeof ctx.clearRect !== 'function' ||
-      typeof ctx.fillRect !== 'function' ||
-      typeof ctx.fillText !== 'function') {
-    return { ok: false, reason: 'unsupported_canvas_api' };
+  if (!ctx) return { ok: false, reason: 'missing_2d_context' };
+  // 开源 GT4 Lite 游戏实际只用 fillRect/fillText，不强制 clearRect。
+  if (typeof ctx.fillRect !== 'function') {
+    return { ok: false, reason: 'missing_fillRect' };
+  }
+  if (typeof ctx.fillText !== 'function') {
+    return { ok: false, reason: 'missing_fillText' };
   }
   const colors = pageColors(style && style.theme);
   const size = (style && style.fontSize) || 20;
   try {
-    ctx.clearRect(0, 0, viewport.width, viewport.height);
     ctx.fillStyle = colors.background;
     ctx.fillRect(0, 0, viewport.width, viewport.height);
     ctx.font = fontString(size);

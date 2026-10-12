@@ -21,22 +21,30 @@ for(const fontSize of [14,20,32]){
 const calls=[];
 const ctx={
   font:'', fillStyle:'', textBaseline:'', textAlign:'',
-  clearRect(){calls.push('clear');},
   fillRect(){calls.push('background');},
   fillText(text,x,y){calls.push(['line',text,x,y]);}
 };
 const p=takeCanvasPage(book,0,{width:420,height:420,fontSize:20,lineHeightRatio:1.55});
 const rendered=drawPage(ctx,{width:420,height:420},p.lines,{fontSize:20,theme:'night'});
 assert.equal(rendered.ok,true);
-assert.equal(calls.filter(x=>x==='clear').length,1);
+assert.equal(calls.filter(x=>x==='clear').length,0,
+  'GT4 Lite must not depend on clearRect');
 assert.equal(calls.filter(x=>x==='background').length,1);
 assert.equal(calls.filter(x=>Array.isArray(x)).length,rendered.drawn);
 assert.ok(ctx.font.includes('20px'));
 assert.equal(ctx.textBaseline,'top');
 assert.equal(pageColors('day').background,'#f5f4f0');
 assert.ok(fontString(32).includes('32px'));
-assert.equal(drawPage(null,{width:420,height:420},[],{}).ok,false);
-const broken={clearRect(){},fillRect(){},fillText(){throw Error('fail')}};
+assert.equal(drawPage(null,{width:420,height:420},[],{}).reason,'missing_2d_context');
+const noClear={fillRect(){}, fillText(){}};
+assert.equal(drawPage(noClear,{width:420,height:420},
+  [{text:'中文',x:14,baselineY:40}],{fontSize:20}).ok,true,
+  'real GT4 Lite style context works without clearRect');
+assert.equal(drawPage({fillRect(){}},{width:420,height:420},[],{}).reason,
+  'missing_fillText');
+assert.equal(drawPage({fillText(){}},{width:420,height:420},[],{}).reason,
+  'missing_fillRect');
+const broken={fillRect(){},fillText(){throw Error('fail')}};
 assert.equal(drawPage(broken,{width:420,height:420},[{text:'甲',x:12,baselineY:12}],{fontSize:20}).reason,'canvas_draw_failed');
 assert.equal(typeof ctx.getImageData,'undefined','pixel readback is not needed');
 assert.equal(typeof ctx.measureText,'undefined','measureText is not needed');

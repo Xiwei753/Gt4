@@ -224,10 +224,17 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
   文字位置采用单次线性字格计算（中文约 1.14em、西文约 0.72em），在边缘留余量。
   字格是本渲染算法的一部分，而不是字体测量失败后才走的隐藏替代方案。
   UTF-8 按字节推进，换行/跨窗口多字节字符不丢失，`nextOffset` 与阅读存档一致。
-- **绘制**：`reader/CanvasTextRenderer.drawPage` 只调用
-  `clearRect`、`fillRect`、设置字体/颜色和每行一次 `fillText`。
-  参考早期 HarmonyOS Lite 手表 Canvas 游戏 `onShow` 设置字体后绘字的方式，
-  不调用像素回读、离屏画布、动画帧或多重 Context。
+- **绘制（GT4 实测错误纠偏）**：`reader/CanvasTextRenderer.drawPage`
+  删除对 `clearRect` 的要求，使用**每页一次 `fillRect` 覆盖旧画面**
+  再调用每行 `fillText`；字号设置采用原生项目的 `ctx.font='20px'`
+  格式，不再使用未经证实的指定字体名。实际 GT4 Lite 开源游戏
+  https://github.com/Explore-In-HMOS-Wearable/sportwatch-cacti-hop
+  的 `game_screen.js` 同样只使用 `fillRect` 和 `fillText`。
+  `getContext('2d')` 已能在设备上返回对象，先前报错
+  `unsupported_canvas_api` 是素阅自己的过严方法检查产生的，
+  但**无法仅凭旧错误判定具体缺的是哪一项**。新版将分别显示
+  `missing_fillRect` 和 `missing_fillText`。不增加任何 HML 正文回退、
+  定时重试、逐帧自检或备用渲染器。
 - **生命周期**：`onInit` 接到文件数据仅保存 `pending`；
   `onShow` 获取一次 `getContext('2d')` 后绘制。
   如果先有画布、后有数据，则数据回调绘制。设置页打开时不额外绘图；

@@ -657,6 +657,14 @@ assert.ok(!read(
     'apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js')
   .includes('measureText('),
   'Lite reader must not use expensive native pixel or measurement loops');
+const liteCanvasRenderer = read(
+  'apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js');
+assert.ok(!liteCanvasRenderer.includes('ctx.clearRect(') &&
+  !liteCanvasRenderer.includes("typeof ctx.clearRect") &&
+  liteCanvasRenderer.includes("typeof ctx.fillRect") &&
+  liteCanvasRenderer.includes("typeof ctx.fillText") &&
+  liteCanvasRenderer.includes('missing_fillText'),
+  'GT4 renderer must match confirmed Lite open-source fillRect/fillText APIs');
 assert.ok(readerJs.includes('progressReady') &&
   readerJs.includes('loadReaderPreferences') &&
   readerJs.includes('saveReaderPreferences'),
