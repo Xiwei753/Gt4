@@ -6,7 +6,7 @@
 // Run: node --experimental-default-type=module tests/pagination.test.mjs
 import assert from 'node:assert/strict';
 import { TextEncoder } from 'node:util';
-import { decodeAt, takePage } from '../apps/watch/entry/src/main/js/MainAbility/reader/PageLayout.js';
+import { decodeAt, takePage, takeRoundPage, roundLineWidth } from '../apps/watch/entry/src/main/js/MainAbility/reader/PageLayout.js';
 import { columnsFor, rowsFor,
   normalizeSettings } from '../apps/watch/entry/src/main/js/MainAbility/reader/ReaderSettings.js';
 
@@ -173,3 +173,28 @@ assert.equal(takePage(encode.encode(''), 0, 14, 7).nextOffset, 0);
 
 console.info('PASS: UTF-8 Chinese/emoji, CRLF, long runs, ' +
   'boundary, EOF, 100x back/forward, font stability; pages=' + count);
+
+
+// #10 圆屏逐行排版：圆心更宽，逐字节消耗稳定；字号变化不会吞字。
+{
+  const sample = '文字甲乙丙丁ABCDEFG😀\n'.repeat(250);
+  const bytes = encode.encode(sample);
+  const probe = takeRoundPage(bytes.subarray(0, 2048), 0, 20, 1.55);
+  assert.ok(probe.lines.length > 6);
+  assert.ok(roundLineWidth(0, 13, 31) < roundLineWidth(6, 13, 31),
+    'top chord must be narrower than center chord');
+  for (const font of [14, 20, 32]) {
+    let pos = 0;
+    let out = '';
+    let guard = 0;
+    while (pos < bytes.length) {
+      const page = takeRoundPage(bytes.subarray(pos, pos + 2048),
+        pos, font, 1.55);
+      assert.ok(page.nextOffset > pos, 'round paginator is stuck: ' + pos);
+      out += page.text;
+      pos = page.nextOffset;
+      assert.ok(++guard < 4000);
+    }
+    assert.equal(out, sample, 'round pagination must preserve source text');
+  }
+}

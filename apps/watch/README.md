@@ -215,3 +215,9 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 ## 开发提示
 
 使用支持 Lite Wearable 的 DevEco 打开本目录，配置本机签名以及匹配的 Lite Wearable SDK。`readArrayBuffer` 字节窗口、FA HML 的 `for` 循环与 `$idx` 事件参数、中文分页均需真机测试。不提交签名密钥。
+
+## 圆形正文与字号持久化（Issue #10）
+
+- 原先的 `316×330` 正文矩形在圆表盘两侧浪费空间。现在 `reader/PageLayout.takeRoundPage` 按每行距圆心的高度计算可用宽度：**上短、中宽、下短**，`reader.hml` 用高度明确的 Lite `list-item` 承载这些行；正文仍不显示任何按钮或顶栏。
+- `storage/ReaderPreferences.js` 使用 Lite FA 可用的 **`@system.storage`**，按书籍分别保存字号、行距和日夜主题，同时记录最近一次默认设置给新书使用；只保存很短的 JSON 字符串（低于 Lite 的 128 字节限制），不会把正文塞到存储里。
+- 初始打开先显示第一页，**读取上次进度和字号之前禁止把默认字号写回**；读回后根据存档位置和字号重新排版。文件接口的进度存取与设置 KV 分离，避免 `file.writeText` 不可用时字号跟着丢失。实际持久化与圆屏 HML 逐行显示仍须 GT4 真机验收。

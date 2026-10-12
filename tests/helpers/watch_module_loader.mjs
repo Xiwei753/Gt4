@@ -12,6 +12,7 @@ export function createWatchLoader(options) {
   const stubPath = options.stubPath;
   const wearengineStubPath = options.wearengineStubPath;
   const routerStubPath = options.routerStubPath;
+  const storageStubPath = options.storageStubPath;
   const loaded = new Map();
   const load = async (rel) => {
     if (loaded.has(rel)) return loaded.get(rel);
@@ -39,6 +40,8 @@ export function createWatchLoader(options) {
         deps.push({ spec, depTmp: wearengineStubPath });
       } else if (spec === '@system.router' && routerStubPath) {
         deps.push({ spec, depTmp: routerStubPath });
+      } else if (spec === '@system.storage' && storageStubPath) {
+        deps.push({ spec, depTmp: storageStubPath });
       }
     }
     const modPath = join(tmpDir,
@@ -107,4 +110,28 @@ stub.__calls = calls;
 export default stub;
 `);
   return stubPath;
+}
+
+export function writeStorageStub(tmpDir,
+  stubName = 'storage_stub.mjs') {
+  const path = join(tmpDir, stubName);
+  writeFileSync(path, `
+const values = {};
+const stub = {
+  get(o) {
+    if (Object.prototype.hasOwnProperty.call(values, o.key)) {
+      o.success && o.success(values[o.key]);
+    } else {
+      o.fail && o.fail('not found', 301);
+    }
+  },
+  set(o) {
+    values[o.key] = o.value;
+    o.success && o.success();
+  },
+  __values: values
+};
+export default stub;
+`);
+  return path;
 }

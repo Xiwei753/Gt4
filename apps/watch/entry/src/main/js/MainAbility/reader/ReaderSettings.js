@@ -13,10 +13,10 @@ export var MAX_FONT_SIZE = 32;
 export var MIN_LINE_RATIO = 1.3;
 export var MAX_LINE_RATIO = 2.0;
 
-// 圆屏 466×466：纯文本阅读态不再占用顶栏/底栏，
-// 正文区宽 316px、高 330px（与 reader.css 一致）。
-export var TEXT_WIDTH = 316;
-export var TEXT_HEIGHT = 330;
+// GT4 的完整正文区是直径 420px 的圆内区域。
+// 旧矩形行列辅助函数保留用于兼容测试；实机阅读改用 takeRoundPage。
+export var TEXT_WIDTH = 420;
+export var TEXT_HEIGHT = 420;
 
 export function normalizeSettings(raw) {
   var settings = {

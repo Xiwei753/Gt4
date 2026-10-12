@@ -574,9 +574,9 @@ const settingsStart = readerHml.indexOf('<div class="settings-area"');
 assert.ok(readStart >= 0 && settingsStart > readStart,
   'reader must have exclusive reading and settings areas');
 // 截取阅读区域本身，避免后面的注释误算成阅读页可见内容。
-const readEnd = readerHml.indexOf('</div>', readStart) + 6;
+const readEnd = readerHml.indexOf('<!-- 同一路由内的设置页', readStart);
 const textOnly = readerHml.slice(readStart, readEnd);
-assert.ok(textOnly.includes('{{ body }}') &&
+assert.ok(textOnly.includes('{{ $item.text }}') &&
   textOnly.includes('onswipe="onReadingSwipe"') &&
   textOnly.includes('onlongpress="openSettings"') &&
   textOnly.includes('onclick="onReaderTap"'),
@@ -597,10 +597,16 @@ for (const action of ['fontSmaller', 'fontLarger',
 assert.ok(!settingsArea.includes('onswipe="onSettingsSwipe"') &&
   settingsArea.includes('onclick="closeSettings"'),
   'settings must return via continue-reading button, not an OS-conflicting swipe');
-assert.ok(readerCss.includes('height: 330px') &&
-  read('apps/watch/entry/src/main/js/MainAbility/reader/ReaderSettings.js')
-    .includes('TEXT_HEIGHT = 330'),
-  'visible text height and paging model must stay aligned');
+assert.ok(readerCss.includes('height: 420px') &&
+  readerHml.includes('for="{{ pageLines }}"') &&
+  readerHml.includes('tid="id"') &&
+  readerHml.includes('class="reading-line"') &&
+  readerJs.includes('takeRoundPage('),
+  'round reader must render measured lines inside circular safe area');
+assert.ok(readerJs.includes('progressReady') &&
+  readerJs.includes('loadReaderPreferences') &&
+  readerJs.includes('saveReaderPreferences'),
+  'font/spacing/theme must survive reopening without default-save race');
 
 // issue #10：内置书单取代旧的 demo 迁移作为书架先决条件；
 // 仍不得回造假元数据。

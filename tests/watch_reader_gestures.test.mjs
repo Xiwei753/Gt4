@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeSystemFileStub } from './helpers/system_file_stub.mjs';
-import { createWatchLoader, writeRouterStub } from './helpers/watch_module_loader.mjs';
+import { createWatchLoader, writeRouterStub, writeStorageStub } from './helpers/watch_module_loader.mjs';
 
 const temp = mkdtempSync(join(tmpdir(), 'suyue-read-ui-'));
 const fsRoot = mkdtempSync(join(tmpdir(), 'suyue-read-ui-fs-'));
@@ -13,7 +13,8 @@ try {
   const load = createWatchLoader({
     tmpDir: temp,
     stubPath: writeSystemFileStub(temp, fsRoot),
-    routerStubPath: writeRouterStub(temp)
+    routerStubPath: writeRouterStub(temp),
+    storageStubPath: writeStorageStub(temp)
   });
   const mod = await load('pages/reader/reader.js');
   function page() {

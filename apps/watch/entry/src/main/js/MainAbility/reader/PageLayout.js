@@ -57,3 +57,62 @@ export function takePage(bytes, offset, columns, maxRows) {
   }
   return { text: text, offset: offset, nextOffset: offset + used, eof: used === bytes.length };
 }
+
+
+// GT4 圆内排版：根据每一行距离圆心的高度计算圆弦宽度。
+export function roundLineWidth(row, rows, lineHeight) {
+  const radius = 202;
+  const dy = (row - (rows - 1) / 2) * lineHeight;
+  const chord = 2 * Math.sqrt(Math.max(0, radius * radius - dy * dy));
+  return Math.max(70, Math.min(390, Math.floor(chord - 20)));
+}
+
+export function takeRoundPage(bytes, offset, fontSize, lineRatio) {
+  const lineHeight = Math.max(20, Math.floor(fontSize * lineRatio));
+  const rows = Math.max(3, Math.floor(400 / lineHeight));
+  const lines = [];
+  let used = 0;
+  let row = 0;
+  let combined = '';
+  while (row < rows && used < bytes.length) {
+    const width = roundLineWidth(row, rows, lineHeight);
+    let content = '';
+    let filled = 0;
+    let explicitNewline = false;
+    while (used < bytes.length) {
+      const item = decodeAt(bytes, used);
+      if (!item) break;
+      const ch = item.char;
+      if (ch === '\r') {
+        used += item.size;
+        continue;
+      }
+      if (ch === '\n') {
+        if (row >= rows - 1) break;
+        used += item.size;
+        explicitNewline = true;
+        break;
+      }
+      const c = ch.charCodeAt(0);
+      const advance = c <= 0x7F ?
+        (ch === '\t' ? fontSize * 1.12 : fontSize * 0.62) :
+        fontSize * 1.1;
+      if (content.length > 0 && filled + advance > width) break;
+      content += ch;
+      filled += advance;
+      used += item.size;
+    }
+    if (content.length === 0 && !explicitNewline) break;
+    lines.push({ id: row,
+      text: content.length > 0 ? content : ' ',
+      width: width });
+    combined += content;
+    if (explicitNewline) combined += '\n';
+    row++;
+  }
+  return {
+    lines: lines, text: combined,
+    offset: offset, nextOffset: offset + used,
+    eof: used === bytes.length, lineHeight: lineHeight
+  };
+}

@@ -17,9 +17,10 @@ import { isBundled, bundledEntry,
   readBundledWindow } from '../../storage/BundledBookSource';
 import { loadProgress,
   saveProgress } from '../../storage/ProgressStore';
-import { takePage } from '../../reader/PageLayout';
-import { normalizeSettings, columnsFor,
-  rowsFor } from '../../reader/ReaderSettings';
+import { takeRoundPage } from '../../reader/PageLayout';
+import { loadReaderPreferences, saveReaderPreferences }
+  from '../../storage/ReaderPreferences.js';
+import { normalizeSettings } from '../../reader/ReaderSettings';
 import { createCrownTracker,
   crownStatus } from '../../reader/CrownInput';
 import { isLowerHex } from '../../util/Validate';
@@ -31,6 +32,9 @@ export default {
     bookId: '',
     title: '',
     body: '正在读取本地文本……',
+    pageLines: [],
+    linePixelHeight: 31,
+    readingError: false,
     pageHint: '请稍候',
     offset: 0,
     nextOffset: 0,
@@ -54,6 +58,11 @@ export default {
     this.userMoved = false;
     this.saving = false;
     this.saveWanted = false;
+    // 初始渲染不允许把默认设置写回旧进度。
+    this.progressReady = false;
+    this.settingsTouched = false;
+    this.prefSaving = false;
+    this.prefWanted = false;
     // Lite 通过目标页 data 同名字段注入 bookId（不再用旧的取参接口）；
     // 切勿在这里重置 this.bookId，否则会把收到的参数清空。
     const bookId = this.bookId;
@@ -84,16 +93,32 @@ export default {
       });
     });
   },
-  // 立刻从头显示一页，再后台加载进度（进度不阻塞阅读）。
+  // 首屏尽快显示，随后读回旧位置与设置。恢复前不允许写进度文件。
   startReading() {
     this.loadPage(0, undefined, () => {
       loadProgress(this.bookId, (progress) => {
-        if (this.userMoved) return;   // 用户已翻页，不倒退
-        this.history = progress.history;
-        this.applySettings(progress.settings);
-        if (progress.offset !== this.offset) {
-          this.loadPage(progress.offset);
-        }
+        loadReaderPreferences(this.bookId, (saved) => {
+          if (this.settingsTouched || this.userMoved) {
+            this.progressReady = true;
+            this.scheduleSave();
+            return;
+          }
+          const oldFont = this.fontSize;
+          const oldRatio = this.lineHeightRatio;
+          const oldTheme = this.theme;
+          this.history = progress.history;
+          this.applySettings(saved || progress.settings);
+          const desiredOffset = progress.offset;
+          const layoutChanged = desiredOffset !== this.offset ||
+            oldFont !== this.fontSize || oldRatio !== this.lineHeightRatio ||
+            oldTheme !== this.theme;
+          this.progressReady = true;
+          if (layoutChanged) {
+            this.loadPage(desiredOffset);
+          } else {
+            this.scheduleSave();
+          }
+        });
       });
     });
   },
@@ -118,6 +143,8 @@ export default {
     readSource(this.bookId, offset, 2048, (data) => {
       this.isLoading = false;
       if (!data.ok) {
+        this.readingError = true;
+        this.pageLines = [];
         this.pageHint = '读取失败：' + (data.reason || data.api || 'unknown') +
           (data.code !== undefined ? ' code=' + data.code : '');
         // 页面正文区足够大，显示真实失败阶段，避免只有一个“200”。
@@ -139,9 +166,8 @@ export default {
         if (done) done(false);
         return;
       }
-      const page = takePage(data.bytes, data.offset,
-        columnsFor(this.currentSettings()),
-        rowsFor(this.currentSettings()));
+      const page = takeRoundPage(data.bytes, data.offset,
+        this.fontSize, this.lineHeightRatio);
       if (!page.text) {
         this.pageHint = '已经读到末尾';
         this.isBusy = false;
@@ -153,6 +179,9 @@ export default {
         this.history = this.history.slice(-60);
       }
       this.body = page.text;
+      this.pageLines = page.lines;
+      this.linePixelHeight = page.lineHeight;
+      this.readingError = false;
       this.offset = page.offset;
       this.nextOffset = page.nextOffset;
       this.pageHint = '字节位置 ' + this.offset +
@@ -168,7 +197,7 @@ export default {
   scheduleSave() {
     if (!this.bookId) return;
     this.saveWanted = true;
-    if (this.saving) return;
+    if (this.saving || !this.progressReady) return;
     this.saveNext();
   },
   saveNext() {
@@ -204,6 +233,9 @@ export default {
     const next = this.fontSize + delta;
     if (next < 14 || next > 32) return;
     this.fontSize = next;
+    this.settingsTouched = true;
+    this.savePreferences();
+    this.scheduleSave();
     this.loadPage(this.offset);
   },
   // 切换主题不重新分页，后台保存（不阻塞）。
@@ -211,6 +243,8 @@ export default {
     this.userMoved = true;
     if (!this.bookId) return;
     this.theme = this.theme === 'night' ? 'day' : 'night';
+    this.settingsTouched = true;
+    this.savePreferences();
     this.scheduleSave();
   },
   // 展开/收起设置行（现在是独占一屏的设置页，阅读位置不变）。
@@ -257,7 +291,27 @@ export default {
     if (next < 1.3 || next > 2.0) return;
     this.userMoved = true;
     this.lineHeightRatio = next;
+    this.settingsTouched = true;
+    this.savePreferences();
+    this.scheduleSave();
     this.loadPage(this.offset);
+  },
+  // Lite FA @system.storage 独立保存阅读设置，连续调整串行落盘。
+  savePreferences() {
+    this.prefWanted = true;
+    if (this.prefSaving || !this.bookId) return;
+    this.flushPreferences();
+  },
+  flushPreferences() {
+    this.prefSaving = true;
+    this.prefWanted = false;
+    saveReaderPreferences(this.bookId, this.currentSettings(), (result) => {
+      this.prefSaving = false;
+      if (!result.ok) {
+        this.pageHint = '设置保存失败：' + (result.code || 'unknown');
+      }
+      if (this.prefWanted) this.flushPreferences();
+    });
   },
   // ---- 表冠（机制来自上游 MIT 示例，见 reader/CrownInput.js）----
   // 隐藏 slider 挂载后抢占表冠焦点；设备上若 $refs.crownProxy

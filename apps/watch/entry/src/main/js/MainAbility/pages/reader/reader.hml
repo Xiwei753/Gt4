@@ -8,7 +8,14 @@
   <div class="reading-area" if="{{ !settingsOpen }}"
        onswipe="onReadingSwipe" onclick="onReaderTap"
        onlongpress="openSettings">
-    <text class="book-text" style="font-size: {{ fontSize }}px; line-height: {{ fontSize * lineHeightRatio }}px; color: {{ theme === 'day' ? '#1c1e22' : '#f3f3f3' }};">{{ body }}</text>
+    <!-- 圆屏逐行不同宽度，采用真机已验证的 list-item 正高度方式。 -->
+    <list class="reading-lines" if="{{ !readingError }}">
+      <list-item class="reading-line" for="{{ pageLines }}" tid="id"
+                 style="width: {{ $item.width }}px; height: {{ linePixelHeight }}px;">
+        <text class="book-text" style="font-size: {{ fontSize }}px; line-height: {{ linePixelHeight }}px; color: {{ theme === 'day' ? '#1c1e22' : '#f3f3f3' }};">{{ $item.text }}</text>
+      </list-item>
+    </list>
+    <text class="read-error" if="{{ readingError }}">{{ body }}</text>
   </div>
 
   <!-- 同一路由内的设置页：点击“继续阅读”返回原位置；
