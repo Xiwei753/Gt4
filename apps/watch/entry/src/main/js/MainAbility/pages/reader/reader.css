@@ -13,7 +13,7 @@
   height: 1px;
   opacity: 0;
 }
-/* 圆形安全区：逐行宽度按弦长缩放，上下行短，中间行长。 */
+/* 圆形安全区：正文由 Canvas 按圆弦逐行排版（issue #11）。 */
 .reading-area {
   width: 420px;
   height: 420px;
@@ -21,24 +21,11 @@
   flex-direction: column;
   align-items: center;
 }
-.reading-lines {
+/* 正文画布：宽高与 reading-area 一致；文字位置/行宽由
+   PageLayout.takeCanvasPage 依据真实画布尺寸与圆形安全半径算出。 */
+.reader-canvas {
   width: 420px;
   height: 420px;
-  align-items: center;
-}
-.reading-line {
-  width: 310px;
-  height: 31px;
-  display: flex;
-  flex-direction: row;
-  justify-content: center;
-  align-items: center;
-}
-.book-text {
-  width: 100%;
-  font-size: 20px;
-  color: #f3f3f3;
-  text-align: left;
 }
 .read-error {
   width: 335px;

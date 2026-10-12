@@ -576,17 +576,24 @@ assert.ok(readStart >= 0 && settingsStart > readStart,
 // 截取阅读区域本身，避免后面的注释误算成阅读页可见内容。
 const readEnd = readerHml.indexOf('<!-- 同一路由内的设置页', readStart);
 const textOnly = readerHml.slice(readStart, readEnd);
-assert.ok(textOnly.includes('{{ $item.text }}') &&
+assert.ok(textOnly.includes('ref="readerCanvas"') &&
+  textOnly.includes('class="reader-canvas"') &&
   textOnly.includes('onswipe="onReadingSwipe"') &&
   textOnly.includes('onlongpress="openSettings"') &&
   textOnly.includes('onclick="onReaderTap"'),
-  'reading screen must show body and provide gesture controls');
+  'reading screen must draw on canvas and provide gesture controls');
 assert.ok(!textOnly.includes('{{ title }}') &&
   !textOnly.includes('{{ pageHint }}') &&
   !textOnly.includes('上页') && !textOnly.includes('下页') &&
   !textOnly.includes('字号') && !textOnly.includes('设置') &&
   !textOnly.includes('class="controls"'),
   'text reading area must be pure content, no visible toolbar');
+// issue #11：正文必须由 Canvas 逐行绘制，不得再退回方形 list-item。
+assert.ok(!textOnly.includes('<list-item') &&
+  !textOnly.includes('pageLines') &&
+  !textOnly.includes('class="book-text"') &&
+  !textOnly.includes('{{ $item.text }}'),
+  'reading area must not use the boxy list-item text route');
 const settingsArea = readerHml.slice(settingsStart);
 for (const action of ['fontSmaller', 'fontLarger',
   'spacingTighter', 'spacingLooser', 'toggleTheme',
@@ -597,12 +604,17 @@ for (const action of ['fontSmaller', 'fontLarger',
 assert.ok(!settingsArea.includes('onswipe="onSettingsSwipe"') &&
   settingsArea.includes('onclick="closeSettings"'),
   'settings must return via continue-reading button, not an OS-conflicting swipe');
-assert.ok(readerCss.includes('height: 420px') &&
-  readerHml.includes('for="{{ pageLines }}"') &&
-  readerHml.includes('tid="id"') &&
-  readerHml.includes('class="reading-line"') &&
-  readerJs.includes('takeRoundPage('),
-  'round reader must render measured lines inside circular safe area');
+assert.ok(readerCss.includes('.reader-canvas') &&
+  readerCss.includes('height: 420px') &&
+  !readerCss.includes('.reading-line'),
+  'round reader must size the canvas inside the circular safe area');
+assert.ok(readerJs.includes('takeCanvasPage(') &&
+  readerJs.includes('getContext(') &&
+  readerJs.includes('drawPage(') &&
+  readerJs.includes('measureWith(') &&
+  !readerJs.includes('takeRoundPage(') &&
+  !readerJs.includes('pageLines'),
+  'reader must paginate with real measurement and draw on canvas');
 assert.ok(readerJs.includes('progressReady') &&
   readerJs.includes('loadReaderPreferences') &&
   readerJs.includes('saveReaderPreferences'),

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Issue #10：阅读页手势/设置不触碰文件服务，独立检验 UI 事件逻辑。
+// Issue #10/#11：阅读页手势/设置不触碰文件服务，独立检验 UI 事件逻辑；
+// issue #11 起正文由 Canvas 绘制，从设置返回必须重绘。
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -54,9 +55,11 @@ try {
   p.closeSettings();
   assert.equal(p.settingsOpen, false,
     'continue-reading action must return to the same reading page');
+  assert.equal(p.__counts().repaint, 1,
+    'issue #11: returning from settings must redraw the canvas page');
   p.onReaderTap({ globalX: 350 });
   p.onReaderTap({ globalX: 80 });
-  assert.deepEqual(p.__counts(), { prev: 1, next: 1, repaint: 0 });
+  assert.deepEqual(p.__counts(), { prev: 1, next: 1, repaint: 1 });
   p.openSettings();
   p.onReaderTap({ globalX: 350 });
   assert.equal(p.__counts().next, 1,
@@ -70,7 +73,8 @@ try {
   assert.equal(p.lineHeightRatio, 1.65);
   p.spacingTighter();
   assert.equal(p.lineHeightRatio, 1.55);
-  assert.equal(p.__counts().repaint, 4);
+  // issue #11：closeSettings 会重绘当前页（+1），字号/行距各再重排一次。
+  assert.equal(p.__counts().repaint, 6);
   p.isBusy = true;
   p.onReaderTap({ globalX: 80 });
   assert.equal(p.__counts().prev, 1);

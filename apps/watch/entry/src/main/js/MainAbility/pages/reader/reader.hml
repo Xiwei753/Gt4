@@ -3,18 +3,13 @@
   <slider class="proxy-slider" ref="crownProxy"
           min="0" max="6" onchange="onCrownChange"></slider>
 
-  <!-- 阅读态：只有正文。左滑进设置，右滑留给 GT4 系统返回；
+  <!-- 阅读态：只有正文（issue #11：Canvas 圆形测字排版，不再用方形 list-item）。
+       左滑进设置，右滑留给 GT4 系统返回；
        两侧点按翻页，长按也可进入设置，均无可见按钮。 -->
   <div class="reading-area" if="{{ !settingsOpen }}"
        onswipe="onReadingSwipe" onclick="onReaderTap"
        onlongpress="openSettings">
-    <!-- 圆屏逐行不同宽度，采用真机已验证的 list-item 正高度方式。 -->
-    <list class="reading-lines" if="{{ !readingError }}">
-      <list-item class="reading-line" for="{{ pageLines }}" tid="id"
-                 style="width: {{ $item.width }}px; height: {{ linePixelHeight }}px;">
-        <text class="book-text" style="font-size: {{ fontSize }}px; line-height: {{ linePixelHeight }}px; color: {{ theme === 'day' ? '#1c1e22' : '#f3f3f3' }};">{{ $item.text }}</text>
-      </list-item>
-    </list>
+    <canvas ref="readerCanvas" class="reader-canvas"></canvas>
     <text class="read-error" if="{{ readingError }}">{{ body }}</text>
   </div>
 

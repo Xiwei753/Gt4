@@ -6,7 +6,7 @@
 // Run: node --experimental-default-type=module tests/pagination.test.mjs
 import assert from 'node:assert/strict';
 import { TextEncoder } from 'node:util';
-import { decodeAt, takePage, takeRoundPage, roundLineWidth } from '../apps/watch/entry/src/main/js/MainAbility/reader/PageLayout.js';
+import { decodeAt, takePage, createEstimator, takeCanvasPage } from '../apps/watch/entry/src/main/js/MainAbility/reader/PageLayout.js';
 import { columnsFor, rowsFor,
   normalizeSettings } from '../apps/watch/entry/src/main/js/MainAbility/reader/ReaderSettings.js';
 
@@ -175,26 +175,67 @@ console.info('PASS: UTF-8 Chinese/emoji, CRLF, long runs, ' +
   'boundary, EOF, 100x back/forward, font stability; pages=' + count);
 
 
-// #10 圆屏逐行排版：圆心更宽，逐字节消耗稳定；字号变化不会吞字。
+// #11 圆屏 Canvas 逐行排版：真实测量函数 + 圆形安全边界；
+// 逐字节消耗稳定，任何字号都不吞字。
 {
+  // 真实字形测量的仿真：CJK 约 1.05×字号，ASCII 约 0.6×。
+  const measureOf = (font) => (text) => {
+    let w = 0;
+    for (const ch of text) {
+      w += ch.codePointAt(0) > 0x2E7F ? font * 1.05 : font * 0.6;
+    }
+    return w;
+  };
   const sample = '文字甲乙丙丁ABCDEFG😀\n'.repeat(250);
   const bytes = encode.encode(sample);
-  const probe = takeRoundPage(bytes.subarray(0, 2048), 0, 20, 1.55);
-  assert.ok(probe.lines.length > 6);
-  assert.ok(roundLineWidth(0, 13, 31) < roundLineWidth(6, 13, 31),
-    'top chord must be narrower than center chord');
+
+  const probe = takeCanvasPage(bytes.subarray(0, 2048), 0, {
+    width: 420, height: 420, fontSize: 20, lineHeightRatio: 1.55,
+    measure: measureOf(20)
+  });
+  assert.ok(probe.lines.length > 6, 'round canvas page must have rows');
+  assert.equal(probe.measured, true, 'must report real measurement used');
+  assert.equal(probe.centerX, 210);
+  assert.equal(probe.centerY, 210);
+  for (const line of probe.lines) {
+    const left = probe.centerX - probe.radius;
+    const right = probe.centerX + probe.radius;
+    assert.ok(line.x >= left - 0.01 && line.x + line.maxWidth <= right + 0.01,
+      'row must stay inside the safe circle: ' + JSON.stringify(line));
+    // 真实测量必须真的用上：行宽不能超过该行圆弦。
+    assert.ok(measureOf(20)(line.text) <= line.maxWidth + 0.01,
+      'measured text must fit the chord width');
+  }
+  const middle = probe.lines[Math.floor(probe.lines.length / 2)];
+  assert.ok(probe.lines[0].maxWidth < middle.maxWidth,
+    'top row chord must be narrower than the center chord');
+
+  // 未提供测量函数时必须明确标注回退（不能冒充原生测量）。
+  const estimated = takeCanvasPage(bytes.subarray(0, 2048), 0, {
+    width: 420, height: 420, fontSize: 20, lineHeightRatio: 1.55
+  });
+  assert.equal(estimated.measured, false,
+    'missing measure must be reported as estimated');
+  assert.ok(typeof createEstimator(20)('中文abc') === 'number');
+
   for (const font of [14, 20, 32]) {
     let pos = 0;
     let out = '';
     let guard = 0;
     while (pos < bytes.length) {
-      const page = takeRoundPage(bytes.subarray(pos, pos + 2048),
-        pos, font, 1.55);
-      assert.ok(page.nextOffset > pos, 'round paginator is stuck: ' + pos);
+      const base = pos;
+      const win = bytes.subarray(base, base + 2048);
+      const page = takeCanvasPage(win, 0, {
+        width: 420, height: 420, fontSize: font, lineHeightRatio: 1.55,
+        measure: measureOf(font)
+      });
+      assert.ok(page.nextOffset > 0,
+        'canvas paginator is stuck: ' + base);
       out += page.text;
-      pos = page.nextOffset;
+      pos = base + page.nextOffset;
       assert.ok(++guard < 4000);
     }
-    assert.equal(out, sample, 'round pagination must preserve source text');
+    assert.equal(out, sample,
+      'canvas pagination must preserve source text');
   }
 }

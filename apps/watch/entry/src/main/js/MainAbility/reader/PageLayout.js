@@ -59,60 +59,95 @@ export function takePage(bytes, offset, columns, maxRows) {
 }
 
 
-// GT4 圆内排版：根据每一行距离圆心的高度计算圆弦宽度。
-export function roundLineWidth(row, rows, lineHeight) {
-  const radius = 202;
-  const dy = (row - (rows - 1) / 2) * lineHeight;
-  const chord = 2 * Math.sqrt(Math.max(0, radius * radius - dy * dy));
-  return Math.max(70, Math.min(390, Math.floor(chord - 20)));
+// 估算字宽：只有在真机 measureText 不可用时才作为回退
+// （CJK 1.1×字号、ASCII 0.62×、emoji 1.2×，与旧实现一致）。
+// 正常路径必须用 Canvas 的 measureText 实测。
+export function createEstimator(fontSize) {
+  const size = Math.max(1, fontSize);
+  return function (text) {
+    let total = 0;
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        total += size * 1.2; // 代理对（emoji）整体计宽
+        i++;
+      } else if (code <= 0x7F) {
+        total += text.charAt(i) === '\t' ? size * 1.12 : size * 0.62;
+      } else {
+        total += size * 1.1;
+      }
+    }
+    return total;
+  };
 }
 
-export function takeRoundPage(bytes, offset, fontSize, lineRatio) {
-  const lineHeight = Math.max(20, Math.floor(fontSize * lineRatio));
-  const rows = Math.max(3, Math.floor(400 / lineHeight));
+// GT4 圆屏分页（issue #11）：按**真实字形宽度**和**画布尺寸**排版，
+// 输出每行可直接交给 Canvas 绘制的坐标。
+//   options = { width, height, fontSize, lineHeightRatio, padding, measure }
+//   measure(text) -> 像素宽度；未提供时回退到 createEstimator。
+// 每行的安全左右边界按该行字形盒的**上下边缘**取圆弦：
+//   dy = max(|top-cy|, |bottom-cy|)，半宽 = sqrt(r² - dy²)。
+// 返回 { lines:[{text,x,baselineY,maxWidth}], text, offset, nextOffset,
+//        eof, lineHeight, rows, radius, centerX, centerY, measured }。
+// offset/nextOffset 都是**相对传入 bytes 的索引**（窗口内偏移）：
+// 从 bytes[offset] 开始排版，nextOffset 是真正被渲染消耗到的索引；
+// 调用方若需书内绝对位置，自行加上窗口起始绝对偏移。
+// 跨窗口不完整的 UTF-8 字符留到下一页，绝不吞字或重复。
+export function takeCanvasPage(bytes, offset, options) {
+  const opts = options || {};
+  const fontSize = Math.max(1, Math.floor(opts.fontSize || 20));
+  const ratio = opts.lineHeightRatio || 1.55;
+  const width = opts.width || 420;
+  const height = opts.height || 420;
+  const padding = opts.padding === undefined ? 12 : opts.padding;
+  const measured = typeof opts.measure === 'function';
+  const measure = measured ? opts.measure : createEstimator(fontSize);
+
+  const lineHeight = Math.max(1, Math.floor(fontSize * ratio));
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radius = Math.max(1, Math.min(width, height) / 2 - padding);
+  const rows = Math.max(1, Math.floor((radius * 2) / lineHeight));
+  const topStart = centerY - (rows * lineHeight) / 2;
+
   const lines = [];
-  let used = 0;
-  let row = 0;
   let combined = '';
-  while (row < rows && used < bytes.length) {
-    const width = roundLineWidth(row, rows, lineHeight);
+  let used = offset; // 从请求的偏移开始排版，不是从窗口 0
+  for (let row = 0; row < rows; row++) {
+    const top = topStart + row * lineHeight;
+    const bottom = top + lineHeight;
+    const dy = Math.max(Math.abs(top - centerY),
+      Math.abs(bottom - centerY));
+    const half = Math.sqrt(Math.max(0, radius * radius - dy * dy));
+    const x = centerX - half;
+    const maxWidth = half * 2;
     let content = '';
-    let filled = 0;
-    let explicitNewline = false;
+    let broke = false;
     while (used < bytes.length) {
       const item = decodeAt(bytes, used);
-      if (!item) break;
+      if (!item) break; // 不完整的 UTF-8：留给下一页窗口
       const ch = item.char;
-      if (ch === '\r') {
-        used += item.size;
-        continue;
-      }
+      if (ch === '\r') { used += item.size; continue; }
       if (ch === '\n') {
-        if (row >= rows - 1) break;
         used += item.size;
-        explicitNewline = true;
+        broke = true;
         break;
       }
-      const c = ch.charCodeAt(0);
-      const advance = c <= 0x7F ?
-        (ch === '\t' ? fontSize * 1.12 : fontSize * 0.62) :
-        fontSize * 1.1;
-      if (content.length > 0 && filled + advance > width) break;
-      content += ch;
-      filled += advance;
+      const trial = content + ch;
+      if (content !== '' && measure(trial) > maxWidth) break;
+      content = trial;
       used += item.size;
     }
-    if (content.length === 0 && !explicitNewline) break;
-    lines.push({ id: row,
-      text: content.length > 0 ? content : ' ',
-      width: width });
+    lines.push({ text: content, x: x, baselineY: top, maxWidth: maxWidth });
     combined += content;
-    if (explicitNewline) combined += '\n';
-    row++;
+    if (broke) combined += '\n';
+    if (used >= bytes.length) break;
+    if (content === '' && !broke) break; // 无法前进，避免死循环
   }
   return {
-    lines: lines, text: combined,
-    offset: offset, nextOffset: offset + used,
-    eof: used === bytes.length, lineHeight: lineHeight
+    lines: lines, text: combined, offset: offset,
+    nextOffset: used, eof: used === bytes.length,
+    lineHeight: lineHeight, rows: rows, radius: radius,
+    centerX: centerX, centerY: centerY, measured: measured
   };
 }

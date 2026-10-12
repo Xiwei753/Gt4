@@ -202,7 +202,8 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
   GT 4 上跑过，`crownStatus()` 仍是 `'unverified'`。
 - 表冠翻页：机制已接入并通过纯逻辑单测，但 **GT4 是否真的下发旋转事件、
   每页阈值多少，必须真机实测**（见 `reader/CrownInput.js` 顶部说明）。
-- 圆屏真实像素分页（当前为估算字宽，待 GT4 46mm 真机校准）。
+- 圆屏真实像素分页：issue #11 已改为 `<canvas>` + `measureText` 实测字形宽度排版
+  （见文末「圆形正文」段），但 **GT4 固件上 Canvas/measureText 的实际能力与坐标单位仍未真机验证**。
 - 在 GT 4 46mm 上安装、启动、翻页、恢复进度，并核对
   `targetSdkVersion`/`compatibleSdkVersion` 的 `6.1.1(24)`
   是否为 GT 4 开发安装实际可用的版本。**编译通过不等于真机适配通过。**
@@ -216,8 +217,40 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 使用支持 Lite Wearable 的 DevEco 打开本目录，配置本机签名以及匹配的 Lite Wearable SDK。`readArrayBuffer` 字节窗口、FA HML 的 `for` 循环与 `$idx` 事件参数、中文分页均需真机测试。不提交签名密钥。
 
-## 圆形正文与字号持久化（Issue #10）
+## 圆形正文：Canvas 逐行量字绘制（Issue #11）
 
-- 原先的 `316×330` 正文矩形在圆表盘两侧浪费空间。现在 `reader/PageLayout.takeRoundPage` 按每行距圆心的高度计算可用宽度：**上短、中宽、下短**，`reader.hml` 用高度明确的 Lite `list-item` 承载这些行；正文仍不显示任何按钮或顶栏。
-- `storage/ReaderPreferences.js` 使用 Lite FA 可用的 **`@system.storage`**，按书籍分别保存字号、行距和日夜主题，同时记录最近一次默认设置给新书使用；只保存很短的 JSON 字符串（低于 Lite 的 128 字节限制），不会把正文塞到存储里。
-- 初始打开先显示第一页，**读取上次进度和字号之前禁止把默认字号写回**；读回后根据存档位置和字号重新排版。文件接口的进度存取与设置 KV 分离，避免 `file.writeText` 不可用时字号跟着丢失。实际持久化与圆屏 HML 逐行显示仍须 GT4 真机验收。
+- **为什么换渲染层**：之前把正文放进 `420×420` 的方形 `<list>` + 多个 `<list-item>`，
+  Lite HML 仍按矩形定位/裁剪，只是"看起来在圆里"。issue #11 要求**真正用 JS FA
+  `<canvas>` + `CanvasRenderingContext2D` 在圆屏安全范围内逐行量字、排字、绘字**；
+  `<canvas>` 只作背景而文字交给 list-item 不算完成。
+- **分页**（`reader/PageLayout.js`）：`takeCanvasPage(bytes, offset, options)` 接收
+  **实际测量函数**（`options.measure`）与**实际画布尺寸**，圆心 `cx=w/2,cy=h/2`、
+  安全半径 `r=min(w,h)/2-padding`；每行按**字形盒上下缘**（不是仅中点）取圆弦
+  `dy=max(|top-cy|,|bottom-cy|)`、半宽 `sqrt(r²-dy²)`，得到 `{text,x,baselineY,maxWidth}`
+  与真正被渲染消耗的 `nextOffset`。**上短、中宽、下短**；字宽逐字用
+  `measureText().width` 实测，不在正常路径用估算冒充。
+  只有 `measure` 缺失时才回退到 `createEstimator(fontSize)`（CJK 1.1×、ASCII 0.62×、
+  emoji 1.2×），并在设置页提示 `measureText 不可用：已用估算行宽绘制`。
+  `offset`/`nextOffset` 都是**相对传入 bytes 的窗口内偏移**（调用方加窗口起始绝对偏移）；
+  跨 2048 字节窗口不完整的 UTF-8 字符留给下一页，绝不吞字或重复。
+- **绘制**（`reader/CanvasTextRenderer.js`）：只负责绘制，`clearPage`/`drawPage` 先
+  `clearRect`+`fillRect` 清上一页，再设 `font/fillStyle/textBaseline='top'/textAlign='left'`
+  `fillText` 逐行画（左对齐、在每行安全左边界起笔，不逐行居中）。暗/亮只换画布背景与字色
+  （day `#f5f4f0`/`#1c1e22`，night `#101114`/`#f3f3f3`）。无 `fall` 者返回结构化失败
+  （`no_context`/`clear_throw`/`draw_throw`），不静默用列表冒充成功。
+- **生命周期**（`pages/reader/reader.js`）：**不在 `onInit` 取上下文**；读取成功先把待画页
+  存在 `pending`，再由 `renderPending()` 拿 `$refs.readerCanvas.getContext('2d')` 后分页绘制
+  （带 10ms/最多 20 次的短重试，避免"数据早于画布"竞态）。上下文按 ref 缓存复用；
+  翻页、字号/行距变化、日夜切换、从设置页返回（会销毁重建 Canvas）都会**重取上下文并重绘**，
+  不逐帧重绘。`onShow` 也重绘一次，避免"第一眼空白，重进才有字"。
+  取不到上下文超过重试上限时上屏 `绘制初始化失败：未取到画布上下文`，
+  `drawPage` 失败上屏 `绘制失败：<reason>`，不黑屏、不新增手动自检按钮。
+- **交互不变**：左滑进设置、右侧点按下页/左侧点按上页（按**实际画布宽度**分半，
+  不再写死 233px）、长按进设置、系统右滑返回、表冠翻页、进度/设置持久化照旧；
+  正文界面只有正文，不显示书名/页码/底栏。
+- **字号与设置持久化**：`storage/ReaderPreferences.js` 用 Lite 可用
+  **`@system.storage`** 按书保存字号/行距/日夜主题，并记录最近一次默认值给新书；
+  **读取存档前禁止把默认字号写回**（避免覆盖旧设置），文件进度与 KV 设置分离。
+- **GT4 真机待验证（未夸称已通过）**：`<canvas>`/`getContext('2d')`/`measureText`/`fillText`
+  在目标固件上是否可用、坐标单位与 466×466 物理分辨率的关系、`if="{{ !settingsOpen }}"`
+  销毁重建后 ref 生命周期，都必须真机确认；本机只能保证失败时给出可定位的真实原因。
