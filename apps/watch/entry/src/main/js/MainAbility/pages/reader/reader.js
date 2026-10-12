@@ -31,9 +31,9 @@ import { createCrownTracker,
 import { isLowerHex } from '../../util/Validate';
 
 // 画布初始尺寸（HML width/height 绑定）；真实值以运行时画布为准。
-var CANVAS_SIZE = 420;
+var CANVAS_SIZE = 452;
 // 圆屏安全内边距：留出边缘，避免贴边裁切。
-var EDGE_PADDING = 12;
+var EDGE_PADDING = 10;
 
 export default {
   data: {

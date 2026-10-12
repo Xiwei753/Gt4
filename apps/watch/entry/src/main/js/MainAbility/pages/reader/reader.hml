@@ -1,4 +1,4 @@
-<div class="screen" style="background-color: {{ theme === 'day' ? '#f5f4f0' : '#101114' }};">
+<div class="screen" style="background-color: {{ settingsOpen ? '#101114' : (theme === 'day' ? '#f5f4f0' : '#101114') }};">
   <!-- 1×1 隐形表冠代理：不在正文显示任何控件。 -->
   <slider class="proxy-slider" ref="crownProxy"
           min="0" max="6" onchange="onCrownChange"></slider>
@@ -8,7 +8,7 @@
        左滑进设置，右滑留给 GT4 系统返回；
        两侧点按翻页，长按也可进入设置，均无可见按钮。 -->
   <stack class="reader-stack">
-    <div class="reading-area" style="opacity: {{ settingsOpen ? 0 : 1 }};"
+    <div class="reading-area"
        onswipe="onReadingSwipe" onclick="onReaderTap"
        onlongpress="openSettings">
     <stack class="reading-layer">
@@ -18,8 +18,9 @@
     </stack>
     </div>
 
-    <!-- 设置覆盖于阅读画布之上，不卸载 Canvas。 -->
-  <div class="settings-area" if="{{ settingsOpen }}">
+    <!-- 深色不透明整屏设置页：完全遮住 Canvas 正文；Canvas 仍保持挂载。 -->
+  <div class="settings-area" if="{{ settingsOpen }}"
+       style="background-color: #101114;">
     <text class="settings-heading">阅读设置</text>
     <text class="settings-book">{{ title }}</text>
     <div class="settings-row">

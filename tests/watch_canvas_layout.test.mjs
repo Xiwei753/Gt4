@@ -4,10 +4,24 @@ import assert from 'node:assert/strict';
 import { takeCanvasPage } from '../apps/watch/entry/src/main/js/MainAbility/reader/PageLayout.js';
 import {drawPage, pageColors, fontString} from '../apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js';
 
+const OLD_SIZE = 420;
+const OLD_PADDING = 12;
+const NEW_SIZE = 452;
+const NEW_PADDING = 10;
+
 const book=Buffer.from(('第一章 中文English😀，常规标点。\n').repeat(60),'utf8');
 for(const fontSize of [14,20,32]){
-  const p=takeCanvasPage(book.subarray(0,2048),0,{width:420,height:420,padding:16,fontSize,lineHeightRatio:1.55});
+  const p=takeCanvasPage(book.subarray(0,2048),0,{
+    width:NEW_SIZE,height:NEW_SIZE,padding:NEW_PADDING,fontSize,lineHeightRatio:1.55
+  });
   assert.ok(p.lines.length>4 && p.nextOffset>0);
+  const previous=takeCanvasPage(book.subarray(0,2048),0,{
+    width:OLD_SIZE,height:OLD_SIZE,padding:OLD_PADDING,fontSize,lineHeightRatio:1.55
+  });
+  assert.equal(p.radius-previous.radius,18,
+    'safe reading radius increases by 18px, not the whole canvas only');
+  assert.ok(p.nextOffset>=previous.nextOffset,
+    'expanded circle must not reduce readable bytes in the same page');
   const a=p.lines[0],mid=p.lines[Math.floor(p.lines.length/2)];
   assert.ok(a.maxWidth<mid.maxWidth,'short top line, wide center line');
   for(const l of p.lines){
@@ -24,8 +38,10 @@ const ctx={
   fillRect(){calls.push('background');},
   fillText(text,x,y){calls.push(['line',text,x,y]);}
 };
-const p=takeCanvasPage(book,0,{width:420,height:420,fontSize:20,lineHeightRatio:1.55});
-const rendered=drawPage(ctx,{width:420,height:420},p.lines,{fontSize:20,theme:'night'});
+const p=takeCanvasPage(book,0,{
+  width:NEW_SIZE,height:NEW_SIZE,padding:NEW_PADDING,fontSize:20,lineHeightRatio:1.55
+});
+const rendered=drawPage(ctx,{width:NEW_SIZE,height:NEW_SIZE},p.lines,{fontSize:20,theme:'night'});
 assert.equal(rendered.ok,true);
 assert.equal(calls.filter(x=>x==='clear').length,0,
   'GT4 Lite must not depend on clearRect');

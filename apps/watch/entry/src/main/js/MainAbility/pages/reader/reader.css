@@ -13,28 +13,27 @@
   height: 1px;
   opacity: 0;
 }
-/* 常驻 Canvas，设置覆盖在同一层；没有矩形正文兜底。 */
+/* GT4 圆屏阅读可视区：原来 420px 正方形过于保守，
+   扩至 452px，留 7px 屏幕边框；实际文字还要扣除 Canvas 安全半径。 */
 .reader-stack {
-  width: 420px;
-  height: 420px;
+  width: 452px;
+  height: 452px;
 }
 .reading-layer {
-  width: 420px;
-  height: 420px;
+  width: 452px;
+  height: 452px;
 }
-/* 圆形安全区：正文由 Canvas 按圆弦逐行排版（issue #11）。 */
 .reading-area {
-  width: 420px;
-  height: 420px;
+  width: 452px;
+  height: 452px;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
-/* 正文画布：宽高与 reading-area 一致；文字位置/行宽由
-   PageLayout.takeCanvasPage 依据真实画布尺寸与圆形安全半径算出。 */
+/* 与 JS 的 CANVAS_SIZE 一致；文字按圆弦宽度绘制，绝不裁成方框。 */
 .reader-canvas {
-  width: 420px;
-  height: 420px;
+  width: 452px;
+  height: 452px;
 }
 .read-error {
   width: 335px;
@@ -44,33 +43,33 @@
   font-size: 18px;
   color: #f3f3f3;
 }
-/* 设置独立占据一屏，避免在阅读页插入底栏或浮层。 */
+/* 设置是覆盖整张画布的不透明页面；不再透出下层正文。
+   只覆盖 Canvas，不拆卸画布，返回阅读保持原进度。 */
 .settings-area {
-  width: 310px;
-  height: 390px;
-  left: 55px;
-  top: 15px;
+  width: 452px;
+  height: 452px;
+  background-color: #101114;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
 }
 .settings-heading {
-  width: 100%;
+  width: 310px;
   height: 32px;
   font-size: 24px;
   text-align: center;
   color: #f3f3f3;
 }
 .settings-book {
-  width: 100%;
+  width: 310px;
   height: 25px;
   font-size: 14px;
   text-align: center;
   color: #b6c1d0;
 }
 .settings-row {
-  width: 100%;
+  width: 310px;
   height: 58px;
   display: flex;
   flex-direction: row;
@@ -108,7 +107,7 @@
   border-radius: 10px;
 }
 .settings-hint {
-  width: 100%;
+  width: 310px;
   height: 21px;
   margin-top: 7px;
   font-size: 12px;

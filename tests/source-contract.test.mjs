@@ -628,9 +628,21 @@ assert.ok(!settingsArea.includes('onswipe="onSettingsSwipe"') &&
   settingsArea.includes('onclick="closeSettings"'),
   'settings must return via continue-reading button, not an OS-conflicting swipe');
 assert.ok(readerCss.includes('.reader-canvas') &&
-  readerCss.includes('height: 420px') &&
+  readerCss.includes('width: 452px') &&
+  readerCss.includes('height: 452px') &&
+  readerJs.includes('CANVAS_SIZE = 452') &&
+  readerJs.includes('EDGE_PADDING = 10') &&
   !readerCss.includes('.reading-line'),
-  'round reader must size the canvas inside the circular safe area');
+  'circle canvas and JS radius must expand together without list-item fallback');
+assert.ok(settingsArea.includes('style="background-color: #101114;"') &&
+  readerCss.includes('.settings-area {') &&
+  readerCss.includes('background-color: #101114;') &&
+  readerHml.includes("settingsOpen ? '#101114'") &&
+  !readerHml.includes('opacity: {{ settingsOpen'),
+  'settings must be a fully opaque screen, not floating controls over novel text');
+assert.ok(readerCss.includes('.settings-row {\n  width: 310px;') &&
+  readerCss.includes('.settings-hint {\n  width: 310px;'),
+  'settings controls must remain inside a narrow round-screen safe column');
 assert.ok(readerHml.includes('class="reading-layer"') &&
   readerHml.includes('ref="readerCanvas"') &&
   !readerHml.includes('compat-text') &&
