@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Issue #10：Lite KV 独立保存字号；首屏不能覆盖文件中旧进度/设置。
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync,
-  rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeSystemFileStub } from './helpers/system_file_stub.mjs';
@@ -35,13 +34,10 @@ try {
     'new book inherits latest font from default key');
   assert.ok(JSON.stringify(storage.__values).length > 0);
 
-  const folder = join(sandbox, 'gt4reader', 'progress');
-  mkdirSync(folder, { recursive: true });
-  const savedPath = join(folder, bookId + '.json');
-  writeFileSync(savedPath, JSON.stringify({
-    bookId, offset: 123, history: [0],
-    settings: { fontSize: 16, lineHeightRatio: 1.4, theme: 'night' }
-  }));
+  const progress = await load('storage/ProgressStore.js');
+  const savedState = await new Promise((resolve) =>
+    progress.saveProgress(bookId, 123, [0], null, resolve));
+  assert.equal(savedState.ok, true);
 
   const p = Object.create(reader.default);
   Object.assign(p, reader.default.data);
@@ -53,6 +49,7 @@ try {
   p.settingsTouched = false;
   p.progressReady = false;
   p.saving = false;
+  p.progressError = '';
   p.saveWanted = false;
   p.prefSaving = false;
   p.prefWanted = false;
@@ -67,10 +64,11 @@ try {
   assert.equal(p.offset, 123, 'must restore real old page, not zero');
   assert.equal(p.fontSize, 29, 'KV font overrides older file-settings font');
   assert.equal(p.theme, 'day');
-  const saved = JSON.parse(readFileSync(savedPath, 'utf8'));
-  assert.equal(saved.offset, 123, 'initial render must not overwrite stored page');
-  assert.equal(saved.settings.fontSize, 29,
-    'restored preferences must be persisted without default overwrite');
+  const saved = await new Promise((resolve) =>
+    progress.loadProgress(bookId, resolve));
+  assert.equal(saved.offset, 123, 'initial render must not overwrite saved offset');
+  assert.equal((await getPref(bookId)).fontSize, 29,
+    'settings must remain in independent persistent KV');
 
   p.isBusy = false;
   p.changeFont(1);

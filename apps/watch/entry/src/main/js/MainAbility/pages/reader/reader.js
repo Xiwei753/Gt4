@@ -73,6 +73,8 @@ export default {
     this.settingsTouched = false;
     this.prefSaving = false;
     this.prefWanted = false;
+    this.returnToShelf = false;
+    this.progressError = '';
     // 待绘制的页（数据先到、画布后到时先存这里）。
     this.pending = null;
     this.ctx = null;
@@ -108,32 +110,24 @@ export default {
       });
     });
   },
-  // 首屏尽快显示，随后读回旧位置与设置。恢复前不允许写进度文件。
+  // 必须先读取保存的字节位置，然后才显示正文；不允许在旧进度到来前
+  // 绘制第一页并偷偷写回偏移 0。存储出错时显示错误，绝不伪装成新书。
   startReading() {
-    this.loadPage(0, undefined, () => {
-      loadProgress(this.bookId, (progress) => {
-        loadReaderPreferences(this.bookId, (saved) => {
-          if (this.settingsTouched || this.userMoved) {
-            this.progressReady = true;
-            this.scheduleSave();
-            return;
-          }
-          const oldFont = this.fontSize;
-          const oldRatio = this.lineHeightRatio;
-          const oldTheme = this.theme;
-          this.history = progress.history;
-          this.applySettings(saved || progress.settings);
-          const desiredOffset = progress.offset;
-          const layoutChanged = desiredOffset !== this.offset ||
-            oldFont !== this.fontSize || oldRatio !== this.lineHeightRatio ||
-            oldTheme !== this.theme;
-          this.progressReady = true;
-          if (layoutChanged) {
-            this.loadPage(desiredOffset);
-          } else {
-            this.scheduleSave();
-          }
-        });
+    this.isBusy = true;
+    loadProgress(this.bookId, (progress) => {
+      if (!progress.ok) {
+        this.readingError = true;
+        this.body = '阅读位置读取失败：' + progress.code;
+        this.pageHint = '阅读位置读取失败：' + progress.code;
+        this.isBusy = false;
+        return;
+      }
+      loadReaderPreferences(this.bookId, (saved) => {
+        // 字号/行距/主题仍使用 ReaderPreferences 单独一份数据。
+        if (!this.settingsTouched) this.applySettings(saved);
+        this.history = progress.history;
+        this.progressReady = true;
+        this.loadPage(progress.offset);
       });
     });
   },
@@ -267,7 +261,8 @@ export default {
     this.pending = null;
     this.readingError = false;
     this.isBusy = false;
-    this.pageHint = '字节位置 ' + this.offset;
+    this.pageHint = this.progressError ||
+      ('字节位置 ' + this.offset);
     this.scheduleSave();
     if (pending.done) pending.done(true);
   },
@@ -291,11 +286,18 @@ export default {
       this.currentSettings(), (state) => {
         this.saving = false;
         if (!state.ok) {
-          this.pageHint = '进度保存失败' +
-            (state.code !== undefined && state.code !== 'fail' ?
-              '（' + state.code + '）' : '');
+          this.progressError = '进度保存失败：' +
+            (state.code === undefined ? 'unknown' : state.code);
+          this.pageHint = this.progressError;
+        } else {
+          this.progressError = '';
         }
-        if (this.saveWanted) this.saveNext();
+        if (this.saveWanted) {
+          this.saveNext();
+        } else if (this.returnToShelf) {
+          this.returnToShelf = false;
+          router.replace({ uri: 'pages/index/index' });
+        }
       });
   },
   nextPage() {
@@ -416,7 +418,8 @@ export default {
       return;
     }
     if (this.pending) this.renderPending();
-    else if (this.bookId && !this.isLoading && !this.settingsOpen) this.redraw();
+    else if (this.bookId && this.progressReady &&
+      !this.isLoading && !this.settingsOpen) this.redraw();
   },
   onHide() {
     this.canvasReady = false;
@@ -448,7 +451,12 @@ export default {
     else if (pages < 0) this.previousPage();
   },
   backToLibrary() {
-    // issue #10：Lite Wearable 用 router.replace 切页（不用 router.back）。
-    router.replace({ uri: 'pages/index/index' });
+    // 必须在退出前等待最后一次阅读位置写入完成（有 2.5 秒上限）。
+    if (!this.progressReady || !this.bookId) {
+      router.replace({ uri: 'pages/index/index' });
+      return;
+    }
+    this.returnToShelf = true;
+    this.scheduleSave();
   }
 };

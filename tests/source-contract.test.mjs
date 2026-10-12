@@ -223,12 +223,23 @@ assert.ok(watchReader.includes('isBundled') &&
 // issue #10 复核：正文显示/翻页绝不依赖进度读写完成。
 assert.ok(watchReader.includes('startReading') &&
   watchReader.includes('scheduleSave'),
-  'reader must render before progress and save progress in the background');
+  'reader must restore progress before drawing and persist page turns');
 const watchProgress = read(
   'apps/watch/entry/src/main/js/MainAbility/storage/ProgressStore.js');
 assert.ok(watchProgress.includes('setProgressTimeout') &&
   watchProgress.includes('timeout'),
-  'progress store must not block reading when the file API never calls back');
+  'KV progress store must fail clearly when storage does not callback');
+assert.ok(watchProgress.includes("from '@system.storage'") &&
+  watchProgress.includes('suyue.pos.') &&
+  !watchProgress.includes("from '@system.file'") &&
+  !watchProgress.includes('file.writeText') &&
+  !watchProgress.includes('file.readText'),
+  'progress must have a single Lite KV persistence path, not silent file fallback');
+assert.ok(watchReader.indexOf('loadProgress(this.bookId') <
+  watchReader.indexOf('this.loadPage(progress.offset)') &&
+  watchReader.includes('if (!progress.ok)') &&
+  watchReader.includes('阅读位置读取失败'),
+  'reader must restore saved position before initial page, never overwrite bad state');
 const watchStorage = read('apps/watch/entry/src/main/js/MainAbility/storage/BookStorage.js');
 assert.ok(watchStorage.includes('setOperationTimeout'),
   'storage file ops must have a no-callback timeout guard');

@@ -1,144 +1,108 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 每本书独立的阅读进度与设置：字节偏移、
-// 翻页历史、字号、行距、主题。
-// 不同书互不串书；写入失败明确回报。
-//
-// issue #10 复核：进度**绝不允许阻塞阅读**。文件接口不回调时，
-// loadProgress 必须仍然回调（返回默认从头读），saveProgress 必须
-// 仍然回调（返回失败），否则阅读页会一直卡在"正在读取"或翻页被锁死。
-// 因此这里给每个文件调用都加了 settle-once + 有限超时。
-import file from '@system.file';
-import { progressPath, isSafeBookId, complete }
-  from './BookStorage.js';
-import { DEFAULT_SETTINGS } from '../reader/ReaderSettings.js';
+// GT4 Lite：每本书阅读位置只存 @system.storage，一本书一个小键值。
+// 文件 API 曾在 GT4 返回 200；不再将“读取文件失败”偷偷当作首页。
+// 字号、行距与主题由 ReaderPreferences 独立存储，此处只写字节偏移及少量上页位置。
+import storage from '@system.storage';
+import { isSafeBookId, complete } from './BookStorage.js';
 
-var PROGRESS_TIMEOUT_MS = 6000;
+var PROGRESS_TIMEOUT_MS = 2500;
+var PREFIX = 'suyue.pos.';
+var MAX_VALUE_BYTES = 127;  // Lite storage.set 限制严格小于 128 字节。
+
 export function setProgressTimeout(ms) {
   PROGRESS_TIMEOUT_MS = ms;
 }
 
-function withTimeout(cb, startFn) {
-  var done = false;
+function settle(cb, task) {
+  var finished = false;
   var timer = setTimeout(function () {
-    if (done) return;
-    done = true;
-    cb({ timeout: true });
+    if (finished) return;
+    finished = true;
+    cb({ ok: false, code: 'timeout' });
   }, PROGRESS_TIMEOUT_MS);
-  function finish(res) {
-    if (done) return;
-    done = true;
+  function done(data) {
+    if (finished) return;
+    finished = true;
     clearTimeout(timer);
-    cb(res);
+    cb(data);
+  }
+  try { task(done); }
+  catch (e) { done({ ok: false, code: 'exception' }); }
+}
+
+function isOffset(n) {
+  return typeof n === 'number' && isFinite(n) &&
+    n >= 0 && Math.floor(n) === n;
+}
+
+function parseProgress(raw) {
+  if (raw === '') {
+    return { ok: true, offset: 0, history: [], empty: true };
+  }
+  if (typeof raw !== 'string') {
+    return { ok: false, code: 'invalid_type' };
   }
   try {
-    startFn(finish);
+    var data = JSON.parse(raw);
+    if (!data || !isOffset(data.o) || !Array.isArray(data.h)) {
+      return { ok: false, code: 'invalid_state' };
+    }
+    for (var i = 0; i < data.h.length; i++) {
+      if (!isOffset(data.h[i])) {
+        return { ok: false, code: 'invalid_history' };
+      }
+    }
+    return { ok: true, offset: data.o, history: data.h.slice(-8) };
   } catch (e) {
-    finish({ error: true });
+    return { ok: false, code: 'invalid_json' };
   }
-}
-
-function defaultState() {
-  return { ok: true, offset: 0, history: [], settings: DEFAULT_SETTINGS };
-}
-
-function normalizeNumber(value, min, max, fallback) {
-  const num = Number(value);
-  return isFinite(num) ?
-    Math.max(min, Math.min(max, Math.floor(num))) :
-    fallback;
 }
 
 export function loadProgress(bookId, cb) {
   if (!isSafeBookId(bookId)) {
-    return complete(cb, defaultState());
+    return complete(cb, { ok: false, code: 'unsafe_book_id' });
   }
-  withTimeout(function (r) {
-    if (!r || r.timeout || r.error || typeof r.text !== 'string') {
-      // 无进度文件 / 读取失败 / 接口不回调：都从头读，不阻塞阅读。
-      return complete(cb, defaultState());
-    }
-    try {
-      const state = JSON.parse(r.text || '{}');
-      const offset = Number(state.offset);
-      const history = Array.isArray(state.history) ? state.history : [];
-      const rawSettings = state.settings;
-      complete(cb, {
-        ok: true,
-        offset: isFinite(offset) && offset >= 0 ?
-          Math.floor(offset) : 0,
-        history: history.filter((x) => typeof x === 'number' &&
-          isFinite(x) && x >= 0 && Math.floor(x) === x)
-          .slice(-60),
-        settings: {
-          fontSize: normalizeNumber(
-            rawSettings && rawSettings.fontSize,
-            14, 32, DEFAULT_SETTINGS.fontSize),
-          lineHeightRatio: (function () {
-            const ratio = Number(rawSettings &&
-              rawSettings.lineHeightRatio);
-            return isFinite(ratio) ?
-              Math.max(1.3, Math.min(2.0,
-                Math.round(ratio * 100) / 100)) :
-              DEFAULT_SETTINGS.lineHeightRatio;
-          })(),
-          theme: (rawSettings &&
-            (rawSettings.theme === 'day' ||
-              rawSettings.theme === 'night')) ?
-            rawSettings.theme : DEFAULT_SETTINGS.theme
-        }
-      });
-    } catch (e) {
-      complete(cb, defaultState());
-    }
-  }, function (finish) {
-    file.readText({
-      uri: progressPath(bookId),
-      length: 4096,
-      position: 0,
-      success: (data) => finish({ text: data && data.text }),
-      fail: () => finish({ text: null })
+  settle(function (res) { complete(cb, res); }, function (done) {
+    storage.get({
+      key: PREFIX + bookId,
+      default: '',
+      success: function (value) {
+        done(parseProgress(value));
+      },
+      fail: function (data, code) {
+        done({ ok: false, code: code === undefined ? 'get_failed' : code });
+      }
     });
   });
 }
 
-export function saveProgress(bookId, offset, history,
-  settings, cb) {
-  if (!isSafeBookId(bookId)) {
-    return complete(cb, { ok: false, reason: 'unsafe_book_id' });
+export function saveProgress(bookId, offset, history, settings, cb) {
+  if (!isSafeBookId(bookId) || !isOffset(offset)) {
+    return complete(cb, { ok: false, code: 'invalid_progress' });
   }
-  const state = JSON.stringify({
-    bookId: bookId,
-    offset: Math.max(0, Math.floor(offset)),
-    history: history.slice(-60),
-    settings: {
-      fontSize: normalizeNumber(settings && settings.fontSize,
-        14, 32, DEFAULT_SETTINGS.fontSize),
-      lineHeightRatio: settings &&
-        isFinite(Number(settings.lineHeightRatio)) ?
-        Math.max(1.3, Math.min(2.0,
-          Math.round(Number(settings.lineHeightRatio) * 100) /
-          100)) : DEFAULT_SETTINGS.lineHeightRatio,
-      theme: (settings &&
-        (settings.theme === 'day' ||
-          settings.theme === 'night')) ?
-        settings.theme : DEFAULT_SETTINGS.theme
+  var recent = [];
+  if (Array.isArray(history)) {
+    for (var i = history.length - 1; i >= 0 &&
+         recent.length < 8; i--) {
+      if (isOffset(history[i])) recent.unshift(history[i]);
     }
-  });
-  withTimeout(function (r) {
-    if (r && r.ok === true) return complete(cb, { ok: true });
-    complete(cb, {
-      ok: false,
-      reason: 'write_progress',
-      code: (r && r.code !== undefined) ? r.code :
-        (r && r.timeout ? 'timeout' : 'fail')
-    });
-  }, function (finish) {
-    file.writeText({
-      uri: progressPath(bookId),
-      text: state,
-      append: false,
-      success: () => finish({ ok: true }),
-      fail: (data, code) => finish({ ok: false, code: code })
+  }
+  var data = JSON.stringify({ o: offset, h: recent });
+  while (data.length >= MAX_VALUE_BYTES && recent.length > 0) {
+    recent.shift();
+    data = JSON.stringify({ o: offset, h: recent });
+  }
+  if (data.length >= MAX_VALUE_BYTES) {
+    return complete(cb, { ok: false, code: 'value_too_long' });
+  }
+  settle(function (res) { complete(cb, res); }, function (done) {
+    storage.set({
+      key: PREFIX + bookId,
+      value: data,
+      success: function () { done({ ok: true }); },
+      fail: function (info, code) {
+        done({ ok: false, code: code === undefined ? 'set_failed' : code });
+      }
     });
   });
 }

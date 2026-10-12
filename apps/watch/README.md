@@ -6,7 +6,7 @@
 
 - `storage/BookStorage.js`：应用私有目录多书管理（books/、temp/、progress/），`readBytes` 按字节窗口流式读取，`commitVerifiedBook` 把校验通过的暂存书转正。
 - `storage/LibraryIndex.js`：`books.json` 多书索引；只列文件真实存在的书；重复发送同一书籍不覆盖阅读进度。
-- `storage/ProgressStore.js`：每本书独立进度（字节偏移/历史/字号），重启恢复且互不串书。
+- `storage/ProgressStore.js`：用 Lite 原生 `@system.storage` 每书单键记录字节偏移和少量上页历史；字号、主题另由 `ReaderPreferences` 保存。没有进度 JSON 文件回退。
 - `wear/TransferLogic.js` + `wear/IncomingBookReceiver.js`：按 `shared/protocol` v0 接收 BOOK_META/CHUNK/FINISH，整本 SHA-256 校验通过才入书架；缺块 `E_MISSING_CHUNKS`、摘要不符 `E_DIGEST_MISMATCH`、取消 `E_CANCELLED` 均有处理；失败清理暂存。
 - `util/Sha256.js`：纯 JS SHA-256（Lite JS 无加密 API，ES5 兼容），Node 互验通过。
 - `util/Utf8.js`、`util/Base64.js`：纯 JS UTF-8 解码与 base64 解码（运行时无 atob），Node 互验通过。
@@ -174,11 +174,9 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
   复制到 `internal://app/gt4reader/cache/<bookId>.txt` 后窗口读；两步都失败就显示**真实的接口名 /
   URI / 错误码**（含无回调 `timeout`），**不假装读到**。每次只读窗口，不把整本解码进内存。
 - 每个文件调用都有 settle-once 有限超时（`setBundledTimeout`，默认 6s），阅读页不会永久卡住。
-- **阅读与进度解耦**：打开即从头出正文，进度后台加载、回来时若用户还没翻页才跳过去；
-  翻页渲染完成立刻解锁，进度**后台串行**保存，写不回调也不锁死翻页；迟到的保存回调不倒退位置。
+- **恢复阅读位置**：先通过 Lite `@system.storage` 读取该书的最新字节位置，再绘制保存位置所在页；**绝不先显示/写回第 0 页**。翻页完成后立即串行保存新位置，退出书架时等待最后一次写入完成（单次操作有超时上限）。进度读取失败会明确报错，不再假装新书。
   `storage/ProgressStore.js` 加了 `setProgressTimeout`（默认 6s）兜底。
-- 书架只 import `BookCatalog.g.js`；**阅读页也不再 import 任何正文 JS**。进度仍是字节 offset，
-  兼容 `progress/<bookId>.json`。
+- 书架只 import `BookCatalog.g.js`；**阅读页也不再 import 任何正文 JS**。进度仍是 UTF-8 字节 offset，持久化只用 `suyue.pos.<bookId>` 的单一 KV 项（长度小于 128 字节），不再读取或生成 `progress/<bookId>.json`。
 
 构建实测（本机 Hvigor，单 BIN 签名，bundle `con.xiwei.suyue.gt4`）：
 
@@ -244,3 +242,10 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 参考旧版手表 JS Canvas 绘字案例：
 https://www.cnblogs.com/HarmonyOS/p/14109033.html
+
+### GT4 阅读位置存储约束（Issue #11）
+
+- 读取失败与“从未读过”严格区分：键不存在时打开第一页；`storage.get` 系统错误或数据损坏时显示错误，**不覆盖旧记录**。
+- 每次成功翻页保存本页起始字节位置（不是下一页），同时最多记录 8 个最近的上页位置，必要时裁剪最旧历史满足 Lite 小于 128 字节的限制。
+- 与正文渲染路线无关：存档只使用 Lite `@system.storage`，不引入文件存档备份或第二种读取机制。字号和主题仍由独立 ReaderPreferences 键值保存。
+- GT4 真机还需要验证杀进程后重进、从书架切换书目、软件覆盖升级后的保存效果；本机逻辑测试不替代真实持久化验证。

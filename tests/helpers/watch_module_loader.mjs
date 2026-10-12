@@ -121,6 +121,8 @@ const stub = {
   get(o) {
     if (Object.prototype.hasOwnProperty.call(values, o.key)) {
       o.success && o.success(values[o.key]);
+    } else if (typeof o.default === 'string') {
+      o.success && o.success(o.default);
     } else {
       o.fail && o.fail('not found', 301);
     }
