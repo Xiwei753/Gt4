@@ -72,6 +72,8 @@ export default {
     this.saveWanted = false;
     // 初始渲染不允许把默认设置写回旧进度。
     this.progressReady = false;
+    this.preferencesReady = false;
+    this.renderedOnce = false;
     this.settingsTouched = false;
     this.prefSaving = false;
     this.prefWanted = false;
@@ -112,10 +114,20 @@ export default {
       });
     });
   },
-  // 必须先读取保存的字节位置，然后才显示正文；不允许在旧进度到来前
-  // 绘制第一页并偷偷写回偏移 0。存储出错时显示错误，绝不伪装成新书。
+  // 初次打开的书没有 per-book 阅读设置。原链路把位置与两次
+  // 设置 KV 读取串在一起：只要“缺省设置”调用不及时返回，
+  // 正文连一次读取都不会启动，屏幕永久显示最初的加载文字。
+  // 位置恢复仍是唯一写入位置的真相；设置独立读取，绝不挡住正文。
+  setLoadingStage(stage) {
+    this.pageHint = '打开阶段：' + stage;
+    if (!this.renderedOnce) {
+      this.readingError = true;
+      this.body = '正在读取本地文本……\\n阶段：' + stage;
+    }
+  },
   startReading() {
     this.isBusy = true;
+    this.setLoadingStage('读取阅读位置');
     loadProgress(this.bookId, (progress) => {
       if (!progress.ok) {
         this.readingError = true;
@@ -124,12 +136,31 @@ export default {
         this.isBusy = false;
         return;
       }
+      this.history = progress.history;
+      this.progressReady = true;
+      this.setLoadingStage('读取正文');
+      // 不等每本书的“字号设置”KV 回调。即使某个新书的设置 key
+      // 不存在或存储后端迟迟不回应，真正的 TXT 仍会被读取并绘制。
+      this.loadPage(progress.offset);
+      // 字号/主题依旧只存在 ReaderPreferences，没有第二套存储。
+      // 设置回调若来晚，则按当前真实字节位置重画，不改动阅读历史。
       loadReaderPreferences(this.bookId, (saved) => {
-        // 字号/行距/主题仍使用 ReaderPreferences 单独一份数据。
-        if (!this.settingsTouched) this.applySettings(saved);
-        this.history = progress.history;
-        this.progressReady = true;
-        this.loadPage(progress.offset);
+        this.preferencesReady = true;
+        if (this.settingsTouched) return;
+        var previous = this.currentSettings();
+        this.applySettings(saved);
+        var changed = previous.fontSize !== this.fontSize ||
+          previous.lineHeightRatio !== this.lineHeightRatio ||
+          previous.theme !== this.theme;
+        if (!changed || this.settingsOpen) return;
+        if (this.pending && this.canvasReady) {
+          // 文件先到、设置后到：使用最终字号画这同一页。
+          this.renderPending();
+        } else if (this.renderedOnce && !this.isLoading) {
+          // 已画过正文再恢复字号，重新分页当前真实字节位置；
+          // 进度的 offset/history 均不清零。
+          this.redraw();
+        }
       });
     });
   },
@@ -282,6 +313,7 @@ export default {
     this.offset = base + layout.offset;
     this.nextOffset = base + layout.nextOffset;
     this.pending = null;
+    this.renderedOnce = true;
     this.readingError = false;
     this.isBusy = false;
     this.pageHint = this.progressError ||
