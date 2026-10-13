@@ -41,7 +41,7 @@ const frontPage = takeCanvasPage(front, 0, {
 });
 assert.ok(frontPage.text.includes('正文开始'),
   'skip leading empty lines so a never-opened novel shows real text');
-assert.ok(frontPage.text.startsWith('　　'),
+assert.ok(frontPage.lines.some(line => line.text.startsWith('　　正文')),
   'keep paragraph indentation on the first visible line');
 assert.ok(frontPage.nextOffset > 900,
   'blank-line skipping advances real UTF-8 byte offsets');
@@ -50,7 +50,8 @@ const allBlank = takeCanvasPage(
     width: NEW_SIZE, height: NEW_SIZE, padding: NEW_PADDING,
     fontSize: 20, lineHeightRatio: 1.55
   });
-assert.equal(allBlank.text, '');
+assert.equal(allBlank.text, '\n'.repeat(2048),
+  'even invisible blank lines must remain in the source-text ledger');
 assert.equal(allBlank.nextOffset, 2048,
   'all-blank input must advance to next window, not loop at byte zero');
 
