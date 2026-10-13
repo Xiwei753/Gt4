@@ -83,7 +83,45 @@ try {
     p.renderPending();
     assert.ok(ref.state.draws>0);
   }
-  // Missing context is a single explicit failure. Never fall back or retry.
+  // 全新书籍首个读取窗口全是空行：不把黑色背景误认成已绘制正文，
+  // 不记录空白页进度，而是顺着唯一读取链继续到真实文字。
+  {
+    const ref=canvas(),p=page(ref);
+    p.isLoading=false;
+    p.readingError=true;
+    p.body='正在读取本地文本……';
+    const blanks=new Uint8Array(2048);
+    blanks.fill(10);
+    p.pending={data:{bytes:blanks,offset:0},
+      done:(ok)=>{p.completed=ok}};
+    p.loadPage=function(offset,previousOffset,done){
+      this.skippedTo=offset;
+      this.pending={data:{bytes:Buffer.from('第一章：真正的正文文字。','utf8'),
+        offset:offset},previousOffset:previousOffset,done:done};
+      this.renderPending();
+    };
+    p.onShow();
+    assert.equal(p.skippedTo,2048,
+      'continue after whole blank window in actual UTF-8 bytes');
+    assert.equal(p.completed,true);
+    assert.equal(p.readingError,false);
+    assert.equal(ref.state.backgrounds,1,
+      'only the visible page is painted, not the black blank page');
+    assert.ok(ref.state.draws>0);
+    assert.equal(p.saved,1,'do not save a blank first page');
+  }
+  // 真正空文件不能只显示黑色 Canvas。
+  {
+    const ref=canvas(),p=page(ref);
+    p.pending={data:{bytes:new Uint8Array(0),offset:0},
+      done:(ok)=>{p.completed=ok}};
+    p.onShow();
+    assert.equal(p.completed,false);
+    assert.equal(p.readingError,true);
+    assert.ok(p.body.includes('没有可显示的正文'));
+    assert.equal(ref.state.backgrounds,0);
+  }
+    // Missing context is a single explicit failure. Never fall back or retry.
   {
     const ref=canvas({noContext:true}),p=page(ref);
     pending(p);p.onShow();
