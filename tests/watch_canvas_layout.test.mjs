@@ -32,6 +32,28 @@ for(const fontSize of [14,20,32]){
     assert.ok(l.advance<=l.maxWidth+0.001,'glyph advance must not exceed circle boundary');
   }
 }
+// 回归：新书从 0 字节开始，可能有上百行空白封面/广告间隔。
+// 前置空白行不能消耗整页 Canvas；正文的全角缩进仍要保留。
+const front = Buffer.from('\n'.repeat(900) + '　　正文开始。', 'utf8');
+const frontPage = takeCanvasPage(front, 0, {
+  width: NEW_SIZE, height: NEW_SIZE, padding: NEW_PADDING,
+  fontSize: 20, lineHeightRatio: 1.55
+});
+assert.ok(frontPage.text.includes('正文开始'),
+  'skip leading empty lines so a never-opened novel shows real text');
+assert.ok(frontPage.text.startsWith('　　'),
+  'keep paragraph indentation on the first visible line');
+assert.ok(frontPage.nextOffset > 900,
+  'blank-line skipping advances real UTF-8 byte offsets');
+const allBlank = takeCanvasPage(
+  Buffer.from('\n'.repeat(3000)).subarray(0, 2048), 0, {
+    width: NEW_SIZE, height: NEW_SIZE, padding: NEW_PADDING,
+    fontSize: 20, lineHeightRatio: 1.55
+  });
+assert.equal(allBlank.text, '');
+assert.equal(allBlank.nextOffset, 2048,
+  'all-blank input must advance to next window, not loop at byte zero');
+
 const calls=[];
 const ctx={
   font:'', fillStyle:'', textBaseline:'', textAlign:'',
