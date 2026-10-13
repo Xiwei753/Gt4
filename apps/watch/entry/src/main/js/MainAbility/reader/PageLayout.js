@@ -70,25 +70,36 @@ export function takeCanvasPage(bytes, offset, options) {
   // 全窗口皆是空白时也必须消耗它，供阅读页继续读取下一窗口。
   let scan = used;
   let lastBlankLineEnd = used;
+  let leadingText = '';
+  let completedBlankText = '';
   while (scan < bytes.length) {
     const lead = decodeAt(bytes, scan);
     if (!lead) break;
     const ch = lead.char;
     if (ch === '\n') {
       scan += lead.size;
+      leadingText += '\n';
       lastBlankLineEnd = scan;
+      completedBlankText = leadingText;
       continue;
     }
     if (ch === '\r' || ch === ' ' || ch === '\t' ||
         ch === '\u3000' || ch === '\u00A0' || ch === '\uFEFF') {
       scan += lead.size;
+      // 与原逻辑相同：CR 会被消耗但不进入正文文本。
+      if (ch !== '\r') leadingText += ch;
       continue;
     }
     break;
   }
-  if (lastBlankLineEnd > used) used = lastBlankLineEnd;
-  else if (scan === bytes.length) used = scan;
   let combined = '';
+  if (lastBlankLineEnd > used) {
+    used = lastBlankLineEnd;
+    combined = completedBlankText;
+  } else if (scan === bytes.length) {
+    used = scan;
+    combined = leadingText;
+  }
   for (let row = 0; row < rows && used < bytes.length; row++) {
     const top = topStart + row * lineHeight;
     const dy = Math.max(Math.abs(top - cy), Math.abs(top + lineHeight - cy));
