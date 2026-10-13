@@ -254,7 +254,10 @@ function okResult(bytes, start) {
 // 读取 [start, start+len) 的正文窗口（字节偏移语义同 BookStorage.readBytes）。
 // 成功 cb({ok:true,offset,bytes:Uint8Array})；
 // 失败 cb({ok:false,reason,api,uri,code})。
-export function readBundledWindow(bookId, offset, size, cb) {
+export function readBundledWindow(bookId, offset, size, cb, onStage) {
+  function stage(label) {
+    if (typeof onStage === 'function') onStage(label);
+  }
   var meta = META[bookId];
   if (!meta) {
     return complete(cb, { ok: false, reason: 'not_bundled' });
@@ -270,6 +273,7 @@ export function readBundledWindow(bookId, offset, size, cb) {
 
   function fromCacheOrRaw() {
     if (!CACHED[bookId]) return fromRaw();
+    stage('读取已有缓存');
     readWindowWithText(cacheUri(meta), start, len, function (r) {
       if (r.ok) return complete(cb, okResult(r.bytes, start));
       CACHED[bookId] = false;
@@ -278,9 +282,11 @@ export function readBundledWindow(bookId, offset, size, cb) {
   }
 
   function fromRaw() {
+    stage('读取内置资源');
     readWindowWithText(rawUri(meta), start, len, function (r) {
       if (r.ok) return complete(cb, okResult(r.bytes, start));
-      // rawfile 两种读取均失败，再尝试复制这一书到私有目录。
+      // 无法直接读取时，要将这一本复制到私有目录。
+      stage('首次准备书籍缓存');
       copyToCache(meta, function (c) {
         if (!c.ok) {
           return complete(cb, {
@@ -290,6 +296,7 @@ export function readBundledWindow(bookId, offset, size, cb) {
             rawTextCode: r.textCode
           });
         }
+        stage('校验新缓存');
         inspectCache(meta, function (stat) {
           // 只要获取了长度，必须完整匹配书单给出的 UTF-8 字节数。
           if (stat.ok && stat.length !== meta.bytes) {
@@ -300,6 +307,7 @@ export function readBundledWindow(bookId, offset, size, cb) {
               expectedBytes: meta.bytes, rawCode: r.code
             });
           }
+          stage('读取新缓存');
           readWindowWithText(cacheUri(meta), start, len, function (r2) {
             if (r2.ok) {
               CACHED[bookId] = true;
