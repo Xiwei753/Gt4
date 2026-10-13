@@ -122,7 +122,7 @@ export default {
     this.pageHint = '打开阶段：' + stage;
     if (!this.renderedOnce) {
       this.readingError = true;
-      this.body = '正在读取本地文本……\\n阶段：' + stage;
+      this.body = '正在读取本地文本……\n阶段：' + stage;
     }
   },
   startReading() {
@@ -243,7 +243,9 @@ export default {
         done: done
       };
       this.renderPending();
-    });
+    }, this.bundled ? (stage) => {
+      this.setLoadingStage('内置书：' + stage);
+    } : undefined);
   },
   // 绘制失败就是失败：不启动另一套正文组件、不用像素回读或计时重试。
   failCanvas(message, pending) {
