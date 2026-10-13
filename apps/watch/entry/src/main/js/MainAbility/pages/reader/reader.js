@@ -43,7 +43,9 @@ export default {
     title: '',
     // 仅用于“读取失败”纯文字提示（正常阅读时不可见）。
     body: '正在读取本地文本……',
-    readingError: false,
+    // 首次打开没有已绘制的正文，必须显示加载提示而不是纯黑屏。
+    // 这是状态提示，不是另一套 HML 正文渲染。
+    readingError: true,
     pageHint: '请稍候',
     offset: 0,
     nextOffset: 0,
@@ -237,10 +239,31 @@ export default {
       fontSize: this.fontSize, lineHeightRatio: this.lineHeightRatio,
       padding: EDGE_PADDING
     });
-    if (!layout.text || layout.nextOffset <= 0) {
+    // 有的 TXT 开头连续很多空行/空格；原实现会把整张 Canvas
+    // 填成背景色、认为绘制成功，首次阅读便是一片黑色。
+    // 空白页不绘制也不保存进度：按唯一分页路径继续取下一窗口。
+    var hasVisibleText = false;
+    for (var i = 0; i < layout.lines.length; i++) {
+      var line = layout.lines[i];
+      if (line && line.text && line.text.trim().length > 0) {
+        hasVisibleText = true;
+        break;
+      }
+    }
+    if (!hasVisibleText) {
       this.pending = null;
+      if (layout.nextOffset > 0) {
+        // 消耗的仍是真实 UTF-8 字节数；保留上一页历史与回调。
+        // 每次都前进才继续，避免空白输入无限循环。
+        var nextStart = (pending.data.offset || 0) + layout.nextOffset;
+        this.loadPage(nextStart, pending.previousOffset, pending.done);
+        return;
+      }
+      // 读完文件/遇到损坏字节也不能再伪装为绘制成功。
+      this.readingError = true;
+      this.body = '此处没有可显示的正文\n请检查 TXT 是否为空或内容损坏';
+      this.pageHint = '正文为空或无法正确解码';
       this.isBusy = false;
-      this.pageHint = '已经读到末尾';
       if (pending.done) pending.done(false);
       return;
     }
