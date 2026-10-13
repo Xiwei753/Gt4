@@ -40,9 +40,6 @@ for (i = 0; i < BOOKS.length; i++) {
   });
 }
 
-// 已确认可用的读取位置：bookId -> true 表示私有副本可用。
-var CACHED = {};
-
 export var BUNDLED_BOOKS = LIST;
 
 export function isBundled(bookId) {
@@ -254,6 +251,10 @@ function okResult(bytes, start) {
 // 读取 [start, start+len) 的正文窗口（字节偏移语义同 BookStorage.readBytes）。
 // 成功 cb({ok:true,offset,bytes:Uint8Array})；
 // 失败 cb({ok:false,reason,api,uri,code})。
+// 内置书只使用私有缓存这一条正文文件路径：
+//   缓存存在 -> 读取一小段；首次打开 -> copy rawfile -> 校验 -> 读取。
+// 不再每次先对 rawfile 尝试二进制、再文本、然后才复制，
+// 避免新书连续等待多个不支持的 API，而已读书却很快。
 export function readBundledWindow(bookId, offset, size, cb, onStage) {
   function stage(label) {
     if (typeof onStage === 'function') onStage(label);
@@ -266,67 +267,59 @@ export function readBundledWindow(bookId, offset, size, cb, onStage) {
   var start = offset || 0;
   var want = size || 0;
   if (start >= total || want <= 0) {
-    return complete(cb, { ok: true, offset: start, bytes: new Uint8Array(0) });
+    return complete(cb, { ok: true, offset: start,
+      bytes: new Uint8Array(0) });
   }
-  var end = Math.min(total, start + want);
-  var len = end - start;
+  var len = Math.min(total, start + want) - start;
+  var dst = cacheUri(meta);
 
-  function fromCacheOrRaw() {
-    if (!CACHED[bookId]) return fromRaw();
-    stage('读取已有缓存');
-    readWindowWithText(cacheUri(meta), start, len, function (r) {
-      if (r.ok) return complete(cb, okResult(r.bytes, start));
-      CACHED[bookId] = false;
-      fromRaw();
+  function readCached() {
+    stage('读取缓存正文');
+    readWindowWithText(dst, start, len, function (data) {
+      if (data.ok) return complete(cb, okResult(data.bytes, start));
+      complete(cb, { ok: false, reason: 'cache_read_failed',
+        stage: 'cache_read', api: data.api, code: data.code,
+        cacheBufferCode: data.bufferCode, cacheTextCode: data.textCode });
     });
   }
 
-  function fromRaw() {
-    stage('读取内置资源');
-    readWindowWithText(rawUri(meta), start, len, function (r) {
-      if (r.ok) return complete(cb, okResult(r.bytes, start));
-      // 无法直接读取时，要将这一本复制到私有目录。
-      stage('首次准备书籍缓存');
-      copyToCache(meta, function (c) {
-        if (!c.ok) {
-          return complete(cb, {
-            ok: false, reason: 'unreadable', stage: 'copy',
-            api: c.api, uri: c.uri, code: c.code,
-            rawCode: r.code, rawBufferCode: r.bufferCode,
-            rawTextCode: r.textCode
-          });
+  function prepareFirstCopy() {
+    stage('首次复制内置书');
+    copyToCache(meta, function (result) {
+      if (!result.ok) {
+        return complete(cb, { ok: false, reason: 'copy_failed',
+          stage: 'copy', api: result.api, code: result.code });
+      }
+      stage('核对缓存完整性');
+      inspectCache(meta, function (stat) {
+        if (stat.ok && stat.length !== meta.bytes) {
+          return complete(cb, { ok: false, reason: 'cache_size_mismatch',
+            stage: 'cache_size', code: 'size_mismatch',
+            cacheBytes: stat.length, expectedBytes: meta.bytes });
         }
-        stage('校验新缓存');
-        inspectCache(meta, function (stat) {
-          // 只要获取了长度，必须完整匹配书单给出的 UTF-8 字节数。
-          if (stat.ok && stat.length !== meta.bytes) {
-            return complete(cb, {
-              ok: false, reason: 'cache_size_mismatch',
-              stage: 'cache_size', api: 'get',
-              code: 'size_mismatch', cacheBytes: stat.length,
-              expectedBytes: meta.bytes, rawCode: r.code
-            });
-          }
-          stage('读取新缓存');
-          readWindowWithText(cacheUri(meta), start, len, function (r2) {
-            if (r2.ok) {
-              CACHED[bookId] = true;
-              return complete(cb, okResult(r2.bytes, start));
-            }
-            complete(cb, {
-              ok: false, reason: 'read_failed', stage: 'cache_read',
-              api: r2.api, uri: r2.uri, code: r2.code,
-              cacheBufferCode: r2.bufferCode,
-              cacheTextCode: r2.textCode,
-              cacheGetCode: stat.ok ? 'success' : stat.code,
-              rawCode: r.code, rawBufferCode: r.bufferCode,
-              rawTextCode: r.textCode
-            });
-          });
-        });
+        // 部分 GT4 无法取得 file.get 长度，仍检查真实读取是否成功。
+        // 不能把 copy success 本身视为正文已经可读。
+        readCached();
       });
     });
   }
 
-  fromCacheOrRaw();
+  stage('检查本地缓存');
+  withTimeout('access', dst, function (state) {
+    if (state.ok) return readCached();
+    if (state.code === 'timeout' || state.code === 'throw') {
+      return complete(cb, { ok: false, reason: 'cache_access_failed',
+        stage: 'cache_access', code: state.code });
+    }
+    // 还没有这本书的私有副本：这是第一次打开，复制一次即可。
+    prepareFirstCopy();
+  }, function (finish) {
+    file.access({
+      uri: dst,
+      success: function () { finish({ ok: true }); },
+      fail: function (data, code) {
+        finish({ ok: false, code: code === undefined ? 'missing' : code });
+      }
+    });
+  });
 }
