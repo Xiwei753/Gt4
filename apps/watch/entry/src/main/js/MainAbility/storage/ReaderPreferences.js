@@ -30,6 +30,9 @@ function readKey(key, cb) {
   once(cb, function (finish) {
     storage.get({
       key: key,
+      // 未读过的书没有自己的设置键；显式用空串表示缺省，
+      // 不能依赖旧 Lite 固件处理 omitted default 的不确定行为。
+      default: '',
       success: function (value) {
         if (typeof value !== 'string' || !value) {
           return finish({ ok: false, code: 'empty' });
