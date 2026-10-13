@@ -100,16 +100,46 @@ try {
       'window [' + from + ',' + to + ') mismatch');
   };
 
-  // ---- 1. 直接读 rawfile：窗口逐字节一致 ----
-  eq(await read(0, raw.length + 10), 0, raw.length);
-  eq(await read(250, 20), 250, 270);            // 穿过汉字
-  eq(await read(0, 300), 0, 300);
-  eq(await read(raw.length - 5, 100), raw.length - 5, raw.length);
-  const past = await read(raw.length + 10, 10);
-  assert.equal(past.ok, true);
-  assert.equal(past.bytes.length, 0);
+  // ---- 1. 新书只复制一次，旧书随后直接读取同一本缓存 ----
+  {
+    const originalCopy=systemFile.copy;
+    const originalBuffer=systemFile.readArrayBuffer;
+    const originalText=systemFile.readText;
+    let copies=0, rawReadAttempts=0;
+    const stages=[];
+    systemFile.copy=(o)=>{copies++;originalCopy(o);};
+    systemFile.readArrayBuffer=(o)=>{
+      if(o.uri.indexOf('rawfile/')>=0)rawReadAttempts++;
+      originalBuffer(o);
+    };
+    systemFile.readText=(o)=>{
+      if(o.uri.indexOf('rawfile/')>=0)rawReadAttempts++;
+      originalText(o);
+    };
+    try {
+      eq(await settle(done=>bs.readBundledWindow(
+        expectedId,0,raw.length+10,done,(stage)=>stages.push(stage))),
+        0,raw.length);
+      assert.equal(copies,1,'first open copies only the current novel');
+      assert.equal(rawReadAttempts,0,
+        'no unsupported rawfile read probes before first copy');
+      assert.ok(stages.includes('首次复制内置书'));
+      assert.ok(stages.includes('读取缓存正文'));
+      eq(await read(250,20),250,270);
+      eq(await read(0,300),0,300);
+      eq(await read(raw.length-5,100),raw.length-5,raw.length);
+      assert.equal(copies,1,'later reads must reuse the verified cache');
+    }finally{
+      systemFile.copy=originalCopy;
+      systemFile.readArrayBuffer=originalBuffer;
+      systemFile.readText=originalText;
+    }
+  }
+  const past=await read(raw.length+10,10);
+  assert.equal(past.ok,true);
+  assert.equal(past.bytes.length,0);
 
-  // ---- 2. rawfile 直接读不支持 → file.copy 到私有目录再读 ----
+  // ---- 2. rawfile 不能直接读也不影响已经缓存的书 ----
   {
     const original = systemFile.readArrayBuffer;
     const originalText = systemFile.readText;
@@ -205,7 +235,7 @@ try {
   assert.equal(miss.reason, 'not_bundled');
 
   rmSync(sandbox, { recursive: true, force: true });
-  console.info('  [1] 内置读取：rawfile 窗口逐字节一致、copy 回退、' +
+  console.info('  [1] 内置读取：一次复制后缓存窗口逐字节一致、' +
     '双失败结构化报错、无回调超时 ✓');
 } finally {
   rmSync(tmp, { recursive: true, force: true });
