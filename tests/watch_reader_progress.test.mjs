@@ -39,6 +39,49 @@ try {
   assert.deepEqual(restored.history,[0,400,800,1200]);
   assert.ok(storage.__values['suyue.pos.'+id].length<128);
 
+  // 回归：真正的新书没有任何 per-book 设置键。即使设置读取尚未
+  // 回调，也必须立即开始按已确定的进度 0 读取正文，而不是卡“正在读取”。
+  {
+    const newId='cccccccccccccccc';
+    const originalGet=storage.get;
+    let delayedSetting=null;
+    storage.get=(o)=>{
+      if(o.key==='suyue.reader.'+newId){
+        delayedSetting=o;
+        return;
+      }
+      originalGet(o);
+    };
+    try{
+      const first=Object.create(reader.default);
+      Object.assign(first,reader.default.data);
+      first.bookId=newId;
+      first.history=[];
+      first.settingsTouched=false;
+      first.progressReady=false;
+      first.renderedOnce=false;
+      const pages=[];
+      first.loadPage=function(offset){pages.push(offset)};
+      first.startReading();
+      assert.deepEqual(pages,[0],
+        'absent settings must never gate the first text read');
+      assert.equal(first.progressReady,true);
+      assert.equal(typeof delayedSetting.success,'function');
+      assert.ok(first.body.includes('读取正文'));
+      delayedSetting.success('');
+    }finally{storage.get=originalGet;}
+  }
+
+  // 错误路由不能保留“正在读取”伪装成永无结束的加载。
+  {
+    const invalid=Object.create(reader.default);
+    Object.assign(invalid,reader.default.data);
+    invalid.bookId='invalid';
+    invalid.onInit();
+    assert.equal(invalid.isBusy,false);
+    assert.ok(invalid.body.includes('打开失败'));
+  }
+
   // 文件读写发生系统错误也不能影响读写进度——它们不再被使用。
   fs.readText=()=>{throw Error('file progress is forbidden')};
   fs.writeText=()=>{throw Error('file progress is forbidden')};
