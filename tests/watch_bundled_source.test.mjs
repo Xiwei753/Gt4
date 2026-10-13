@@ -185,22 +185,25 @@ try {
     }
   }
 
-  // ---- 3. 两条路都失败 → 结构化错误（真实 api/uri/code）----
+  // ---- 3. 新书缓存不存在，复制失败时不能伪装成加载成功 ----
   {
+    const originalAccess = systemFile.access;
     const original = systemFile.readArrayBuffer;
     const originalText = systemFile.readText;
     const originalCopy = systemFile.copy;
+    systemFile.access = (o) => o.fail && o.fail({}, 301);
     systemFile.readArrayBuffer = (o) => o.fail && o.fail({}, 300);
     systemFile.readText = (o) => o.fail && o.fail({}, 300);
     systemFile.copy = (o) => o.fail && o.fail({}, 300);
     try {
       const r = await read(0, 20);
       assert.equal(r.ok, false);
-      assert.equal(r.reason, 'unreadable');
+      assert.equal(r.reason, 'copy_failed');
+      assert.equal(r.stage, 'copy');
       assert.equal(r.api, 'copy');
-      assert.ok(String(r.uri).indexOf('rawfile/gt4books') >= 0);
       assert.equal(r.code, 300);
     } finally {
+      systemFile.access = originalAccess;
       systemFile.readArrayBuffer = original;
       systemFile.readText = originalText;
       systemFile.copy = originalCopy;
