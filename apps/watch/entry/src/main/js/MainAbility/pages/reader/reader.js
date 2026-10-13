@@ -89,6 +89,8 @@ export default {
     const bookId = this.bookId;
     if (typeof bookId !== 'string' ||
         !isLowerHex(bookId, 16)) {
+      this.readingError = true;
+      this.body = '打开失败：未收到有效书籍编号\\n请返回书架重选';
       this.pageHint = '未知书籍，请返回书架选择';
       this.isBusy = false;
       return;
@@ -104,6 +106,8 @@ export default {
     }
     openBook(bookId, (state) => {
       if (!state.ok) {
+        this.readingError = true;
+        this.body = '打开失败：书籍不存在或已删除';
         this.pageHint = '书籍不存在或已删除';
         this.isBusy = false;
         return;
