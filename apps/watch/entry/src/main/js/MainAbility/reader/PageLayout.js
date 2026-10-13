@@ -64,6 +64,30 @@ export function takeCanvasPage(bytes, offset, options) {
   const topStart = cy - rows * lineHeight / 2;
   const lines = [];
   let used = offset;
+  // 文件开头或翻页起点可能有大量空行。跳过完整的前置空行
+  // 而不是为每个空行浪费一整行 Canvas 高度；如下一行有正文，
+  // 保留它自己的全角空格/缩进，不删除正文字符。
+  // 全窗口皆是空白时也必须消耗它，供阅读页继续读取下一窗口。
+  let scan = used;
+  let lastBlankLineEnd = used;
+  while (scan < bytes.length) {
+    const lead = decodeAt(bytes, scan);
+    if (!lead) break;
+    const ch = lead.char;
+    if (ch === '\n') {
+      scan += lead.size;
+      lastBlankLineEnd = scan;
+      continue;
+    }
+    if (ch === '\r' || ch === ' ' || ch === '\t' ||
+        ch === '\u3000' || ch === '\u00A0' || ch === '\uFEFF') {
+      scan += lead.size;
+      continue;
+    }
+    break;
+  }
+  if (lastBlankLineEnd > used) used = lastBlankLineEnd;
+  else if (scan === bytes.length) used = scan;
   let combined = '';
   for (let row = 0; row < rows && used < bytes.length; row++) {
     const top = topStart + row * lineHeight;
