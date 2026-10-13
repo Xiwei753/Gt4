@@ -170,12 +170,13 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 阅读（`storage/BundledBookSource.js` + `pages/reader/reader.js`），**按需、只读当前页窗口**：
 
-- 先直接窗口读 `internal://app/rawfile/gt4books/<file>`；不行再 `file.copy` 把**当前这一本**
-  复制到 `internal://app/gt4reader/cache/<bookId>.txt` 后窗口读；两步都失败就显示**真实的接口名 /
-  URI / 错误码**（含无回调 `timeout`），**不假装读到**。每次只读窗口，不把整本解码进内存。
+- **内置书只读私有缓存这一个位置**：先查 `internal://app/gt4reader/cache/<bookId>.txt`。
+  已有缓存直接窗口读取；新书没有缓存，就从 `internal://app/rawfile/gt4books/<file>`
+  **复制这一本**并检查缓存，然后只读取当前页的窗口。免去原来首次打开前两次无效 rawfile API 探测。
+  错误会直接出现在阅读页并指出阶段（缓存检查／首次复制／校验／读取），不再永久显示“正在读取本地文本”。
+  仍不把整本书解码进 JS 内存。
 - 每个文件调用都有 settle-once 有限超时（`setBundledTimeout`，默认 6s），阅读页不会永久卡住。
-- **恢复阅读位置**：先通过 Lite `@system.storage` 读取该书的最新字节位置，再绘制保存位置所在页；**绝不先显示/写回第 0 页**。翻页完成后立即串行保存新位置，退出书架时等待最后一次写入完成（单次操作有超时上限）。进度读取失败会明确报错，不再假装新书。
-  `storage/ProgressStore.js` 加了 `setProgressTimeout`（默认 6s）兜底。
+- **恢复阅读位置**：先通过 Lite `@system.storage` 读取该书的最新字节位置，再开始按该位置读取正文；**绝不先显示/写回第 0 页**。个人字号、主题设置独立异步加载，缺省的设置键**不再阻挡新书正文读取**；设置若晚到，则在当前位置重排而不重置进度。退出书架前仍等待最后一次保存。进度读取失败会明确报错。进度 KV 的 `setProgressTimeout` 默认 2.5s，正文文件接口单次上限 6s。
 - 书架只 import `BookCatalog.g.js`；**阅读页也不再 import 任何正文 JS**。进度仍是 UTF-8 字节 offset，持久化只用 `suyue.pos.<bookId>` 的单一 KV 项（长度小于 128 字节），不再读取或生成 `progress/<bookId>.json`。
 
 构建实测（本机 Hvigor，单 BIN 签名，bundle `con.xiwei.suyue.gt4`）：
