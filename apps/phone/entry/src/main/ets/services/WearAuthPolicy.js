@@ -16,6 +16,8 @@ export const STAGE_TEXT = {
   auth_client: 'Wear Engine 客户端创建',
   auth_query: '授权状态查询',
   auth_request: '授权申请',
+  device_client: 'Wear Engine 设备客户端创建',
+  p2p_client: 'Wear Engine P2P 客户端创建',
   device_query: '设备发现'
 };
 
@@ -58,7 +60,11 @@ export function shorten(message) {
 // 无用，只能由开发者修包（补 client_id 元数据后重装）。
 export function describeWearError(stage, code, message) {
   const n = typeof code === 'number' ? code : 0;
-  if (n === 1008509999) {
+  // 1008509999 在设备发现/授权查询路径上已由实机日志确证是 client ID
+  // 缺失；但客户端**创建**阶段（getXxxClient 同步抛错）只是 SDK 的通用
+  // Internal error，不能武断归因，必须保留阶段文案（issue #5 P0-2a/P0-2d）。
+  if (n === 1008509999 && stage !== 'device_client' &&
+      stage !== 'p2p_client' && stage !== 'auth_client') {
     return { stage: stage, code: n, kind: 'app_client_id_not_configured',
       text: '应用身份配置错误（Wear Engine 1008509999）：' +
         '安装包缺少应用级 Client ID 元数据，请更新素阅安装包；' +
@@ -83,7 +89,8 @@ export function describeWearError(stage, code, message) {
   }
   if (n === 1008500005) {
     return { stage: stage, code: n, kind: 'not_authorized',
-      text: '尚未授权手表访问（1008500005），请点击「授权手表访问」' };
+      text: '华为账号未授权该数据权限（1008500005）；本应用传书无需该权限，' +
+        '如出现请检查华为侧授权' };
   }
   if (n === 1008500006) {
     return { stage: stage, code: n, kind: 'privacy_not_agreed',
@@ -121,7 +128,7 @@ export function authNotice(auth) {
   }
   if (auth.ok === true && auth.granted !== true) {
     return { kind: 'not_authorized', code: 0,
-      text: '尚未授权手表访问，请点击「授权手表访问」' };
+      text: '尚未授权手表数据权限（本应用传书无需，如出现请检查华为侧授权）' };
   }
   return describeWearError(auth.stage, auth.code, auth.message);
 }
@@ -185,3 +192,20 @@ export function planRetry(attempt, notice) {
     reason: 'transient' };
 }
 
+// ---- 一轮设备刷新的纯异步流程（issue #5 第二轮 P0-2b / P0-3）----
+// 页面通过 deps 注入：start()（开启一轮并返回序号，同时置“进行中”）、
+// isCurrent(seq)（该轮是否仍是最新）、listDevices()（可能 throw）、
+// apply(result)（落地结果）、end()（复位“进行中”）。
+// 保证：无论成功、异常还是被更新的一轮取代，只要该轮仍是当前轮次，
+// “进行中”标志都一定会被复位（配合页面的 try/finally 语义）。
+export async function runDeviceRefresh(deps) {
+  const seq = deps.start();
+  try {
+    const result = await deps.listDevices();
+    if (!deps.isCurrent(seq)) return { superseded: true };
+    deps.apply(result);
+    return { superseded: false, result: result };
+  } finally {
+    if (deps.isCurrent(seq)) deps.end();
+  }
+}

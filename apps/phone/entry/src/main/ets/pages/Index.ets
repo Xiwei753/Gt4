@@ -17,10 +17,10 @@ import { WATCH_PEER, PHONE_SELF,
 import { loadPeerIdentities } from '../services/PeerIdentityLoader';
 import { importBook } from '../services/BookImportService';
 import { BookRepository } from '../services/BookRepository';
-import { WearDeviceService } from '../services/WearDeviceService';
+import { WearDeviceService, WearDeviceListResult } from '../services/WearDeviceService';
 import { BookTransferService } from '../services/BookTransferService';
-import { authNotice, deviceNotice, planRetry,
-  MAX_AUTO_RETRIES } from '../services/WearAuthPolicy';
+import { deviceNotice, planRetry, MAX_AUTO_RETRIES,
+  runDeviceRefresh } from '../services/WearAuthPolicy';
 
 // 双端身份严格分离（P0-1/P0-2）：
 //   WATCH_PEER：对端 GT 4 身份，作为
@@ -43,10 +43,8 @@ struct Index {
   @State private selectedDevice: number = -1;
   @State private receiverReady: boolean = false;
   @State private deviceStatus: string = '未发现已连接的 GT 4';
-  // issue #5：授权状态与设备发现各自的提示与进行中标志。
-  @State private authStatus: string = '尚未检查 Wear Engine 授权状态';
-  @State private authGranted: boolean = false;
-  @State private authBusy: boolean = false;
+  // issue #5 第二轮：设备发现只需 Wear Engine「设备基础信息」服务审批，
+  // 无需运行时用户权限，因此不再有授权按钮/未授权状态；只保留发现进行中标志。
   @State private deviceBusy: boolean = false;
   @State private transferText: string = '未开始传输';
   @State private sending: boolean = false;
@@ -111,68 +109,67 @@ struct Index {
     this.books = this.getRepository().list();
   }
 
-  // 设备发现（issue #5）：先查授权状态，再列设备；两者都保留
-  // 真实的 stage/code，不再一律归为“Wear Engine 不可用”。
-  // 空列表 = Wear Engine 未返回可用设备，不等于“未配对/蓝牙没连”。
-  // issue #6 P0-B：这是用户/生命周期入口，同一时间最多 1 个在途请求，
-  // 重复点击不叠加；进入时清理旧的自动重试定时器。
+  // 设备发现（issue #5 第二轮 + issue #6 P0-B）：传书只需「设备基础信息」
+  // 服务审批，无需运行时用户权限，因此不再查询/申请授权。
+  // 同一时间最多 1 个在途请求，只有最新一轮结果落地；短暂错误按上限退避
+  // 重试，确定性失败立即停止，只由用户手动刷新。
   private async refreshDevices(): Promise<void> {
     if (this.deviceBusy) return;
     this.clearRetryTimer();
     this.autoRetryCount = 0;
-    await this.runDeviceDiscovery();
+    await this.runDeviceRefreshFlow();
   }
 
-  private async runDeviceDiscovery(): Promise<void> {
-    const seq = ++this.refreshSeq;
+  private async runDeviceRefreshFlow(): Promise<void> {
     this.receiverReady = false;
-    const previous = this.devices[this.selectedDevice];
-    if (previous) {
-      await this.getDeviceService().unregisterMessageReceiver(previous);
-    }
-    this.deviceBusy = true;
+    let seq = 0;
     try {
-      const auth = await this.getDeviceService().queryAuthorization();
-      if (seq !== this.refreshSeq) return;
-      this.authGranted = auth.granted;
-      this.authStatus = authNotice(auth).text;
-      const result = await this.getDeviceService().listDevices();
-      if (seq !== this.refreshSeq) return;
-      this.devices = result.ok ? result.devices : [];
-      const notice = deviceNotice(result);
-      this.deviceStatus = notice.text;
-      this.selectedDevice = -1;
+      await runDeviceRefresh({
+        start: () => {
+          this.deviceBusy = true;
+          seq = ++this.refreshSeq;
+          return seq;
+        },
+        isCurrent: (current: number) => current === this.refreshSeq,
+        listDevices: async () => {
+          const previous = this.devices[this.selectedDevice];
+          if (previous) {
+            await this.getDeviceService().unregisterMessageReceiver(previous);
+          }
+          return await this.getDeviceService().listDevices();
+        },
+        apply: (result: WearDeviceListResult) => {
+          this.devices = result.ok ? result.devices : [];
+          const notice = deviceNotice(result);
+          this.deviceStatus = notice.text;
+          this.selectedDevice = -1;
 
-      // 只有可恢复的短暂错误才排定有退避上限的自动重试；
-      // 1008509999（应用身份未配置）等确定性失败立即停下，只让用户手动刷新。
-      const plan = planRetry(this.autoRetryCount,
-        result.ok ? { ok: true } : notice);
-      if (plan.retry) {
-        this.autoRetryCount = plan.attempt;
-        this.deviceStatus = notice.text +
-          '（自动重试 ' + plan.attempt + '/' + MAX_AUTO_RETRIES + '）';
-        this.retryTimer = setTimeout(() => {
-          this.retryTimer = -1;
-          this.runDeviceDiscovery();
-        }, plan.delayMs);
-      } else {
-        this.autoRetryCount = 0;
+          // 只有可恢复的短暂错误才排定有退避上限的自动重试；
+          // 1008509999（应用身份未配置）等确定性失败立即停下。
+          const plan = planRetry(this.autoRetryCount,
+            result.ok ? { ok: true } : notice);
+          if (plan.retry) {
+            this.autoRetryCount = plan.attempt;
+            this.deviceStatus = notice.text +
+              '（自动重试 ' + plan.attempt + '/' + MAX_AUTO_RETRIES + '）';
+            this.retryTimer = setTimeout(() => {
+              this.retryTimer = -1;
+              this.runDeviceRefreshFlow();
+            }, plan.delayMs);
+          } else {
+            this.autoRetryCount = 0;
+          }
+        },
+        end: () => {
+          this.deviceBusy = false;
+        }
+      });
+    } catch (error) {
+      if (seq === this.refreshSeq) {
+        const e = error as Error;
+        this.deviceStatus = '设备发现异常：' + e.message;
       }
-    } finally {
-      this.deviceBusy = false;
     }
-  }
-
-  // 用户主动授权（issue #5 P0-A）：只在点击时请求，不自动弹窗；
-  // 拒绝/取消后也不循环弹窗，改为让用户手动重试。
-  private async requestAuth(): Promise<void> {
-    if (this.authBusy) return;
-    this.authBusy = true;
-    const result = await this.getDeviceService().requestAuthorization();
-    this.authBusy = false;
-    this.authGranted = result.granted;
-    this.authStatus = authNotice(result).text;
-    await this.refreshDevices();
   }
 
   private async selectDevice(e: number): Promise<void> {
@@ -428,15 +425,6 @@ struct Index {
       Column({ space: 8 }) {
         Text('发送到 GT 4').fontSize(22)
           .fontWeight(FontWeight.Medium).fontColor('#f2f2f2')
-        Text(this.authStatus).fontSize(13)
-          .fontColor(this.authGranted ? '#4ade80' : '#facc15')
-        if (!this.authGranted) {
-          Button(this.authBusy ? '授权中……' : '授权手表访问')
-            .fontSize(13)
-            .height(28)
-            .enabled(!this.authBusy)
-            .onClick(() => { this.requestAuth(); })
-        }
         Text(this.deviceStatus).fontSize(14).fontColor('#a7abb4')
         if (this.devices.length > 0) {
           Row() {

@@ -19,8 +19,8 @@ const tmp = mkdtempSync(join(tmpdir(), 'suyue-wear-'));
 const modPath = join(tmp, 'WearAuthPolicy.mjs');
 writeFileSync(modPath, src);
 const { describeWearError, authNotice, deviceNotice, shorten,
-  isRetryable, planRetry, MAX_AUTO_RETRIES, RETRY_BACKOFF_MS } =
-  await import(modPath);
+  isRetryable, planRetry, MAX_AUTO_RETRIES, RETRY_BACKOFF_MS,
+  runDeviceRefresh } = await import(modPath);
 
 // ---- 错误码分类：只认有官方依据的码，其余原样保留 ----
 assert.equal(describeWearError('device_query', 1008500004, '').kind,
@@ -161,6 +161,77 @@ assert.deepEqual(delays, [...delays].sort((a, b) => a - b),
 assert.equal(planRetry(0, { ok: true }).retry, false);
 assert.equal(planRetry(0, null).retry, false);
 
+// ---- 客户端初始化阶段错误：保留阶段 + 真实 code（P0-2a/P0-2d）----
+const initErr = describeWearError('device_client', 1008509999, 'internal');
+assert.equal(initErr.kind, 'api_error');
+assert.ok(initErr.text.includes('设备客户端创建'),
+  'client-init stage must be visible in text');
+assert.ok(initErr.text.includes('1008509999'),
+  'client-init raw code must surface in text');
+const p2pInitErr = describeWearError('p2p_client', 1008509999, 'internal');
+assert.ok(p2pInitErr.text.includes('P2P 客户端创建'),
+  'p2p client-init stage must be visible');
+
+// ---- 轮次并发/复位状态机（P0-2b/P0-3，非纯文本）----
+{
+  const state = { seq: 0, busy: false, applied: [] };
+  const base = {
+    start: () => { state.seq += 1; state.busy = true; return state.seq; },
+    isCurrent: (seq) => seq === state.seq,
+    apply: (r) => { state.applied.push(r.tag); },
+    end: () => { state.busy = false; }
+  };
+  // 正常一轮：落地结果并复位进行中标志
+  const ok = await runDeviceRefresh({ ...base,
+    listDevices: async () => ({ ok: true, tag: 'first' }) });
+  assert.equal(ok.superseded, false);
+  assert.equal(state.busy, false, 'busy must reset after success');
+  assert.deepEqual(state.applied, ['first']);
+
+  // 异常结束：busy 必须复位，且不落地结果
+  let threw = false;
+  try {
+    await runDeviceRefresh({ ...base,
+      listDevices: async () => { throw new Error('boom'); } });
+  } catch (e) { threw = true; }
+  assert.equal(threw, true, 'refresh must propagate the error');
+  assert.equal(state.busy, false, 'busy must reset after exception');
+
+  // 并发：后一轮取代前一轮，前一轮结果作废
+  let resolveStale;
+  const a = runDeviceRefresh({ ...base,
+    listDevices: () => new Promise((res) => { resolveStale = res; }) });
+  const b = runDeviceRefresh({ ...base,
+    listDevices: async () => ({ ok: true, tag: 'fresh' }) });
+  resolveStale({ ok: true, tag: 'stale' });
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(ra.superseded, true, 'stale round must be superseded');
+  assert.equal(rb.superseded, false);
+  assert.ok(state.applied.includes('fresh'));
+  assert.ok(!state.applied.includes('stale'),
+    'superseded round must not apply its result');
+  assert.equal(state.busy, false, 'busy must be reset by the latest round');
+}
+
+// ---- 静态契约：不再依赖 DEVICE_IDENTIFIER，也不再有误导的授权按钮 ----
+const svc = readFileSync(
+  'apps/phone/entry/src/main/ets/services/WearDeviceService.ts', 'utf8');
+assert.ok(!svc.includes('DEVICE_IDENTIFIER'),
+  'device discovery must not depend on the DEVICE_IDENTIFIER permission');
+assert.ok(svc.includes('device_client'),
+  'service must surface the client-init stage');
+assert.ok(svc.includes('ensureDeviceClient'),
+  'service must lazily create the device client (constructor must not throw)');
+const page = readFileSync(
+  'apps/phone/entry/src/main/ets/pages/Index.ets', 'utf8');
+assert.ok(!page.includes('requestAuth'),
+  'page must not gate discovery/sending on an authorization request');
+assert.ok(!page.includes('授权手表访问'),
+  'page must not show the misleading authorization button');
+assert.ok(page.includes('runDeviceRefresh'),
+  'page must use the tested refresh flow');
+
 console.info('PASS: Wear Engine auth/discovery policy ' +
   '(code classification, empty != bluetooth, raw code preserved, ' +
-  'client-id non-retry, bounded backoff)');
+  'client-id non-retry, bounded backoff, ' +
+  'init-stage errors, refresh state machine)');

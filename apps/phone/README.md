@@ -17,17 +17,20 @@
 - `services/BookRepository.ets`：`library.json` 索引，重启不丢书，
   重复导入幂等，删除同时清理索引与正文文件。
 - `model/BookModels.ets`：BookMeta/Chapter/Status 统一模型。
-- `services/WearDeviceService.ets`：Wear Engine 授权与设备发现。
-  授权用 `getAuthClient` → `getAuthorization` 查询、`requestAuthorization`
-  由用户显式授权（最小权限 `Permission.DEVICE_IDENTIFIER`）；发现用
-  `getConnectedDevices`，`isRemoteAppInstalled` 核对、
-  `registerMessageReceiver` 回执接收；设备由用户选择，不默认第一台。
-  授权/发现各自失败阶段与 `BusinessError.code` 结构化返回，
-  不再一律 `E_PEER_UNAVAILABLE`。
+- `services/WearDeviceService.ets`：Wear Engine 设备发现与 P2P。
+  客户端惰性创建（失败保留 `stage/code/message`，构造器不抛）；
+  传书只需「设备基础信息」服务审批，**不申请运行时权限**
+  （`requiredPermissions()` 为空，授权查询/申请为无操作兼容接口）；
+  发现用 `getConnectedDevices`，同一时间只允许 1 个在途查询并复用结果；
+  `isRemoteAppInstalled` 核对、`registerMessageReceiver` 回执接收；
+  设备由用户选择，不默认第一台。失败阶段与 `BusinessError.code`
+  结构化返回，不再一律 `E_PEER_UNAVAILABLE`。
 - `services/WearAuthPolicy.js`：纯逻辑（无 SDK 依赖，Node 可测）：
   错误码分类（1008500004 未申请服务 / 1008500005 未授权 /
   1008500006 未同意隐私 / 401 参数非法 / 201 与其它保留原始码）、
-  授权与发现的用户文案；「空列表」≠「未配对/蓝牙没连」。
+  设备发现的用户文案；确定性失败不自动重试，仅网络/断连错误按
+  1s/2s/4s 上限退避；`runDeviceRefresh` 保证只有最新一轮结果落地，
+  异常也会复位 busy；「空列表」≠「未配对/蓝牙没连」。
 - `services/BookTransferService.ets`：按协议序列发送
   HELLO → BOOK_META → `transferFile` 文件通道 →
   等手表 RESULT；进度/取消/超时/重试（只重试可恢复
