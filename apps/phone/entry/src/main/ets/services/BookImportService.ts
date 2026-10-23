@@ -198,7 +198,16 @@ export async function importBook(context: common.UIAbilityContext,
 
     const repository = new BookRepository(context);
     const booksDir = context.filesDir + '/books';
-    fileIo.mkdirSync(booksDir, true);
+    // mkdirSync(path, true) 在目录已经存在时仍可能抛
+    // 13900015 File exists（本机实测）。旧版本/上一本书已经创建过
+    // books 目录时，不能把“目录已存在”误报成导入失败。
+    try {
+      fileIo.mkdirSync(booksDir, true);
+    } catch (e) {
+      if (!fileIo.accessSync(booksDir)) {
+        throw e;
+      }
+    }
     const filePath = booksDir + '/' + bookId + '.txt';
     writeNormalizedFile(filePath, normalized);
 

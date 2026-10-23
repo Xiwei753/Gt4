@@ -42,6 +42,12 @@ assert.ok(phoneClientIdInjector.includes('--client-id'),
 assert.ok(read('tools/build_phone_hap.sh').includes('signing/phone/client_id.env'),
   'phone build must load the real Client ID from the gitignored local file');
 assert.ok(phoneIndex.includes('DocumentViewPicker'), 'phone must expose a real document picker');
+// 旧版本/上一本书已经创建 files/books 时，mkdirSync(path, true) 仍可能
+// 抛 13900015 File exists；导入必须把它当成“目录已存在”，不能拒绝新书。
+const phoneImportService = read(
+  'apps/phone/entry/src/main/ets/services/BookImportService.ts');
+assert.ok(phoneImportService.includes('fileIo.accessSync(booksDir)'),
+  'phone import must tolerate an existing books directory (13900015 File exists)');
 assert.ok(phoneIndex.includes('importBook'), 'phone index must run a real import flow');
 assert.ok(phoneIndex.includes('BookRepository'), 'phone index must list a real library');
 assert.ok(phoneIndex.includes('素阅'), 'displayed app name');
