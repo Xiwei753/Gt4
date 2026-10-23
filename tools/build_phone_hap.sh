@@ -94,14 +94,29 @@ fi
 # 三者同时存在时互相核对，不一致即失败。构建结束还原源码。
 WATCH_BUNDLE="con.xiwei.suyue.gt4"
 WATCH_SIGNING_DIR="${WATCH_SIGNING_DIR:-$REPO_ROOT/signing}"
-find_first() {
-  find "$1" -maxdepth 1 -name "$2" -type f 2>/dev/null | head -n 1
+# 目录不存在是正常情况（CI 只注入指纹、仓库里不放签名材料）：
+# 必须跳过，而不是让 find 的非零退出码在 set -e/pipefail 下终止构建。
+# 同一目录有多份候选时拒绝盲选，要求用环境变量明确指定。
+find_unique() {
+  local dir="$1" pattern="$2" env_name="$3" count
+  [ -d "$dir" ] || return 0
+  count="$(find "$dir" -maxdepth 1 -name "$pattern" -type f \
+    2>/dev/null | wc -l)"
+  if [ "$count" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$count" -gt 1 ]; then
+    echo "ERROR: $dir 下有 $count 份 $pattern，无法确定哪一份属于 GT 4。" >&2
+    echo "       请用 $env_name 明确指定唯一文件，拒绝盲选第一份。" >&2
+    return 1
+  fi
+  find "$dir" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -n 1
 }
 
 WATCH_PROFILE="${WATCH_SIGN_PROFILE:-}"
 if [ -z "$WATCH_PROFILE" ] && [ -d "$WATCH_SIGNING_DIR" ]; then
   for d in "$WATCH_SIGNING_DIR/watch" "$WATCH_SIGNING_DIR"; do
-    f="$(find_first "$d" '*.p7b')"
+    f="$(find_unique "$d" '*.p7b' WATCH_SIGN_PROFILE)" || exit 1
     [ -n "$f" ] && { WATCH_PROFILE="$f"; break; }
   done
 fi
@@ -109,7 +124,7 @@ WATCH_CERT="${WATCH_SIGN_CER:-}"
 if [ -z "$WATCH_CERT" ] && [ -d "$WATCH_SIGNING_DIR" ]; then
   for d in "$WATCH_SIGNING_DIR/shared" "$WATCH_SIGNING_DIR/watch" \
       "$WATCH_SIGNING_DIR"; do
-    f="$(find_first "$d" '*.cer')"
+    f="$(find_unique "$d" '*.cer' WATCH_SIGN_CER)" || exit 1
     [ -n "$f" ] && { WATCH_CERT="$f"; break; }
   done
 fi

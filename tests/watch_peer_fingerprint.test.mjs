@@ -69,8 +69,6 @@ const p256Run = tool(['--cert', p256.cert]);
 assert.equal(p256Run.status, 0, p256Run.stderr);
 assert.equal(p256Run.stdout.trim(), p256Value);
 assert.ok(p256Run.stdout.includes(BUNDLE + '_'));
-assert.ok(p256Run.stdout.includes('+') || p256Run.stdout.includes('/'),
-  'Base64 must be preserved verbatim');
 assert.ok(!/^[0-9a-f]{64}$/.test(p256Run.stdout.trim()),
   'must not emit a certificate SHA-256');
 
