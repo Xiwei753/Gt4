@@ -1,55 +1,70 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 双端 Peer 身份配置。
+// 双端 Peer 身份配置（issue #13）。
 //
-// 两个身份必须严格区分（施工单 P0-1/P0-2）：
-//   PHONE_SELF：本应用（手机）身份，仅用于
-//     让手表验证“消息来自哪部手机”；
-//   WATCH_PEER：对端 GT 4 手表身份，手机用它
-//     作为 remoteApp 发送与校验，绝不能用手机
-//     自己的包名/指纹冒充。
+// 两个身份的方向和格式完全不同，不能互相顶替：
+//   PHONE_SELF：手机自己是谁。给手表登记“消息来自哪部手机”用，
+//     按华为 FAQ，HarmonyOS 5.0+ 手机原生应用使用 **APP ID**
+//     （AGC bundle-info.app-identifier）。
+//   WATCH_PEER：对端 GT 4 Lite 应用是谁。手机发送/注册 remoteApp 用，
+//     必须使用 **bundleName_Base64(签名证书原始 EC 公钥点)**。
 //
-// 指纹注入路径：CI 从 Secrets 生成
-// services/PeerIdentityConfig.g.ts（gitignore，
-// 不提交），本地未生成时指纹为空 —— 空指纹
-// 明确禁用发送/接收，不会以假值混过。
+// 不能把 OAuth Client ID、证书 SHA-256、APP ID、Lite 公钥指纹
+// 混为一谈；空值/格式错误一律 fail closed，发送保持禁用。
+//
+// 注入路径：构建脚本从真实签名材料生成
+// services/PeerIdentityConfig.g.ts（gitignore，不提交）。
+// 手机发送只需要 WATCH_PEER；PHONE_SELF 由手表侧登记手机时使用。
+import { PHONE_APP_ID_KIND, WATCH_LITE_KIND,
+  validatePhoneAppId, validateWatchLiteFingerprint } from './PeerIdentityPolicy';
+
+export type FingerprintKind = 'phone-app-id' | 'watch-lite-pubkey';
+
 export interface PeerIdentity {
   bundleName: string;
-  // 签名证书指纹（hex 字符串）。空 = 未配置。
+  // 原样保留大小写与 + / =；空 = 未配置。
   fingerprint: string;
+  fingerprintKind: FingerprintKind;
 }
 
 export const PHONE_SELF: PeerIdentity = {
   bundleName: 'com.xiwei.suyue',
-  fingerprint: ''
+  fingerprint: '',
+  fingerprintKind: PHONE_APP_ID_KIND as FingerprintKind
 };
 
 export const WATCH_PEER: PeerIdentity = {
   bundleName: 'con.xiwei.suyue.gt4',
-  fingerprint: ''
+  fingerprint: '',
+  fingerprintKind: WATCH_LITE_KIND as FingerprintKind
 };
 
-// CI 注入入口：仅允许把指纹写入对应身份，
-// 并校验非空、十六进制、长度 64（SHA-256 证书
-// 摘要形状）。不允许把一个身份的指纹赋给另一端。
+// 构建注入入口：只允许写入对应身份，并按该身份的官方格式校验。
+// 不 lowercase、不去掉非十六进制字符，合法 Lite 指纹原样保留。
 export function injectFingerprint(
   target: 'phone' | 'watch',
   fingerprint: string): void {
-  const normalized = String(fingerprint || '')
-    .toLowerCase().replace(/[^0-9a-f]/g, '');
-  if (normalized.length === 0) {
-    throw new Error('fingerprint is empty');
-  }
-  if (normalized.length !== 64) {
-    throw new Error('fingerprint must be 64 hex chars, got ' +
-      normalized.length);
-  }
   if (target === 'phone') {
-    PHONE_SELF.fingerprint = normalized;
-  } else {
-    WATCH_PEER.fingerprint = normalized;
+    const result = validatePhoneAppId(fingerprint);
+    if (!result.ok) {
+      throw new Error('PHONE_SELF（手机 APP ID）无效：' + result.message);
+    }
+    PHONE_SELF.fingerprint = result.value;
+    return;
   }
+  const result = validateWatchLiteFingerprint(
+    fingerprint, WATCH_PEER.bundleName);
+  if (!result.ok) {
+    throw new Error('WATCH_PEER（GT 4 Lite 公钥指纹）无效：' +
+      result.message);
+  }
+  WATCH_PEER.fingerprint = result.value;
 }
 
 export function isConfigured(identity: PeerIdentity): boolean {
-  return identity.fingerprint.length === 64;
+  if (!identity || identity.fingerprint.length === 0) return false;
+  if (identity.fingerprintKind === 'phone-app-id') {
+    return validatePhoneAppId(identity.fingerprint).ok;
+  }
+  return validateWatchLiteFingerprint(
+    identity.fingerprint, identity.bundleName).ok;
 }

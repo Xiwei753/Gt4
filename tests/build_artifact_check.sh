@@ -208,15 +208,15 @@ if [ -n "$MODE" ]; then
   esac
 fi
 
-# 6) Manifest 指纹注入校验（手表侧）：
-#    期望指纹必须出现，占位符必须消失。
+# 6) Manifest 身份注入校验（手表侧，issue #13）：
+#    supportLists 必须是 <手机包名>:<手机 APP ID>，占位符必须消失。
 if [ -n "$EXPECT_FINGERPRINT" ]; then
-  if printf '%s' "$MANIFEST_TEXT" | grep -q 'CONFIGURE_WITH_SIGNED_PHONE_FINGERPRINT'; then
-    echo "FAIL: HAP manifest still contains the fingerprint placeholder: $HAP" >&2
+  if printf '%s' "$MANIFEST_TEXT" | grep -q 'CONFIGURE_WITH_PHONE_APP_ID'; then
+    echo "FAIL: HAP manifest still contains the APP ID placeholder: $HAP" >&2
     exit 1
   fi
   if ! printf '%s' "$MANIFEST_TEXT" | grep -qF "$EXPECT_FINGERPRINT"; then
-    echo "FAIL: HAP manifest does not contain the injected fingerprint: $HAP" >&2
+    echo "FAIL: HAP manifest does not contain the injected phone APP ID: $HAP" >&2
     exit 1
   fi
 fi

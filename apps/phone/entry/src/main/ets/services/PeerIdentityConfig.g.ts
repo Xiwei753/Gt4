@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// CI 指纹注入占位：提交的是空值安全默认。
-// .github/workflows/*.yml 构建前从 Secrets 覆盖
-// 写入真实证书指纹，构建完成后 git checkout 还原。
-// 任何“看起来像指纹”的假值都不得提交。
-export const INJECTED_PHONE_FINGERPRINT = '';
-export const INJECTED_WATCH_FINGERPRINT = '';
+// 构建注入占位：提交的是空值安全默认（issue #13）。
+// 构建脚本从真实签名材料覆盖写入，构建结束后还原。
+//   INJECTED_PHONE_APP_ID：手机 APP ID（AGC bundle-info.app-identifier）
+//   INJECTED_WATCH_LITE_FINGERPRINT：
+//     con.xiwei.suyue.gt4_Base64(手表签名证书原始 EC 公钥点)
+// 不提交任何真实身份，也不提交“看起来像”的假值。
+export const INJECTED_PHONE_APP_ID = '';
+export const INJECTED_WATCH_LITE_FINGERPRINT = '';

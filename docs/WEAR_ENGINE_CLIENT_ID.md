@@ -42,6 +42,11 @@ Wear Engine 服务连接成功，但华为侧在读取设备列表**之前**发�
 这里填的是鸿蒙手机 APP `com.xiwei.suyue` 的身份，与手表
 `con.xiwei.suyue.gt4` 无关，禁止因此擅改手表包名。
 
+> issue #13 补充：Wear Engine 手机原生身份使用 **APP ID**
+> （profile 的 `bundle-info.app-identifier`），语义上仍不等于 Client ID。
+> 本项目本地 profile 中两者数值恰好相同，但构建脚本必须从 profile 的
+> `app-identifier` 取值，不能拿 Client ID、证书 SHA-256 或包名顶替。
+
 官方依据：
 [Health Service Kit 配置 Client ID](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/health-configuration-client-id)。
 

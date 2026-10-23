@@ -64,6 +64,22 @@ BOOKS_RESOURCE_DIR="$RAWFILE_ROOT/gt4books"
 BOOKS_REPORT=""
 BOOKS_BACKUP=""
 
+# ---- 手机 APP ID 注入（issue #13）--------------------------------------
+# 手表是 Lite Wearable，华为按 APP ID 识别 HarmonyOS 5.0+ 手机原生应用。
+# 必须从真实手机 profile 的 bundle-info.app-identifier 取值：
+#   - 不是 OAuth Client ID；
+#   - 不是证书 DER-SHA256；
+#   - 不是 con.xiwei.suyue.gt4_... 的 Lite 公钥指纹。
+# 注入 PhonePeerConfig.g.js（setFingerprint）和 config.json 的
+# supportLists；构建后由 EXIT trap 还原。
+WATCH_CONFIG_FILE="entry/src/main/config.json"
+PHONE_PEER_CONFIG="entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js"
+PHONE_PEER_VAR="INJECTED_PHONE_APP_ID"
+PHONE_BUNDLE="com.xiwei.suyue"
+PHONE_APP_ID=""
+WATCH_CONFIG_BACKUP=""
+PHONE_PEER_BACKUP=""
+
 cleanup_books() {
   if [ -n "$BOOKS_BACKUP" ] && [ -d "$BOOKS_BACKUP" ]; then
     rm -rf "$BOOKS_JS_DIR"
@@ -75,7 +91,23 @@ cleanup_books() {
   rm -rf "$BOOKS_RESOURCE_DIR"
   rmdir "$RAWFILE_ROOT" 2>/dev/null || true
 }
-trap cleanup_books EXIT
+
+cleanup_identity() {
+  if [ -n "$WATCH_CONFIG_BACKUP" ] && [ -f "$WATCH_CONFIG_BACKUP" ]; then
+    cp -f "$WATCH_CONFIG_BACKUP" "$WATCH_CONFIG_FILE"
+    rm -f "$WATCH_CONFIG_BACKUP"
+  fi
+  if [ -n "$PHONE_PEER_BACKUP" ] && [ -f "$PHONE_PEER_BACKUP" ]; then
+    cp -f "$PHONE_PEER_BACKUP" "$PHONE_PEER_CONFIG"
+    rm -f "$PHONE_PEER_BACKUP"
+  fi
+}
+
+cleanup_all() {
+  cleanup_books
+  cleanup_identity
+}
+trap cleanup_all EXIT
 
 if [ -n "${WATCH_BOOKS_DIR:-}" ]; then
   # 先备份提交的默认空书单：generator 会清空并重建目录，中途失败也要还原。
@@ -88,6 +120,121 @@ if [ -n "${WATCH_BOOKS_DIR:-}" ]; then
   BOOKS_REPORT="$BOOKS_RESOURCE_DIR/books_report.json"
   echo "WATCH_BOOKS_STAGED=1"
 fi
+
+# ---- 解析并注入手机 APP ID（issue #13）--------------------------------
+EXISTING_PHONE_APP_ID="$(python3 - "$PHONE_PEER_CONFIG" "$PHONE_PEER_VAR" <<'PY'
+import re
+import sys
+path, name = sys.argv[1], sys.argv[2]
+try:
+    text = open(path, encoding='utf-8').read()
+except OSError:
+    print('__MISSING__')
+    raise SystemExit(0)
+match = re.search(
+    r"export const %s = '([^']*)';" % re.escape(name), text)
+print(match.group(1) if match else '__MISSING__')
+PY
+)"
+if [ "$EXISTING_PHONE_APP_ID" = "__MISSING__" ]; then
+  echo "ERROR: $PHONE_PEER_CONFIG 中找不到 $PHONE_PEER_VAR 声明" >&2
+  echo "       拒绝在身份文件结构不明时继续构建。" >&2
+  exit 1
+fi
+
+validate_phone_app_id() {
+  python3 - "$REPO_ROOT/tools" "$1" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from peer_identity_formats import IdentityFormatError, validate_phone_app_id
+try:
+    print(validate_phone_app_id(sys.argv[2]))
+except IdentityFormatError as exc:
+    print('ERROR: ' + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+PHONE_APP_ID="${SUYUE_PHONE_APP_ID:-}"
+PHONE_PROFILE="${SUYUE_PHONE_PROFILE:-}"
+shopt -s nullglob
+if [ -z "$PHONE_PROFILE" ]; then
+  phone_profiles=("$REPO_ROOT"/signing/phone/*.p7b)
+  if [ ${#phone_profiles[@]} -gt 1 ]; then
+    echo "ERROR: signing/phone 下有多份 .p7b，无法确定哪份是手机的：" >&2
+    printf '       %s\n' "${phone_profiles[@]}" >&2
+    echo "       请用 SUYUE_PHONE_PROFILE 明确指定；不静默取第一份。" >&2
+    exit 1
+  elif [ ${#phone_profiles[@]} -eq 1 ]; then
+    PHONE_PROFILE="${phone_profiles[0]}"
+  fi
+fi
+shopt -u nullglob
+
+if [ -n "$PHONE_PROFILE" ]; then
+  PHONE_EXTRACT_ARGS=(--bundle "$PHONE_BUNDLE" --profile "$PHONE_PROFILE")
+  [ -n "$PHONE_APP_ID" ] && PHONE_EXTRACT_ARGS+=(--app-id "$PHONE_APP_ID")
+  if ! PHONE_APP_ID="$(python3 \
+      "$REPO_ROOT/tools/extract_phone_app_id.py" \
+      "${PHONE_EXTRACT_ARGS[@]}")"; then
+    echo "ERROR: 无法从手机 profile 解析出 APP ID（bundle-info.app-identifier）。" >&2
+    exit 1
+  fi
+elif [ -n "$PHONE_APP_ID" ]; then
+  if ! PHONE_APP_ID="$(validate_phone_app_id "$PHONE_APP_ID")"; then
+    echo "ERROR: SUYUE_PHONE_APP_ID 不是合法手机 APP ID。" >&2
+    exit 1
+  fi
+elif [ -n "$EXISTING_PHONE_APP_ID" ]; then
+  if ! PHONE_APP_ID="$(validate_phone_app_id "$EXISTING_PHONE_APP_ID")"; then
+    echo "ERROR: 已注入的手机 APP ID 格式非法。" >&2
+    exit 1
+  fi
+else
+  cat >&2 <<'MSG'
+ERROR: 找不到手机 APP ID，拒绝产出“手表无法识别手机”的 HAP。
+
+GT4 Lite 手表要登记 HarmonyOS 5.0+ 手机原生应用，必须使用
+AGC profile 的 bundle-info.app-identifier（19 位数字 APP ID），
+不是 OAuth Client ID，也不是证书 SHA-256。
+
+需要以下任一材料：
+  - signing/phone/<phone>.p7b（首选）；
+  - SUYUE_PHONE_APP_ID=<AGC APP ID>。
+MSG
+  exit 1
+fi
+
+if [ -n "$EXISTING_PHONE_APP_ID" ] && \
+   [ "$EXISTING_PHONE_APP_ID" != "$PHONE_APP_ID" ]; then
+  echo "ERROR: 已注入的手机 APP ID 与本次 profile/env 不一致：" >&2
+  echo "       existing=${EXISTING_PHONE_APP_ID:0:4}… expected=${PHONE_APP_ID:0:4}…" >&2
+  exit 1
+fi
+
+WATCH_CONFIG_BACKUP="$(mktemp)"
+PHONE_PEER_BACKUP="$(mktemp)"
+cp -f "$WATCH_CONFIG_FILE" "$WATCH_CONFIG_BACKUP"
+cp -f "$PHONE_PEER_CONFIG" "$PHONE_PEER_BACKUP"
+python3 "$REPO_ROOT/tools/inject_signing.py" \
+  --fingerprint-value "$PHONE_APP_ID" \
+  --identity-file "$PHONE_PEER_CONFIG" \
+  --identity-var "$PHONE_PEER_VAR" \
+  --fingerprint-key phone \
+  --fingerprint-format appid \
+  --allow-replace \
+  --manifest "$WATCH_CONFIG_FILE" \
+  --manifest-peer-bundle "$PHONE_BUNDLE"
+if ! grep -Fq "export const $PHONE_PEER_VAR = '$PHONE_APP_ID';" \
+    "$PHONE_PEER_CONFIG"; then
+  echo "ERROR: APP ID 注入后源码断言失败：$PHONE_PEER_VAR 未变成预期值。" >&2
+  exit 1
+fi
+if ! grep -Fq "$PHONE_BUNDLE:$PHONE_APP_ID" "$WATCH_CONFIG_FILE"; then
+  echo "ERROR: supportLists 注入后源码断言失败。" >&2
+  exit 1
+fi
+echo "WATCH_PHONE_APP_ID_INJECTED=yes bundle=$PHONE_BUNDLE appid_prefix=${PHONE_APP_ID:0:4}…"
 
 "$HVIGORW" --mode module -p product="$PRODUCT" -p buildMode="$MODE" assembleHap --no-daemon
 
@@ -268,6 +415,7 @@ ARTIFACT_CHECK_ARGS=(
   --source-manifest "$REPO_ROOT/apps/watch/entry/src/main/config.json"
   --device liteWearable
   --mode "$MODE"
+  --expect-fingerprint "$PHONE_BUNDLE:$PHONE_APP_ID"
 )
 # 逐字节核对：最终 ZIP 里的 BIN 必须就是本次签名产出的那个 BIN（issue #4）。
 # 这不是"签名前后哈希相同"，而是"归档内容 == 签名输出"。
@@ -280,6 +428,23 @@ if [ -n "$BOOKS_REPORT" ]; then
   ARTIFACT_CHECK_ARGS+=(--expect-books-report "$BOOKS_REPORT")
 fi
 "$REPO_ROOT/tests/build_artifact_check.sh" "${ARTIFACT_CHECK_ARGS[@]}"
+
+# source-manifest 检查只能证明注入源码正确；这里再核对**最终 HAP 的内层
+# BIN**，确认真实签进包里的 supportLists/APP ID 不是旧值或空值。
+# grep 不能加 -q：它提前退出会让上游 unzip/strings 收到 SIGPIPE，在
+# `set -o pipefail` 下把已命中的检查误判为失败（实际踩过）。
+if ! unzip -p "$REPO_ROOT/apps/watch/$HAP" '*.bin' 2>/dev/null \
+    | strings | grep -F "$PHONE_BUNDLE:$PHONE_APP_ID" >/dev/null; then
+  echo "ERROR: 最终 HAP 内层 BIN 未包含 supportLists=$PHONE_BUNDLE:$PHONE_APP_ID" >&2
+  echo "       拒绝把旧 SHA-256/空值/未注入的包当成新身份产物。" >&2
+  exit 1
+fi
+if ! unzip -p "$REPO_ROOT/apps/watch/$HAP" '*.bin' 2>/dev/null \
+    | strings | grep -F "$PHONE_APP_ID" >/dev/null; then
+  echo "ERROR: 最终 HAP 内层 BIN 未包含手机 APP ID。" >&2
+  exit 1
+fi
+echo "WATCH_PHONE_APP_ID_IN_BIN=yes"
 
 if [ -n "$BOOKS_REPORT" ]; then
   BOOKS_COUNT="$(python3 -c \

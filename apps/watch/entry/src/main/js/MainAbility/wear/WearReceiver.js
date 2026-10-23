@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Wear Engine 适配层：版本检查、签名指纹门控、
+// Wear Engine 适配层：版本检查、手机 APP ID 门控、
 // 消息订阅；协议消息与文件通道路由到
 // IncomingBookReceiver；所有回执经
 // wearengine.sendMsg 发回手机（P0-6）。
@@ -7,7 +7,7 @@
 // Explore in HMOS Wearable (MIT).
 // Does not vendor the upstream Huawei SDK wrapper (Apache-2.0).
 import wearengine from '@system.wearengine';
-import { PHONE_BUNDLE_NAME, PHONE_CERT_FINGERPRINT } from './PeerConfig';
+import { PHONE_BUNDLE_NAME, PHONE_APP_ID } from './PeerConfig';
 import { IncomingBookReceiver } from './IncomingBookReceiver';
 
 let subscribed = false;
@@ -39,8 +39,8 @@ export function beginReceive(onStatus) {
   const notify = (message) => {
     if (typeof onStatus === 'function') onStatus(message);
   };
-  if (!PHONE_CERT_FINGERPRINT) {
-    notify('未配置手机签名，传书接收暂未开启');
+  if (!PHONE_APP_ID) {
+    notify('未配置手机 APP ID，传书接收暂未开启');
     return;
   }
   // 手表 → 手机：唯一回执通道。
@@ -88,10 +88,14 @@ export function beginReceive(onStatus) {
         wearengine.setPackageName({
           appName: PHONE_BUNDLE_NAME,
           complete: () => {
+            console.info('setPackageName ok: ' + PHONE_BUNDLE_NAME);
             wearengine.setFingerprint({
               appName: PHONE_BUNDLE_NAME,
-              appCert: PHONE_CERT_FINGERPRINT,
+              appCert: PHONE_APP_ID,
               complete: () => {
+                console.info('setFingerprint ok: peer=' +
+                  PHONE_BUNDLE_NAME + ' appIdPrefix=' +
+                  PHONE_APP_ID.substring(0, 4) + '…');
                 receiver = new IncomingBookReceiver(
                   notify, sendToPhone);
                 wearengine.subscribeMsg({
@@ -104,6 +108,8 @@ export function beginReceive(onStatus) {
                     }
                     if (data && data.isRegister) {
                       subscribed = true;
+                      console.info('subscribeMsg register ok: peer=' +
+                        PHONE_BUNDLE_NAME);
                       notify('传书接收已开启');
                     } else if (data && data.isFileType) {
                       // 文件通道到达（P0-2）：字段名
@@ -120,13 +126,24 @@ export function beginReceive(onStatus) {
                       routeMessage(data.message);
                     }
                   },
-                  fail: (reason, code) => notify('接收注册失败：' + code)
+                  fail: (reason, code) => {
+                    console.error('subscribeMsg failed code=' + code);
+                    notify('接收注册失败：' + code);
+                  }
                 });
               },
-              fail: (reason, code) => notify('手机指纹配置失败：' + code)
+              fail: (reason, code) => {
+                console.error('setFingerprint failed code=' + code +
+                  ' peer=' + PHONE_BUNDLE_NAME);
+                notify('手机 APP ID 配置失败：' + code);
+              }
             });
           },
-          fail: (reason, code) => notify('手机包名配置失败：' + code)
+          fail: (reason, code) => {
+            console.error('setPackageName failed code=' + code +
+              ' peer=' + PHONE_BUNDLE_NAME);
+            notify('手机包名配置失败：' + code);
+          }
         });
       }
     });
@@ -137,6 +154,12 @@ export function beginReceive(onStatus) {
 
 function routeMessage(messageText) {
   if (!receiver) return;
+  // 记录对端消息是否真正到达手表；类型解析失败也不阻断协议。
+  var type = 'unknown';
+  try {
+    type = JSON.parse(messageText).type || 'unknown';
+  } catch (e) {}
+  console.info('Wear message received type=' + type);
   // ACK/RESUME/RESULT 全部由接收器内部
   // 经统一响应通道（sendToPhone）回发。
   receiver.onMessage(messageText);

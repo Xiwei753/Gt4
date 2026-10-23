@@ -1,35 +1,24 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""签名材料落盘与身份注入（施工单 P1-7 / 第二轮 P0-1 / issue #12）。
+"""Stage signing material and inject Wear Engine peer identities.
 
-两种入口共用同一套指纹校验与文件注入：
+Issue #13: the two directions have different, non-interchangeable formats.
 
-  * ``--material-json``：CI 把 Secrets 中的签名材料（JSON：base64 编码的
-    storeFile/certpath/profile + 别名/口令 + 双端证书指纹）落盘，并把
-    签名配置/身份写入构建目录；
-  * ``--fingerprint-value``：本地构建已从证书/profile 解析出指纹时，
-    只做校验并写入身份文件，不落盘任何签名材料、不改 build-profile。
+* phone -> watch: ``con.xiwei.suyue.gt4_<Base64(raw EC point)>``
+  (Lite Wearable fingerprint, see :mod:`peer_identity_formats`);
+* watch -> phone: the phone's 19-digit HarmonyOS APP ID from the profile
+  (``bundle-info.app-identifier``), not the OAuth client_id and not a
+  certificate SHA-256.
 
-材料模式会把：
+Modes:
 
-  1. 真实 signingConfigs 写入 build-profile.json5；
-  2. 对端证书指纹写入身份配置文件
-     （手表 PhonePeerConfig.g.js / 手机
-     PeerIdentityConfig.g.ts）；
-  3. 手表 Manifest（config.json）中
-     metaData.customizeData 的 supportLists
-     占位符替换为真实手机指纹。
+* ``--material-json`` stages the CI secret material (and optionally injects
+  one identity/manifest value).  It never prints secret contents.
+* ``--fingerprint-value`` only validates and injects an already-derived
+  identity.  It never writes signing material.
 
-指纹格式（第二轮 P1-9）：不同 SDK 版本的
-Wear Engine 可能要求 hex 摘要或编码后的
-指纹字符串，格式**以 GT4 Lite SDK 实测为准**。
-默认只做结构性校验（非空、不含空白/引号/
-冒号等破坏分隔符的字符）；确认为 64 位 hex
-时可用 --fingerprint-format hex64 收紧。
-
-绝不提交材料：所有写入都在工作区，
-workflow 的清理步骤（if: always()）负责
-git checkout 还原并删除目录。
+The old ``raw`` mode (arbitrary non-empty string) is intentionally gone:
+an unconfigured or mistyped identity must fail closed.
 """
 import argparse
 import base64
@@ -39,10 +28,16 @@ import re
 import shlex
 import sys
 
+from peer_identity_formats import (
+    PHONE_BUNDLE,
+    WATCH_BUNDLE,
+    IdentityFormatError,
+    validate_phone_app_id,
+    validate_watch_lite,
+)
+
 HEX64 = re.compile(r'^[0-9a-f]{64}$')
-# 指纹字符串不得包含会破坏 manifest 值
-# （bundle:fingerprint）或 JS 字面量的字符。
-FORBIDDEN = re.compile(r'[\s:;,\'"\\]')
+PLACEHOLDER = ':CONFIGURE_WITH_PHONE_APP_ID'
 
 
 def fail(msg):
@@ -50,26 +45,36 @@ def fail(msg):
     sys.exit(1)
 
 
-def validate_fingerprint(value, fmt, where):
+def validate_identity(value, fmt, key, watch_bundle):
+    if not fmt:
+        fmt = 'lite' if key == 'watch' else 'appid'
     text = str(value or '').strip()
     if not text:
-        fail('%s 指纹为空' % where)
-    if FORBIDDEN.search(text):
-        fail('%s 指纹包含空白或分隔符，'
-             '不接受（格式以 SDK 实测为准）' % where)
-    if fmt == 'hex64' and not HEX64.match(text.lower()):
-        fail('%s 指纹不是 64 位十六进制'
-             '（--fingerprint-format hex64）' % where)
-    if fmt == 'raw' and len(text) > 256:
-        fail('%s 指纹长度异常（>256）' % where)
-    # 证书 SHA-256 的线上格式统一为小写、无分隔符；显式值也不应把
-    # 大写/显示格式带进最终身份常量。
-    if fmt == 'hex64':
-        return text.lower()
-    return text
+        fail('待注入身份为空；拒绝把空值当成“已配置”')
+    try:
+        if fmt == 'lite':
+            if key != 'watch':
+                fail('Lite 公钥指纹只用于 WATCH_PEER（手机 -> 手表），'
+                     '不能用于 PHONE_APP_ID')
+            return validate_watch_lite(text, watch_bundle)
+        if fmt == 'appid':
+            if key != 'phone':
+                fail('手机 APP ID 只用于 PHONE_APP_ID（手表 -> 手机），'
+                     '不能用于 WATCH_PEER')
+            return validate_phone_app_id(text)
+        if fmt == 'hex64':
+            # Legacy only.  Issue #13 flows must not use this for either
+            # direction, but keeping it lets unrelated callers/tests fail
+            # with an explicit format instead of the removed "raw" mode.
+            if not HEX64.match(text.lower()):
+                fail('%s 不是 64 位十六进制（legacy hex64）' % key)
+            return text.lower()
+    except IdentityFormatError as exc:
+        fail(str(exc))
+    fail('未知身份格式: %s' % fmt)
 
 
-def inject_manifest(path, peer_bundle, fingerprint):
+def inject_manifest(path, peer_bundle, app_id):
     with open(path, 'r', encoding='utf-8') as handle:
         manifest = json.load(handle)
     module = manifest.get('module') or {}
@@ -81,29 +86,41 @@ def inject_manifest(path, peer_bundle, fingerprint):
             target = entry
             break
     if target is None:
-        fail('config.json 缺少 metaData.customizeData '
-             'supportLists 条目')
+        fail('config.json 缺少 metaData.customizeData supportLists 条目')
+    try:
+        app_id = validate_phone_app_id(app_id)
+    except IdentityFormatError as exc:
+        fail('supportLists 只能写入手机 APP ID：' + str(exc))
     value = str(target.get('value') or '')
-    placeholder = (peer_bundle +
-                   ':CONFIGURE_WITH_SIGNED_PHONE_FINGERPRINT')
+    expected = peer_bundle + ':' + app_id
+    if value == expected:
+        return
+    placeholder = peer_bundle + PLACEHOLDER
     if value != placeholder:
-        fail('supportLists 当前值不是预期占位符，拒绝猜测格式：'
-             + value)
-    target['value'] = peer_bundle + ':' + fingerprint
+        fail('supportLists 当前值不是预期占位符 %r，拒绝猜测格式：%r'
+             % (placeholder, value))
+    target['value'] = expected
     with open(path, 'w', encoding='utf-8') as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
         handle.write('\n')
 
 
-def inject_identity(path, identity_var, fingerprint):
+def inject_identity(path, identity_var, value, allow_replace=False):
     with open(path, 'r', encoding='utf-8') as handle:
         identity_text = handle.read()
     pattern = "export const %s = '';" % identity_var
     if pattern not in identity_text:
-        fail('身份文件中未找到 %s 的空占位' % identity_var)
+        if not allow_replace:
+            fail('身份文件中未找到 %s 的空占位' % identity_var)
+        current = re.compile(
+            r"export const %s = '([^']*)';" % re.escape(identity_var))
+        match = current.search(identity_text)
+        if match is None:
+            fail('身份文件中未找到 %s 声明' % identity_var)
+        pattern = match.group(0)
     identity_text = identity_text.replace(
         pattern,
-        'export const %s = \'%s\';' % (identity_var, fingerprint))
+        'export const %s = \'%s\';' % (identity_var, value), 1)
     with open(path, 'w', encoding='utf-8') as handle:
         handle.write(identity_text)
 
@@ -113,24 +130,28 @@ def main():
     ap.add_argument('--material-json', default='',
                     help='SIGNING_MATERIAL 环境变量（JSON）')
     ap.add_argument('--fingerprint-value', default='',
-                    help='已确证的 64 位 hex 指纹；本地构建只注入身份时使用')
+                    help='已由 profile/cert 推导出的对端身份值')
     ap.add_argument('--signing-dir', default='',
-                    help='材料落盘目录（跨 step 持久，仅材料模式需要）')
+                    help='材料落盘目录（仅材料模式需要）')
     ap.add_argument('--build-profile', default='',
                     help='要写入 signingConfigs 的 build-profile.json5')
     ap.add_argument('--external-signing', action='store_true',
-                    help='Lite HAP 走独立 sign-app，不注入 legacy signingConfigs；输出本地签名凭据')
-    ap.add_argument('--identity-file', required=True,
-                    help='身份配置文件（注入对端指纹）')
-    ap.add_argument('--identity-var', required=True,
-                    help='身份文件中的指纹常量名')
-    ap.add_argument('--fingerprint-key', required=True,
-                    choices=['phone', 'watch'],
-                    help='注入哪一个对端指纹')
-    ap.add_argument('--fingerprint-format', default='raw',
-                    choices=['raw', 'hex64'],
-                    help='指纹格式校验（默认 raw 宽松；'
-                         '确认为 64 位 hex 时用 hex64）')
+                    help='Lite HAP 走独立 sign-app，只输出本地签名凭据')
+    ap.add_argument('--identity-file', default='',
+                    help='身份配置文件（注入对端身份）')
+    ap.add_argument('--identity-var', default='',
+                    help='身份文件中的身份常量名')
+    ap.add_argument('--fingerprint-key', default='',
+                    choices=['', 'phone', 'watch'],
+                    help='phone=手机 APP ID；watch=GT4 Lite 公钥指纹')
+    ap.add_argument('--fingerprint-format', default='',
+                    choices=['', 'lite', 'appid', 'hex64'],
+                    help='默认按 key 推导：phone=appid, watch=lite')
+    ap.add_argument('--watch-bundle', default=WATCH_BUNDLE,
+                    help='WATCH_PEER 的 Lite bundleName（默认 %s）'
+                         % WATCH_BUNDLE)
+    ap.add_argument('--allow-replace', action='store_true',
+                    help='允许覆盖已经注入的同名身份（构建脚本核对后使用）')
     ap.add_argument('--manifest', default='',
                     help='手表 config.json（注入 supportLists）')
     ap.add_argument('--manifest-peer-bundle', default='',
@@ -142,28 +163,37 @@ def main():
     if not args.material_json and not args.fingerprint_value:
         fail('必须提供 --material-json 或 --fingerprint-value')
 
-    # 本地构建：签名证书/profile 已在 build_phone_hap.sh 中解析，
-    # 这里只复用同一套 hex64 校验与占位替换，不伪造材料。
+    wants_identity = bool(
+        args.identity_file or args.identity_var or args.fingerprint_key)
+    if wants_identity:
+        if not (args.identity_file and args.identity_var
+                and args.fingerprint_key):
+            fail('注入身份必须同时提供 --identity-file、--identity-var、'
+                 '--fingerprint-key')
+    if args.manifest and not wants_identity:
+        fail('--manifest 需要同时注入手机 APP ID')
+    if args.manifest and not args.manifest_peer_bundle:
+        fail('--manifest 需要同时提供 --manifest-peer-bundle')
+    if args.manifest_peer_bundle and args.manifest_peer_bundle != PHONE_BUNDLE:
+        fail('supportLists 对端包名必须是 %s，实际 %r'
+             % (PHONE_BUNDLE, args.manifest_peer_bundle))
+
     if args.fingerprint_value:
-        fingerprint = validate_fingerprint(
-            args.fingerprint_value,
-            args.fingerprint_format,
-            '指纹')
-        inject_identity(args.identity_file,
-                        args.identity_var,
-                        fingerprint)
+        if not wants_identity:
+            fail('--fingerprint-value 必须配合身份注入参数使用')
+        value = validate_identity(args.fingerprint_value,
+                                  args.fingerprint_format,
+                                  args.fingerprint_key,
+                                  args.watch_bundle)
+        inject_identity(args.identity_file, args.identity_var, value,
+                        args.allow_replace)
         if args.manifest:
-            if not args.manifest_peer_bundle:
-                fail('--manifest 需要同时提供 '
-                     '--manifest-peer-bundle')
-            inject_manifest(args.manifest,
-                            args.manifest_peer_bundle,
-                            fingerprint)
-        print('fingerprint %s injected (format=%s)%s'
+            inject_manifest(args.manifest, args.manifest_peer_bundle, value)
+        print('identity %s injected (format=%s)%s'
               % (args.fingerprint_key,
-                 args.fingerprint_format,
-                 '; supportLists updated'
-                 if args.manifest else ''))
+                 args.fingerprint_format or
+                 ('lite' if args.fingerprint_key == 'watch' else 'appid'),
+                 '; supportLists updated' if args.manifest else ''))
         return
 
     if not args.signing_dir:
@@ -173,9 +203,8 @@ def main():
     except ValueError as exc:
         fail('SIGNING_MATERIAL 不是合法 JSON: %s' % exc)
 
-    for field in ('storeFileB64', 'certpathB64',
-                  'profileB64', 'keyAlias',
-                  'keyPassword', 'storePassword'):
+    for field in ('storeFileB64', 'certpathB64', 'profileB64',
+                  'keyAlias', 'keyPassword', 'storePassword'):
         if not material.get(field):
             fail('签名材料缺少字段: %s' % field)
 
@@ -188,8 +217,7 @@ def main():
     paths = {}
     for field, name in files.items():
         try:
-            raw = base64.b64decode(material[field],
-                                   validate=True)
+            raw = base64.b64decode(material[field], validate=True)
         except Exception:
             fail('字段 %s 不是合法 base64' % field)
         if not raw:
@@ -199,9 +227,6 @@ def main():
             handle.write(raw)
         paths[field] = target
 
-    # legacy Lite 的 SignHap 会查找不存在的 material 目录。
-    # 外部签名模式只落盘凭据，让 build_watch_lite.sh 走
-    # unsigned -> sign-app -> verify-app；手机 Stage 路径保持不变。
     if args.external_signing:
         env_path = os.path.join(args.signing_dir, 'credentials.env')
         with open(env_path, 'w', encoding='utf-8') as handle:
@@ -215,9 +240,7 @@ def main():
     else:
         if not args.build_profile:
             fail('非 external-signing 模式必须指定 --build-profile')
-        # 真实 signingConfigs：替换空数组。
-        sign_alg = material.get('signAlg',
-                                'SHA256withECDSA')
+        sign_alg = material.get('signAlg', 'SHA256withECDSA')
         block = {
             'name': 'default',
             'type': 'HarmonyOS',
@@ -231,48 +254,34 @@ def main():
                 'keyPassword': material['keyPassword'],
             }
         }
-        with open(args.build_profile, 'r',
-                  encoding='utf-8') as handle:
+        with open(args.build_profile, 'r', encoding='utf-8') as handle:
             profile_text = handle.read()
         if '"signingConfigs": []' not in profile_text:
-            fail('build-profile.json5 中未找到 '
-                 '"signingConfigs": []')
+            fail('build-profile.json5 中未找到 "signingConfigs": []')
         profile_text = profile_text.replace(
             '"signingConfigs": []',
             '"signingConfigs": ' + json.dumps([block]))
-        with open(args.build_profile, 'w',
-                  encoding='utf-8') as handle:
+        with open(args.build_profile, 'w', encoding='utf-8') as handle:
             handle.write(profile_text)
 
-    # 对端证书指纹注入身份配置。
-    fingerprints = material.get('fingerprints') or {}
-    fingerprint = validate_fingerprint(
-        fingerprints.get(args.fingerprint_key),
-        args.fingerprint_format,
-        'fingerprints.%s' % args.fingerprint_key)
-    inject_identity(args.identity_file,
-                    args.identity_var,
-                    fingerprint)
+    if wants_identity:
+        fingerprints = material.get('fingerprints') or {}
+        value = validate_identity(
+            fingerprints.get(args.fingerprint_key),
+            args.fingerprint_format,
+            args.fingerprint_key,
+            args.watch_bundle)
+        inject_identity(args.identity_file, args.identity_var, value,
+                        args.allow_replace)
+        if args.manifest:
+            inject_manifest(args.manifest, args.manifest_peer_bundle, value)
+    else:
+        value = None
 
-    # 手表 Manifest：supportLists 必须与真实
-    # 手机证书指纹一致，否则手表不会授权
-    # 接收（第二轮 P0-1）。
-    if args.manifest:
-        if not args.manifest_peer_bundle:
-            fail('--manifest 需要同时提供 '
-                 '--manifest-peer-bundle')
-        inject_manifest(args.manifest,
-                        args.manifest_peer_bundle,
-                        fingerprint)
-
-    print('signing material staged at %s '
-          '(content hidden); fingerprint %s injected '
-          '(format=%s)%s'
+    print('signing material staged at %s (content hidden)%s'
           % (args.signing_dir,
-             args.fingerprint_key,
-             args.fingerprint_format,
-             '; supportLists updated'
-             if args.manifest else ''))
+             ('; identity %s injected' % args.fingerprint_key)
+             if value else '; identity injection skipped'))
 
 
 if __name__ == '__main__':

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Run: node tests/watch_fingerprint.test.mjs
-// issue #12：本地构建必须从真实签名材料解析 GT 4 证书 SHA-256，
-// 不能取 HAP 文件哈希、公钥哈希、profile 文件哈希或随机值。
-// 这里用临时生成的自签名证书/PKCS#7 profile 覆盖 PEM、DER、
-// 证书链歧义、profile 包名校验和显式指纹交叉校验。
+// Issue #13: derive the GT 4 Lite identity from the real signing cert:
+//   <watch bundle>_<standard Base64(raw uncompressed EC public point)>.
+// The certificate SHA-256 is only a diagnostic (--format sha256), never the
+// Wear Engine Lite fingerprint. Also covers phone APP ID extraction from the
+// phone profile (bundle-info.app-identifier).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -15,16 +16,29 @@ import { join } from 'node:path';
 
 const REPO = process.cwd();
 const SCRIPT = join(REPO, 'tools/extract_watch_fingerprint.py');
+const APPID_SCRIPT = join(REPO, 'tools/extract_phone_app_id.py');
+const WATCH_BUNDLE = 'con.xiwei.suyue.gt4';
+const PHONE_BUNDLE = 'com.xiwei.suyue';
+const APP_ID = '6917618613178762508';
+const OFFICIAL_LITE = 'com.watch.wearengine_' +
+  'BC1bSGDxiTcUEkNGNztsD6sLBFgFWQm9lPl05ktD1R8Bx8SvYQNhjlIMJJGRk' +
+  'f8yVYNxMnwNCbxToR5xerVCp+o=';
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-watch-fp-'));
 
-function run(args) {
-  return spawnSync('python3', [SCRIPT, ...args], {
-    encoding: 'utf8'
-  });
+function runScript(script, args) {
+  return spawnSync('python3', [script, ...args], { encoding: 'utf8' });
 }
 
-function openssl(args) {
-  const result = spawnSync('openssl', args, { encoding: 'utf8' });
+function run(args) {
+  return runScript(SCRIPT, args);
+}
+
+function runAppId(args) {
+  return runScript(APPID_SCRIPT, args);
+}
+
+function openssl(args, input) {
+  const result = spawnSync('openssl', args, { encoding: 'utf8', input });
   assert.equal(result.status, 0,
     'openssl ' + args.join(' ') + ': ' + result.stderr);
   return result;
@@ -35,6 +49,19 @@ function expectedSha(pemPath) {
     ['x509', '-in', pemPath, '-outform', 'DER']);
   assert.equal(der.status, 0, String(der.stderr));
   return createHash('sha256').update(der.stdout).digest('hex');
+}
+
+// Independently extract the last 65 bytes of the P-256 SPKI. This test leaf
+// is always P-256; the SPKI suffix is exactly the raw uncompressed point.
+function expectedLite(pemPath, bundle) {
+  const pub = openssl(['x509', '-in', pemPath, '-pubkey', '-noout']).stdout;
+  const der = spawnSync('openssl',
+    ['pkey', '-pubin', '-outform', 'DER'], { input: pub });
+  assert.equal(der.status, 0, String(der.stderr));
+  const point = der.stdout.subarray(der.stdout.length - 65);
+  assert.equal(point.length, 65);
+  assert.equal(point[0], 0x04);
+  return bundle + '_' + point.toString('base64');
 }
 
 try {
@@ -50,6 +77,8 @@ try {
   const rootKey = join(tmp, 'root.key');
   const profileJson = join(tmp, 'profile.json');
   const profileP7b = join(tmp, 'profile.p7b');
+  const phoneProfileJson = join(tmp, 'phone-profile.json');
+  const phoneProfileP7b = join(tmp, 'phone-profile.p7b');
   const chainPem = join(tmp, 'chain.pem');
 
   openssl(['req', '-x509', '-newkey', 'ec',
@@ -57,8 +86,10 @@ try {
     '-keyout', leafKey, '-out', leafPem, '-days', '2',
     '-subj', '/CN=suyue-test-leaf',
     '-addext', 'basicConstraints=critical,CA:FALSE']);
+  // The issuer is P-384 so the chain exercises mixed key sizes; the
+  // selected end-entity leaf must still be the P-256 cert.
   openssl(['req', '-x509', '-newkey', 'ec',
-    '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes',
+    '-pkeyopt', 'ec_paramgen_curve:P-384', '-nodes',
     '-keyout', rootKey, '-out', rootPem, '-days', '2',
     '-subj', '/CN=suyue-test-root',
     '-addext', 'basicConstraints=critical,CA:FALSE']);
@@ -70,32 +101,43 @@ try {
     Buffer.concat([readFileSync(leafDer), readFileSync(rootDer)]));
 
   const leafSha = expectedSha(leafPem);
+  const leafLite = expectedLite(leafPem, WATCH_BUNDLE);
   assert.match(leafSha, /^[0-9a-f]{64}$/);
 
-  // 1) PEM / DER 单证书
+  // 1) Default is the Lite pubkey identity, from PEM or DER.
   for (const cert of [leafPem, leafDer]) {
     const result = run(['--cert', cert]);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout.trim(), leafSha,
-      'certificate DER-SHA256 must be the fingerprint');
+    assert.equal(result.stdout.trim(), leafLite,
+      'Lite fingerprint must be bundle_Base64(raw EC point)');
     assert.match(result.stderr, /WATCH_FINGERPRINT_SOURCE=cert/);
+    assert.match(result.stderr, /format=lite/);
   }
 
-  // 2) 两张终端证书的链无法判定 → 失败，不能静默取第一张。
-  //    PEM 和“多个 DER 对象直接拼接”的链都必须识别，不能只读第一张。
+  // 2) SHA-256 remains available only as an explicit diagnostic mode.
+  for (const cert of [leafPem, leafDer]) {
+    const result = run(['--cert', cert, '--format', 'sha256']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), leafSha);
+    assert.match(result.stderr, /format=sha256/);
+  }
+
+  // 3) Two end-entity certs cannot be disambiguated -> fail in either mode.
   for (const chain of [chainPem, chainDer]) {
-    const ambiguous = run(['--cert', chain]);
-    assert.notEqual(ambiguous.status, 0,
-      'ambiguous chain must fail: ' + chain);
-    assert.match(ambiguous.stderr, /候选终端证书/);
+    for (const format of ['lite', 'sha256']) {
+      const ambiguous = run(['--cert', chain, '--format', format]);
+      assert.notEqual(ambiguous.status, 0,
+        'ambiguous chain must fail: ' + chain);
+      assert.match(ambiguous.stderr, /候选终端证书/);
+    }
   }
 
-  // 3) 生成一个真实的 PKCS#7 profile（内嵌 development-certificate）
+  // 4) Real PKCS#7 profiles embedding development-certificate/app-identifier.
   const profile = {
     'version-name': 'test',
     'type': 'debug',
     'bundle-info': {
-      'bundle-name': 'con.xiwei.suyue.gt4',
+      'bundle-name': WATCH_BUNDLE,
       'development-certificate': readFileSync(leafPem, 'utf8')
     }
   };
@@ -111,45 +153,107 @@ try {
   ]) {
     const result = run(args);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout.trim(), leafSha);
+    assert.equal(result.stdout.trim(), leafLite);
   }
+  const profileSha = run(['--profile', profileP7b,
+    '--cert', chainPem, '--format', 'sha256']);
+  assert.equal(profileSha.status, 0, profileSha.stderr);
+  assert.equal(profileSha.stdout.trim(), leafSha);
 
-  // 4) profile 包名必须是手表包名，不能拿手机 profile 冒充
+  // 5) The watch profile must carry the watch bundle, not the phone bundle.
   const wrongBundle = run(['--profile', profileP7b,
-    '--bundle', 'com.xiwei.suyue']);
+    '--bundle', PHONE_BUNDLE]);
   assert.notEqual(wrongBundle.status, 0);
   assert.match(wrongBundle.stderr, /bundle-name/);
 
-  // 5) 显式指纹可带大写/冒号，但必须与材料一致
-  const colon = leafSha.toUpperCase().match(/../g).join(':');
-  const explicit = run(['--fingerprint', colon,
+  // 6) An explicit Lite value must match the material exactly.
+  const explicit = run(['--fingerprint', leafLite,
     '--profile', profileP7b, '--cert', leafPem]);
   assert.equal(explicit.status, 0, explicit.stderr);
-  assert.equal(explicit.stdout.trim(), leafSha);
+  assert.equal(explicit.stdout.trim(), leafLite);
 
-  const mismatch = run(['--fingerprint', 'ab'.repeat(32),
-    '--profile', profileP7b]);
+  const mismatch = run(['--fingerprint', WATCH_BUNDLE + '_' +
+    Buffer.alloc(65, 4).toString('base64'), '--profile', profileP7b]);
   assert.notEqual(mismatch.status, 0);
   assert.match(mismatch.stderr, /不一致/);
 
-  // 6) 没有材料/没有显式值 → 失败
+  // 7) No material/explicit value -> fail.
   const missing = run([]);
   assert.notEqual(missing.status, 0);
   assert.match(missing.stderr, /没有可用的手表签名材料/);
 
-  // 7) 本机真实材料存在时，profile 和证书链必须给出同一个值
+  // 8) Official Huawei Lite example is accepted as an explicit identity.
+  const official = run(['--bundle', 'com.watch.wearengine',
+    '--fingerprint', OFFICIAL_LITE]);
+  assert.equal(official.status, 0, official.stderr);
+  assert.equal(official.stdout.trim(), OFFICIAL_LITE);
+
+  // 9) Phone APP ID comes from the phone profile's app-identifier.
+  const phoneProfile = {
+    'version-name': 'test',
+    'type': 'debug',
+    'bundle-info': {
+      'bundle-name': PHONE_BUNDLE,
+      'app-identifier': APP_ID,
+      'development-certificate': readFileSync(leafPem, 'utf8')
+    }
+  };
+  writeFileSync(phoneProfileJson, JSON.stringify(phoneProfile));
+  openssl(['smime', '-sign', '-in', phoneProfileJson,
+    '-signer', leafPem, '-inkey', leafKey,
+    '-outform', 'DER', '-nodetach', '-out', phoneProfileP7b]);
+
+  const appId = runAppId(['--profile', phoneProfileP7b]);
+  assert.equal(appId.status, 0, appId.stderr);
+  assert.equal(appId.stdout.trim(), APP_ID);
+  assert.match(appId.stderr, /PHONE_APP_ID_SOURCE=profile/);
+
+  const appIdMaterial = runAppId(['--material-json', JSON.stringify({
+    profileB64: readFileSync(phoneProfileP7b).toString('base64')
+  })]);
+  assert.equal(appIdMaterial.status, 0, appIdMaterial.stderr);
+  assert.equal(appIdMaterial.stdout.trim(), APP_ID);
+  assert.match(appIdMaterial.stderr, /PHONE_APP_ID_SOURCE=material/);
+
+  const appIdWrongBundle = runAppId(
+    ['--profile', phoneProfileP7b, '--bundle', WATCH_BUNDLE]);
+  assert.notEqual(appIdWrongBundle.status, 0);
+  assert.match(appIdWrongBundle.stderr, /bundle-name/);
+
+  const appIdMismatch = runAppId(
+    ['--profile', phoneProfileP7b, '--app-id', '1234567890']);
+  assert.notEqual(appIdMismatch.status, 0);
+  assert.match(appIdMismatch.stderr, /不一致/);
+
+  // 10) Local real signing material must agree and produce the known values.
   const realProfile = join(REPO, 'signing/watch/debug.p7b');
   const realCert = join(REPO, 'signing/shared/debug.cer');
   if (existsSync(realProfile) && existsSync(realCert)) {
     const real = run(['--profile', realProfile, '--cert', realCert]);
     assert.equal(real.status, 0, real.stderr);
     assert.equal(real.stdout.trim(),
+      'con.xiwei.suyue.gt4_BEWzvDkxDn4ueCkVNgwzqmrFXjhblq+CrbN+' +
+      'HUw4tLR5tMCz5ovAToeq9JX2WFzIO7SoU4YKrDY85m5QgsLEWok=',
+      'local GT 4 profile must yield the leaf Lite identity');
+    const realSha = run(['--profile', realProfile,
+      '--cert', realCert, '--format', 'sha256']);
+    assert.equal(realSha.status, 0, realSha.stderr);
+    assert.equal(realSha.stdout.trim(),
       'fbdee2e124a2232509b1c614d452bded210d61fbd7fac62791199ac37a2701c1',
-      'local GT 4 profile and certificate chain must agree');
+      'local certificate SHA-256 is diagnostic only');
   }
 
-  console.info('PASS: watch fingerprint extraction ' +
-    '(PEM/DER, chain ambiguity, p7b profile, bundle guard, explicit cross-check)');
+  const realPhone = join(REPO, 'signing/phone/debug.p7b');
+  if (existsSync(realPhone)) {
+    const realAppId = runAppId(['--profile', realPhone]);
+    assert.equal(realAppId.status, 0, realAppId.stderr);
+    assert.equal(realAppId.stdout.trim(), APP_ID,
+      'local phone profile app-identifier is the phone APP ID');
+  }
+
+  console.info('PASS: watch Lite fingerprint + phone APP ID extraction ' +
+    '(PEM/DER, P-384 chain, p7b, bundle guard, explicit cross-check, ' +
+    'official example)');
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

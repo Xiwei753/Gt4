@@ -22,14 +22,18 @@ name: Watch Lite HAP build (self-hosted DevEco required)
 #   storeFileB64/certpathB64/profileB64: base64 编码的签名文件
 #   keyAlias/keyPassword/storePassword: 口令
 #   signAlg: 默认 SHA256withECDSA（Lite sign-app 固定此算法）
-#   fingerprints: {"phone": <手机证书指纹>, "watch": <手表证书指纹>}
-#   —— 手机指纹同时注入：
-#      (a) 手表 JS PhonePeerConfig.g.js（消息来源门控）；
-#      (b) 手表 Manifest config.json 的 supportLists（系统级授权接收）。
-#      两处必须一致，构建后从 HAP 内清单再验证一次。
+#   fingerprints: {"phone": <手机APP ID>, ...}
+#   —— 手表是 Lite Wearable，华为 FAQ（2026-09-20）规定它登记
+#      HarmonyOS 5.0+ 手机原生应用时必须使用手机 **APP ID**
+#      （bundle-info.app-identifier），不是证书 SHA-256、不是 OAuth
+#      Client ID、也不是 GT4 的 Lite 公钥指纹。
+#      手机 APP ID 同时注入：
+#        (a) 手表 JS PhonePeerConfig.g.js（setFingerprint 门控）；
+#        (b) 手表 Manifest config.json 的 supportLists（系统级授权接收）。
+#      两处必须一致；构建后从最终 HAP 内层 BIN 再核对一次。
 #
-# 指纹格式：以 GT4 Lite SDK 实测为准（P1-9）。
-# 确认为 64 位 hex 时设置 repo variable WATCH_FINGERPRINT_FORMAT=hex64。
+# 手机 APP ID 优先从 secrets.PHONE_SIGNING_MATERIAL 的 profile 解析；
+# 不要使用 WATCH_SIGNING_MATERIAL.fingerprints.phone 的 SHA-256。
 on:
   push:
     branches: [main, 'auto-issue-*']
@@ -37,6 +41,8 @@ on:
       - 'apps/watch/**'
       - 'tools/build_watch_lite.sh'
       - 'tools/inject_signing.py'
+      - 'tools/extract_phone_app_id.py'
+      - 'tools/peer_identity_formats.py'
       - 'tests/build_artifact_check.sh'
       - '.github/workflows/watch_lite_hap.yml'
   workflow_dispatch:
@@ -57,31 +63,41 @@ jobs:
             exit 1
           fi
 
-      - name: Stage signing material and Lite identity
-# 材料写入 $RUNNER_TEMP（跨 step 持久），
+      - name: Stage watch signing material
+        # 材料写入 $RUNNER_TEMP（跨 step 持久），
         # 不把 signingConfigs 注入 legacy Lite 构建（会触发 SignHap 错误）。
         # 不在本 step 末尾删除（旧实现的 trap
         # 会在本 step 结束时删掉材料，导致
         # 构建 step 读不到——施工单 P1-7）。
-        # Manifest supportLists 同步注入（P0-1）。
+        # 身份注入由 build_watch_lite.sh 在构建前统一完成并还原。
         env:
           WATCH_SIGNING_MATERIAL: ${{ secrets.WATCH_SIGNING_MATERIAL }}
         run: |
           python3 tools/inject_signing.py \
             --material-json "$WATCH_SIGNING_MATERIAL" \
             --signing-dir "$RUNNER_TEMP/suyue-signing" \
-            --external-signing \
-            --identity-file apps/watch/entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js \
-            --identity-var INJECTED_PHONE_FINGERPRINT \
-            --fingerprint-key phone \
-            --fingerprint-format "${{ vars.WATCH_FINGERPRINT_FORMAT || 'raw' }}" \
-            --manifest apps/watch/entry/src/main/config.json \
-            --manifest-peer-bundle com.xiwei.suyue
+            --external-signing
+
+      - name: Export phone APP ID from real phone profile
+        id: phone-app-id
+        env:
+          PHONE_SIGNING_MATERIAL: ${{ secrets.PHONE_SIGNING_MATERIAL }}
+        run: |
+          if [ -z "$PHONE_SIGNING_MATERIAL" ]; then
+            echo "ERROR: 缺少 secrets.PHONE_SIGNING_MATERIAL，无法取得手机 APP ID。" >&2
+            echo "不能用手表材料里的 SHA-256 代替。" >&2
+            exit 1
+          fi
+          APP_ID="$(python3 tools/extract_phone_app_id.py \
+            --material-json "$PHONE_SIGNING_MATERIAL" \
+            --bundle com.xiwei.suyue)"
+          echo "app_id=$APP_ID" >> "$GITHUB_OUTPUT"
 
       - name: Build and sign Lite Wearable HAP
         env:
           WATCH_SIGNING_DIR: ${{ runner.temp }}/suyue-signing
           HAP_SIGN_TOOL_JAR: ${{ vars.HAP_SIGN_TOOL_JAR }}
+          SUYUE_PHONE_APP_ID: ${{ steps.phone-app-id.outputs.app_id }}
         # GT 4 真机调试采用 Debug profile，先构建与其匹配的 Debug HAP。
         # Release 构建 + Debug profile 在旧版 DevEco Assistant 上尚未经实机验证。
         run: tools/build_watch_lite.sh debug
@@ -99,22 +115,18 @@ jobs:
           echo "size=$(stat -c%s "$HAP")" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$HAP" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
-      - name: Verify Lite single-bin layout and injected source identity
-        # 不能把「JS 里有指纹」当「手表已授权接收」：
-        # 单 .bin 调试 HAP 顶层没有 config.json：只核对注入后的源码清单，
-        # 不谎称已经从 .bin 中解出指纹；签名工具另行验证签名。
-        # 如果产物是普通 HAP，校验脚本仍核对包内清单。
-        env:
-          WATCH_SIGNING_MATERIAL: ${{ secrets.WATCH_SIGNING_MATERIAL }}
+      - name: Verify final Lite BIN contains phone APP ID
+        # 构建脚本退出时已还原源码 config.json，所以这里不能再看源码；
+        # 直接核对最终 HAP 内层 BIN 的 supportLists。不能把「JS 里有
+        # APP ID」当「手表已授权接收」，也不能用 SHA-256 冒充。
         run: |
-          PHONE_FP="$(printf '%s' "$WATCH_SIGNING_MATERIAL" | python3 -c \
-            'import json,sys; print(json.load(sys.stdin)["fingerprints"]["phone"])')"
-          tests/build_artifact_check.sh "${{ steps.hap.outputs.path }}" \
-            --bundle con.xiwei.suyue.gt4 \
-            --device liteWearable \
-            --source-manifest apps/watch/entry/src/main/config.json \
-            --mode debug \
-            --expect-fingerprint "$PHONE_FP"
+          APP_ID="${{ steps.phone-app-id.outputs.app_id }}"
+          if ! unzip -p "${{ steps.hap.outputs.path }}" '*.bin' 2>/dev/null \
+              | strings | grep -F "com.xiwei.suyue:$APP_ID" >/dev/null; then
+            echo "ERROR: 最终 HAP 内层 BIN 未包含 supportLists=com.xiwei.suyue:$APP_ID" >&2
+            exit 1
+          fi
+          echo "WATCH_PHONE_APP_ID_IN_BIN=yes"
 
       # 已删除旧步骤「Verify actual delivered BIN signature with hap-sign-tool」：
       # 本机工具对 0xBE 的 GT Lite 单 bin 必走 ELF 校验路径而失败——在那里裸调
@@ -137,8 +149,8 @@ jobs:
           if-no-files-found: error
 
       - name: Remove signing material and restore configs
-        # 无论构建成败都执行：签名材料与注入的
-        # Manifest 指纹不得残留在工作区（P1-7/P0-1）。
+        # 无论构建成败都执行：签名材料与注入的手机 APP ID
+        # 不得残留在工作区（P1-7/P0-1）。
         if: always()
         run: |
           rm -rf "$RUNNER_TEMP/suyue-signing"

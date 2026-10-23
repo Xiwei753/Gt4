@@ -398,6 +398,18 @@ assert.ok(peerIdentity.includes('PHONE_SELF'),
   'PeerIdentity must define PHONE_SELF');
 assert.ok(peerIdentity.includes('WATCH_PEER'),
   'PeerIdentity must define WATCH_PEER');
+const peerPolicy = read(
+  'apps/phone/entry/src/main/ets/model/PeerIdentityPolicy.js');
+assert.ok(peerPolicy.includes('validateWatchLiteFingerprint') &&
+  peerPolicy.includes('validatePhoneAppId'),
+  'issue #13 must validate both identity directions separately');
+assert.ok(peerPolicy.includes('EC_POINT_LENGTHS') &&
+  peerPolicy.includes('SHA-256'),
+  'Lite validation must inspect the raw EC point, not a cert digest');
+assert.ok(peerIdentity.includes('fingerprintKind') &&
+  peerIdentity.includes('WATCH_LITE_KIND') &&
+  peerIdentity.includes('PHONE_APP_ID_KIND'),
+  'phone/watch identities must keep distinct fingerprint kinds');
 // issue #2：手机与手表是华为侧**两个独立应用**：
 //   手机 com.xiwei.suyue      （AGC 证书里写定的名字）
 //   手表 con.xiwei.suyue.gt4  （注意是 con 不是 com —— AGC 里当初打错，
@@ -424,8 +436,8 @@ const watchBuildScript = read('tools/build_watch_lite.sh');
 assert.ok(watchBuildScript.includes("--bundle '" + WATCH_BUNDLE + "'"),
   'watch build script must verify the configured GT4 bundle');
 const watchWorkflow = read('.github/workflows/watch_lite_hap.yml');
-assert.ok(watchWorkflow.includes('--bundle ' + WATCH_BUNDLE),
-  'watch workflow must verify the configured GT4 bundle');
+assert.ok(watchBuildScript.includes("--bundle '" + WATCH_BUNDLE + "'"),
+  'watch build script must verify the configured GT4 bundle');
 assert.ok(!phoneIndexFull.includes('phoneFingerprint'),
   'phone index must not carry a loose phoneFingerprint');
 assert.ok(phoneIndexFull.includes('WATCH_PEER'),
@@ -474,6 +486,12 @@ assert.ok(watchReceiver.includes('isFileType'),
   'watch receiver must handle the file channel branch');
 assert.ok(watchReceiver.includes('receiveFile('),
   'watch receiver must route files to the receiver');
+assert.ok(watchReceiver.includes('Wear message received type='),
+  'watch must log whether HELLO/BOOK_META actually reached the receiver');
+const wearDeviceService = read(
+  'apps/phone/entry/src/main/ets/services/WearDeviceService.ts');
+assert.ok(wearDeviceService.includes('receiver registered: bundle='),
+  'phone must log successful message receiver registration');
 const incomingReceiver = read(
   'apps/watch/entry/src/main/js/MainAbility/wear/IncomingBookReceiver.js');
 assert.ok(incomingReceiver.includes('copyFile('),
@@ -550,7 +568,7 @@ for (const script of [watchBuild, phoneBuild]) {
     'build must pick the HAP matching the requested mode');
 }
 
-// issue #12：手机本地构建必须从真实手表签名材料解析证书指纹，
+// issue #13：手机本地构建必须从真实手表签名材料解析 Lite 公钥身份，
 // 在 assembleHap 前注入，并在最终 installable HAP 的 ABC 里复核。
 const watchFingerprintTool = read(
   'tools/extract_watch_fingerprint.py');
@@ -562,34 +580,39 @@ assert.ok(watchFingerprintTool.includes('CA:FALSE'),
   'watch fingerprint extractor must identify an end-entity cert');
 assert.ok(watchFingerprintTool.includes('不能静默取第一张'),
   'ambiguous chains must fail instead of picking the first cert');
+assert.ok(watchFingerprintTool.includes('format') &&
+  watchFingerprintTool.includes('lite'),
+  'watch extractor must support the Lite pubkey format');
 assert.ok(phoneBuild.includes('extract_watch_fingerprint.py'),
-  'phone build must resolve the watch fingerprint from signing material');
-assert.ok(phoneBuild.includes('SUYUE_WATCH_FINGERPRINT'),
-  'phone build must allow an explicitly verified fingerprint');
-assert.ok(phoneBuild.includes('INJECTED_WATCH_FINGERPRINT'),
-  'phone build must inject the watch peer fingerprint');
+  'phone build must resolve the watch Lite identity from signing material');
+assert.ok(phoneBuild.includes('SUYUE_WATCH_LITE_FINGERPRINT') &&
+  phoneBuild.includes('SUYUE_WATCH_FINGERPRINT'),
+  'phone build must accept the verified Lite identity (legacy env alias ok)');
+assert.ok(phoneBuild.includes('INJECTED_WATCH_LITE_FINGERPRINT'),
+  'phone build must inject the watch Lite peer identity');
 assert.ok(phoneBuild.includes('IDENTITY_BACKUP') &&
   phoneBuild.includes('restore_sources'),
   'phone build must restore PeerIdentityConfig.g.ts via trap');
 assert.ok(phoneBuild.includes('--expect-compiled-string'),
-  'phone build must verify the fingerprint in the final HAP');
+  'phone build must verify the Lite identity in the final HAP');
 assert.ok(artifactCheck.includes('--expect-compiled-string') &&
   artifactCheck.includes('ets/modules.abc'),
   'artifact check must inspect compiled ArkTS bytecode, not just source');
 assert.ok(read('tools/inject_signing.py').includes(
   '--fingerprint-value'),
   'local and CI must share one fingerprint injection/validation path');
-assert.ok(phoneWf.includes('--fingerprint-format hex64'),
-  'phone CI must enforce the 64-hex certificate fingerprint format');
-assert.ok(phoneWf.includes('fingerprints.watch') &&
-  phoneWf.includes('SUYUE_WATCH_FINGERPRINT'),
-  'phone CI must pass the verified watch fingerprint to the build cross-check');
-assert.ok(phoneShelf.includes('手表签名指纹未配置') &&
+assert.ok(phoneWf.includes('validate_watch_lite') &&
+  phoneWf.includes('fingerprints.watch') &&
+  phoneWf.includes('SUYUE_WATCH_LITE_FINGERPRINT'),
+  'phone CI must validate and pass the full watch Lite identity');
+assert.ok(!phoneWf.includes('--fingerprint-format hex64'),
+  'phone CI must not force the obsolete 64-hex certificate digest');
+assert.ok(phoneShelf.includes('手表 Lite 公钥指纹未配置') &&
   phoneShelf.includes('isConfigured(WATCH_PEER)'),
   'source code must keep the fail-closed send gate');
 assert.ok(read('apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts')
-  .includes("INJECTED_WATCH_FINGERPRINT = ''"),
-  'repo must keep the empty watch fingerprint placeholder');
+  .includes("INJECTED_WATCH_LITE_FINGERPRINT = ''"),
+  'repo must keep the empty watch Lite identity placeholder');
 
 // P1-9：transferFile 句柄只在终态关闭。
 assert.ok(transferService.includes('let settled = false'),
@@ -760,26 +783,28 @@ function transferLogicSrc() {
 // ---- 第二轮复核（第三轮修复）静态检查 ----
 
 // P0-1：Manifest supportLists 必须由构建期注入，
-// 仓库里保持占位符；workflow 必须传 --manifest，
+// 仓库里保持占位符；构建脚本必须传 --manifest，
 // 且清理步骤还原 config.json。
 const watchConfigSrc = read(
   'apps/watch/entry/src/main/config.json');
 assert.ok(watchConfigSrc.includes(
-  'com.xiwei.suyue:CONFIGURE_WITH_SIGNED_PHONE_FINGERPRINT'),
+  'com.xiwei.suyue:CONFIGURE_WITH_PHONE_APP_ID'),
   'repo keeps the supportLists placeholder for build-time injection');
-assert.ok(watchWf.includes('--manifest '),
-  'watch workflow must inject the manifest fingerprint');
-assert.ok(watchWf.includes('--manifest-peer-bundle'),
-  'watch workflow must name the peer bundle');
-assert.ok(watchWf.includes('apps/watch/entry/src/main/config.json'),
-  'watch workflow must point at the watch manifest');
+assert.ok(watchBuildScript.includes('--manifest '),
+  'watch build must inject the phone APP ID into supportLists');
+assert.ok(watchBuildScript.includes('--manifest-peer-bundle'),
+  'watch build must name the phone peer bundle');
+assert.ok(watchBuildScript.includes('apps/watch/entry/src/main/config.json') ||
+  watchBuildScript.includes('WATCH_CONFIG_FILE'),
+  'watch build must point at the watch manifest');
 assert.ok(watchWf.includes('git checkout --') &&
   watchWf.includes('config.json'),
   'cleanup must restore the injected manifest');
-assert.ok(watchWf.includes('--expect-fingerprint'),
-  'built HAP manifest must be re-verified');
+assert.ok(watchBuildScript.includes('--expect-fingerprint') &&
+  watchWf.includes('WATCH_PHONE_APP_ID_IN_BIN'),
+  'built HAP must be re-verified inside the final BIN');
 assert.ok(read('tools/inject_signing.py').includes(
-  'CONFIGURE_WITH_SIGNED_PHONE_FINGERPRINT'),
+  'CONFIGURE_WITH_PHONE_APP_ID'),
   'injector must guard the supportLists placeholder');
 
 // P0-2：文件通道必须按字段探测并记录来源，且

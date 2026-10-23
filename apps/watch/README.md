@@ -29,8 +29,8 @@
   返回原位置；字号、行距、日夜模式和返回书架都在设置页。
   正文左侧点按回上一页，右侧点按翻下一页；表冠仍尝试翻页
   （目标真机事件待验证）。未知 bookId 不崩溃。
-- `wear/WearReceiver.js`：Wear Engine 适配层，版本检查 + 手机指纹门控，消息路由到 `IncomingBookReceiver`。
-- `wear/PeerConfig.js` 和 `config.json` 的 `supportLists` 里有待填写的手机端证书指纹位置。**两处值必须按真实应用签名配置一致**，不能把占位文本当作生产值。
+- `wear/WearReceiver.js`：Wear Engine 适配层，版本检查 + 手机 APP ID 门控，消息路由到 `IncomingBookReceiver`。
+- `wear/PeerConfig.js` 和 `config.json` 的 `supportLists` 使用**手机 APP ID**（`bundle-info.app-identifier`，不是 OAuth Client ID 或证书 SHA-256）：`com.xiwei.suyue:<APP ID>`。构建脚本从真实手机 profile 注入两处并在结束后恢复；不能把占位文本当作生产值。
 
 ## Lite 运行时限制（本机实测，issue #2）
 

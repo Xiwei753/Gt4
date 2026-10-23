@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Run: node tests/inject_signing.test.mjs
-// 构建期注入回归（第二轮 P0-1 / P1-9）：
-//   - 手表 Manifest 的 supportLists 占位符必须被
-//     真实手机指纹替换（只改 JS 不算授权）；
-//   - 占位符缺失/格式不符时明确失败，不猜测；
-//   - 指纹格式可配置：默认宽松（结构校验），
-//     hex64 收紧；不无依据排斥合法格式；
-//   - build-profile 的 signingConfigs 注入真实材料；
-//   - 身份文件指纹注入。
+// Issue #13 identity injection contracts:
+//   - WATCH_PEER = <watch bundle>_<Base64(raw EC point)> for phone -> watch;
+//   - PHONE_SELF/supportLists = phone APP ID for watch -> phone;
+//   - invalid/ambiguous values fail closed and name the identity/format;
+//   - signing material staging and signingConfigs remain intact.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdtempSync,
@@ -17,23 +14,35 @@ import { join } from 'node:path';
 
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-sign-'));
 const REPO = process.cwd();
+const APP_ID = '6917618613178762508';
+const WATCH_LITE = 'con.xiwei.suyue.gt4_' +
+  'BEWzvDkxDn4ueCkVNgwzqmrFXjhblq+CrbN+HUw4tLR5tMCz5ovAToeq9JX2' +
+  'WFzIO7SoU4YKrDY85m5QgsLEWok=';
+const OFFICIAL_LITE = 'com.watch.wearengine_' +
+  'BC1bSGDxiTcUEkNGNztsD6sLBFgFWQm9lPl05ktD1R8Bx8SvYQNhjlIMJJGRk' +
+  'f8yVYNxMnwNCbxToR5xerVCp+o=';
 
-const material = (fingerprint, extra = {}) => JSON.stringify({
+const material = (fingerprints, extra = {}) => JSON.stringify({
   storeFileB64: Buffer.from('key-bytes').toString('base64'),
   certpathB64: Buffer.from('cert-bytes').toString('base64'),
   profileB64: Buffer.from('profile-bytes').toString('base64'),
   keyAlias: 'alias', keyPassword: 'kp',
   storePassword: 'sp', signAlg: 'SHA256withECDSA',
-  fingerprints: { phone: fingerprint, watch: fingerprint },
+  fingerprints,
   ...extra
 });
 
-function stage(prefix, fingerprint, options = {}) {
-  const dir = join(tmp, prefix);
+function dirFor(name) {
+  const dir = join(tmp, name);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function stageWatch(name, value) {
+  const dir = dirFor(name);
   const buildProfile = join(dir, 'build-profile.json5');
   const identity = join(dir, 'PhonePeerConfig.g.js');
   const manifest = join(dir, 'config.json');
-  mkdirSync(dir, { recursive: true });
   copyFileSync(join(REPO, 'apps/watch/build-profile.json5'),
     buildProfile);
   copyFileSync(join(REPO,
@@ -41,45 +50,66 @@ function stage(prefix, fingerprint, options = {}) {
     identity);
   copyFileSync(join(REPO, 'apps/watch/entry/src/main/config.json'),
     manifest);
-  const args = [
-    join(REPO, 'tools/inject_signing.py'),
-    '--material-json', material(fingerprint, options.extra || {}),
-    '--signing-dir', join(dir, 'staged'),
-    '--build-profile', buildProfile,
-    '--identity-file', identity,
-    '--identity-var', 'INJECTED_PHONE_FINGERPRINT',
-    '--fingerprint-key', 'phone',
-    '--manifest', manifest,
-    '--manifest-peer-bundle', 'com.xiwei.suyue'
-  ];
-  if (options.format) {
-    args.push('--fingerprint-format', options.format);
-  }
-  if (options.external) args.push('--external-signing');
-  const run = spawnSync('python3', args,
-    { encoding: 'utf8' });
-  return { dir, buildProfile, identity, manifest, run };
+  return { dir, buildProfile, identity, manifest };
 }
 
-const { createRequire } = await import('node:module');
+function injectWatch(dir, value, format = 'appid') {
+  const args = [
+    join(REPO, 'tools/inject_signing.py'),
+    '--material-json', material({ phone: value, watch: WATCH_LITE }),
+    '--signing-dir', join(dir.dir, 'staged'),
+    '--build-profile', dir.buildProfile,
+    '--identity-file', dir.identity,
+    '--identity-var', 'INJECTED_PHONE_APP_ID',
+    '--fingerprint-key', 'phone',
+    '--fingerprint-format', format,
+    '--manifest', dir.manifest,
+    '--manifest-peer-bundle', 'com.xiwei.suyue'
+  ];
+  return spawnSync('python3', args, { encoding: 'utf8' });
+}
 
-// ---- 1. 正常注入：Manifest + JS + signingConfigs ----
+function stagePhone(name) {
+  const dir = dirFor(name);
+  const identity = join(dir, 'PeerIdentityConfig.g.ts');
+  copyFileSync(join(REPO,
+    'apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts'),
+    identity);
+  return { dir, identity };
+}
+
+function injectPhoneLite(dir, value, extraArgs = [], bundle = '') {
+  const args = [
+    join(REPO, 'tools/inject_signing.py'),
+    '--material-json', material({ watch: value }),
+    '--signing-dir', join(dir.dir, 'staged'),
+    '--external-signing',
+    '--identity-file', dir.identity,
+    '--identity-var', 'INJECTED_WATCH_LITE_FINGERPRINT',
+    '--fingerprint-key', 'watch',
+    '--fingerprint-format', 'lite',
+    ...extraArgs
+  ];
+  if (bundle) args.push('--watch-bundle', bundle);
+  return spawnSync('python3', args, { encoding: 'utf8' });
+}
+
+// ---- 1. Watch side: phone APP ID + supportLists + signingConfigs ----
 {
-  const hex = 'ab'.repeat(32);
-  const s = stage('ok', hex);
-  assert.equal(s.run.status, 0, s.run.stderr);
+  const s = stageWatch('watch-ok', APP_ID);
+  const run = injectWatch(s, APP_ID);
+  assert.equal(run.status, 0, run.stderr);
   const manifest = JSON.parse(readFileSync(s.manifest, 'utf8'));
   const entry = manifest.module.metaData.customizeData
     .find((e) => e.name === 'supportLists');
-  assert.equal(entry.value,
-    'com.xiwei.suyue:' + hex,
-    'supportLists must carry the real phone fingerprint');
+  assert.equal(entry.value, 'com.xiwei.suyue:' + APP_ID,
+    'supportLists must carry the phone APP ID, not a cert digest');
   assert.ok(!JSON.stringify(manifest).includes(
-    'CONFIGURE_WITH_SIGNED_PHONE_FINGERPRINT'),
-    'placeholder must be gone');
+    'CONFIGURE_WITH_PHONE_APP_ID'), 'placeholder must be gone');
   const identity = readFileSync(s.identity, 'utf8');
-  assert.ok(identity.includes("'" + hex + "'"),
-    'JS identity fingerprint injected');
+  assert.ok(identity.includes(
+    "export const INJECTED_PHONE_APP_ID = '" + APP_ID + "';"),
+    'watch peer identity must be the phone APP ID');
   const profile = readFileSync(s.buildProfile, 'utf8');
   assert.ok(profile.includes('"signingConfigs": [{'),
     'real signingConfigs written');
@@ -89,86 +119,105 @@ const { createRequire } = await import('node:module');
     'signing material paths point at the staged dir');
 }
 
-// ---- 2. 占位符已被改过 → 拒绝猜测，构建失败 ----
+// ---- 2. Tampered supportLists -> fail, name the field ----
 {
-  const hex = 'cd'.repeat(32);
-  const s = stage('tampered', hex);
-  // 恢复成"已非占位符"的状态再跑一次。
+  const s = stageWatch('watch-tampered', APP_ID);
   const manifest = JSON.parse(readFileSync(s.manifest, 'utf8'));
-  const entry = manifest.module.metaData.customizeData
-    .find((e) => e.name === 'supportLists');
-  entry.value = 'com.xiwei.suyue:' + 'ff'.repeat(32);
+  manifest.module.metaData.customizeData
+    .find((e) => e.name === 'supportLists').value =
+    'com.xiwei.suyue:' + 'ff'.repeat(32);
   writeFileSync(s.manifest, JSON.stringify(manifest, null, 2));
-  // 还原 build-profile / identity：本用例只验证
-  // Manifest 占位符守卫，其余注入前置条件保持不变。
   copyFileSync(join(REPO, 'apps/watch/build-profile.json5'),
     s.buildProfile);
   copyFileSync(join(REPO,
     'apps/watch/entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js'),
     s.identity);
-  const again = spawnSync('python3', [
-    join(REPO, 'tools/inject_signing.py'),
-    '--material-json', material(hex),
-    '--signing-dir', join(s.dir, 'staged'),
-    '--build-profile', s.buildProfile,
-    '--identity-file', s.identity,
-    '--identity-var', 'INJECTED_PHONE_FINGERPRINT',
-    '--fingerprint-key', 'phone',
-    '--manifest', s.manifest,
-    '--manifest-peer-bundle', 'com.xiwei.suyue'
-  ], { encoding: 'utf8' });
-  assert.notEqual(again.status, 0,
+  const run = injectWatch(s, APP_ID);
+  assert.notEqual(run.status, 0,
     'non-placeholder supportLists must fail the build');
-  assert.ok(again.stderr.includes('supportLists'),
+  assert.ok(run.stderr.includes('supportLists'),
     'failure must name the manifest field');
 }
 
-// ---- 3. 指纹含分隔符 → 失败（不破坏 supportLists） ----
+// ---- 3. APP ID must not be a cert SHA, bundle, or wrong direction ----
 {
-  const s = stage('badformat', 'aa:bb' + 'cc'.repeat(30));
-  assert.notEqual(s.run.status, 0,
-    'fingerprint with separators must be rejected');
+  for (const [name, value] of [
+    ['watch-hex', 'ab'.repeat(32)],
+    ['watch-bundle', 'com.xiwei.suyue'],
+    ['watch-short', '12345']
+  ]) {
+    const s = stageWatch(name, value);
+    const run = injectWatch(s, value);
+    assert.notEqual(run.status, 0, name + ' must be rejected');
+    assert.ok(run.stderr.includes('APP ID'),
+      name + ' error must name the APP ID format');
+  }
+  const s = stageWatch('watch-wrong-direction', WATCH_LITE);
+  const run = injectWatch(s, WATCH_LITE, 'lite');
+  assert.notEqual(run.status, 0,
+    'Lite fingerprint must not be injected as PHONE_APP_ID');
 }
 
-// ---- 4. hex64 严格模式 ----
+// ---- 4. Phone side: Lite identity preserved case/+/= ----
 {
-  const s = stage('strict', 'not-hex-fingerprint',
-    { format: 'hex64' });
-  assert.notEqual(s.run.status, 0,
-    'hex64 mode must reject non-hex fingerprints');
-  const ok = stage('strict-ok', 'ef'.repeat(32),
-    { format: 'hex64' });
-  assert.equal(ok.run.status, 0, ok.run.stderr);
+  const s = stagePhone('phone-lite');
+  const run = injectPhoneLite(s, WATCH_LITE);
+  assert.equal(run.status, 0, run.stderr);
+  const injected = readFileSync(s.identity, 'utf8');
+  assert.ok(injected.includes(
+    "export const INJECTED_WATCH_LITE_FINGERPRINT = '" + WATCH_LITE + "';"),
+    'full Lite value must be preserved, including case and +/=');
+
+  const official = stagePhone('phone-official');
+  const officialRun = injectPhoneLite(official, OFFICIAL_LITE, [],
+    'com.watch.wearengine');
+  assert.equal(officialRun.status, 0, officialRun.stderr);
+  assert.ok(readFileSync(official.identity, 'utf8').includes(OFFICIAL_LITE),
+    'official Huawei Lite example must be accepted verbatim');
 }
 
-// ---- 5. 宽松模式的合法非 hex 指纹被接受（P1-9：不无依据排斥） ----
+// ---- 5. Wrong Lite bundle / 64-hex cert SHA -> fail without mutation ----
 {
-  const s = stage('raw-format', 'b64AGF0dGVzdA==');
-  assert.equal(s.run.status, 0, s.run.stderr);
-  const manifest = JSON.parse(readFileSync(s.manifest, 'utf8'));
-  const entry = manifest.module.metaData.customizeData
-    .find((e) => e.name === 'supportLists');
-  assert.equal(entry.value,
-    'com.xiwei.suyue:b64AGF0dGVzdA==');
+  const s = stagePhone('phone-lite-bad');
+  const before = readFileSync(s.identity, 'utf8');
+  const run = injectPhoneLite(s, 'con.xiwei.suyue.gt4_' +
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==');
+  assert.notEqual(run.status, 0,
+    'wrong EC point / length must fail');
+  assert.equal(readFileSync(s.identity, 'utf8'), before,
+    'failed validation must not mutate the identity file');
+
+  const hex = spawnSync('python3', [
+    join(REPO, 'tools/inject_signing.py'),
+    '--fingerprint-value', 'cd'.repeat(32),
+    '--identity-file', s.identity,
+    '--identity-var', 'INJECTED_WATCH_LITE_FINGERPRINT',
+    '--fingerprint-key', 'watch',
+    '--fingerprint-format', 'lite'
+  ], { encoding: 'utf8' });
+  assert.notEqual(hex.status, 0,
+    'a certificate SHA-256 must not be accepted as a Lite identity');
+  assert.ok(hex.stderr.includes('SHA-256'),
+    'Lite error must explain the rejected cert digest');
+  assert.equal(readFileSync(s.identity, 'utf8'), before,
+    'failed direct injection must not mutate the identity file');
 }
 
-// ---- 6. 缺指纹字段 → 失败 ----
+// ---- 6. Material-only staging + external credentials ----
 {
-  const s = stage('missing-fp', '');
-  assert.notEqual(s.run.status, 0, 'empty fingerprint must fail');
-}
-
-// ---- 7. Lite 外部签名：不触发 legacy SignHap，凭据能安全载入 ----
-{
-  const s = stage('lite-external', 'ac'.repeat(32), {
-    external: true,
-    extra: { keyPassword: "a' b$\\\\c" }
-  });
-  assert.equal(s.run.status, 0, s.run.stderr);
-  assert.equal(readFileSync(s.buildProfile, 'utf8'),
-    readFileSync(join(REPO, 'apps/watch/build-profile.json5'), 'utf8'),
-    'Lite legacy signingConfigs must remain empty');
-  const envFile = join(s.dir, 'staged/credentials.env');
+  const dir = dirFor('material-only');
+  const run = spawnSync('python3', [
+    join(REPO, 'tools/inject_signing.py'),
+    '--material-json', material({ phone: APP_ID, watch: WATCH_LITE },
+      { keyPassword: "a' b$\\\\c" }),
+    '--signing-dir', join(dir, 'staged'),
+    '--external-signing'
+  ], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.ok(run.stdout.includes('identity injection skipped'),
+    'material-only mode must not invent an identity');
+  const envFile = join(dir, 'staged/credentials.env');
   const loaded = spawnSync('bash', [
     '-c', 'source "$1"; printf "%s" "$KEY_PASSWORD"', 'bash', envFile
   ], { encoding: 'utf8' });
@@ -176,57 +225,45 @@ const { createRequire } = await import('node:module');
   assert.equal(loaded.stdout, "a' b$\\\\c");
 }
 
-// ---- 8. 本地构建直接注入指纹（issue #12）----
-// build_phone_hap.sh 已从证书/profile 解析出指纹，只复用这里的
-// hex64 校验与空占位替换；不应要求伪造 material JSON。
+// ---- 7. Direct mode: empty placeholder, no silent overwrite, opt-in ----
 {
-  const hex = '12'.repeat(32);
-  const dir = join(tmp, 'direct');
-  mkdirSync(dir, { recursive: true });
-  const identity = join(dir, 'PeerIdentityConfig.g.ts');
-  copyFileSync(join(REPO,
-    'apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts'),
-    identity);
+  const s = stagePhone('direct');
   const args = [
     join(REPO, 'tools/inject_signing.py'),
-    '--fingerprint-value', hex,
-    '--identity-file', identity,
-    '--identity-var', 'INJECTED_WATCH_FINGERPRINT',
+    '--fingerprint-value', WATCH_LITE,
+    '--identity-file', s.identity,
+    '--identity-var', 'INJECTED_WATCH_LITE_FINGERPRINT',
     '--fingerprint-key', 'watch',
-    '--fingerprint-format', 'hex64'
+    '--fingerprint-format', 'lite'
   ];
-  const run = spawnSync('python3', args, { encoding: 'utf8' });
-  assert.equal(run.status, 0, run.stderr);
-  const afterDirect = readFileSync(identity, 'utf8');
-  assert.ok(afterDirect.includes(
-    "export const INJECTED_WATCH_FINGERPRINT = '" + hex + "';"),
-    'direct mode must replace the empty placeholder');
+  const first = spawnSync('python3', args, { encoding: 'utf8' });
+  assert.equal(first.status, 0, first.stderr);
+  const afterFirst = readFileSync(s.identity, 'utf8');
 
-  const bad = spawnSync('python3', [
-    join(REPO, 'tools/inject_signing.py'),
-    '--fingerprint-value', 'not-a-cert-sha256',
-    '--identity-file', identity,
-    '--identity-var', 'INJECTED_WATCH_FINGERPRINT',
-    '--fingerprint-key', 'watch',
-    '--fingerprint-format', 'hex64'
-  ], { encoding: 'utf8' });
-  assert.notEqual(bad.status, 0,
-    'direct mode must enforce hex64');
-  assert.equal(readFileSync(identity, 'utf8'), afterDirect,
-    'failed validation must not mutate the identity file');
+  const again = spawnSync('python3', args, { encoding: 'utf8' });
+  assert.notEqual(again.status, 0,
+    'a different/existing injected identity must not be silently replaced');
+  assert.equal(readFileSync(s.identity, 'utf8'), afterFirst);
 
+  const replace = spawnSync('python3', [...args, '--allow-replace'],
+    { encoding: 'utf8' });
+  assert.equal(replace.status, 0, replace.stderr);
+}
+
+// ---- 8. Material and direct modes are mutually exclusive ----
+{
+  const s = stagePhone('exclusive');
   const both = spawnSync('python3', [
     join(REPO, 'tools/inject_signing.py'),
-    '--material-json', material(hex),
-    '--fingerprint-value', hex,
-    '--identity-file', identity,
-    '--identity-var', 'INJECTED_WATCH_FINGERPRINT',
+    '--material-json', material({ watch: WATCH_LITE }),
+    '--fingerprint-value', WATCH_LITE,
+    '--identity-file', s.identity,
+    '--identity-var', 'INJECTED_WATCH_LITE_FINGERPRINT',
     '--fingerprint-key', 'watch'
   ], { encoding: 'utf8' });
   assert.notEqual(both.status, 0,
     'material mode and direct fingerprint mode must be exclusive');
 }
 
-console.info('PASS: signing injection (manifest ' +
-  'supportLists, placeholder guard, fingerprint format ' +
-  'policy, signingConfigs, identity file, direct fingerprint value)');
+console.info('PASS: signing injection (phone APP ID supportLists, ' +
+  'Lite pubkey identity, strict formats, material staging)');

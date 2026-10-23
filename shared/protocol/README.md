@@ -72,9 +72,11 @@
   日志里能看出这条回执走的是未验证路径。
 - Manifest 授权：`config.json` 的
   `metaData.customizeData[supportLists]` 必须为
-  `<手机包名>:<手机证书指纹>`；构建期由
-  `tools/inject_signing.py` 从签名材料注入，
-  未注入时收不到消息。
+  `<手机包名>:<手机 APP ID>`（HarmonyOS 5.0+ 手机原生应用用
+  `bundle-info.app-identifier`，不是证书 SHA-256）；构建期由
+  `tools/inject_signing.py` 从真实手机 profile 注入，
+  未注入时收不到消息。手机→手表的 `remoteApp` 则使用 GT4 Lite
+  公钥身份 `<手表包名>_<Base64(原始 EC 公钥点)>`，两者方向不同。
 
 ## 消息 envelope
 

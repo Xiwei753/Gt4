@@ -47,7 +47,7 @@ assert.ok(artifactCheck.includes('--expect-bin-sha256'));
 const root = mkdtempSync(join(tmpdir(), 'suyue-lite-bin-'));
 const signed = join(root, 'entry-default-debug-signed.hap');
 const source = join(root, 'config.json');
-const fingerprint = 'ab12cd34ef56';
+const fingerprint = '6917618613178762508';
 const baseConfig = {
   app: { bundleName: 'con.xiwei.suyue.gt4' },
   module: {
@@ -170,7 +170,7 @@ try {
   const missingFingerprint = check(['--source-manifest', source,
     '--expect-fingerprint', 'ffff0000']);
   assert.notEqual(missingFingerprint.status, 0);
-  assert.match(missingFingerprint.stderr, /fingerprint/);
+  assert.match(missingFingerprint.stderr, /APP ID|fingerprint/);
 
   // (10) the BIN in the ZIP must byte-for-byte equal THIS signing output
   reset();

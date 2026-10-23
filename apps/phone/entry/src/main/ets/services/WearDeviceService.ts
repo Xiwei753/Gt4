@@ -312,6 +312,8 @@ export class WearDeviceService {
       device.randomId, appParam, callback);
     this.messageRegistrations.set(device.randomId,
       { appParam: appParam, callback: callback });
+    hilog.info(0x0000, TAG, 'receiver registered: bundle=' +
+      bundleName + ' identity=' + fingerprint.substring(0, 24) + '…');
   }
 
   async unregisterMessageReceiver(

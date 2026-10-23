@@ -50,29 +50,32 @@
   `transferFile` 与回执时序均**待验证**。授权入口在素阅应用内
   「发送到 GT 4」卡片，**不需要**（也找不到）走运动健康的
   「设备能力开放 / 应用授权」入口。
-- **手机侧手表证书指纹已改为构建期解析/注入**：本地
+- **手机侧 WATCH_PEER 已改为 Lite 公钥身份**：本地
   `tools/build_phone_hap.sh` 从 `signing/watch/debug.p7b` 的
-  `bundle-info.development-certificate` 取 GT4 证书 SHA-256
-  （或用 `SUYUE_WATCH_FINGERPRINT` 显式指定），校验 64 位 hex、
-  bundle 名和证书链后写入 `PeerIdentityConfig.g.ts`，构建结束/失败
-  自动恢复。缺材料、非法值或多候选无法确定时构建直接失败，不再产出
-  空指纹 HAP。
-- 含指纹的 HAP 已覆盖安装到 Pocket 2；**用户尚未主动打开确认**
-  「手表签名指纹未配置」提示是否消失、回执监听是否继续。截屏验证时
+  `bundle-info.development-certificate` 取 GT4 证书里的**原始 EC 公钥点**
+  （未压缩点，首字节 `0x04`），生成官方 Lite 格式
+  `con.xiwei.suyue.gt4_<Base64>`（或由
+  `SUYUE_WATCH_LITE_FINGERPRINT` 显式指定），校验 bundle、Base64 和
+  65/97/133 字节公钥点后写入 `PeerIdentityConfig.g.ts`；构建结束/失败
+  自动恢复。缺材料、64 位证书 SHA-256、错误 bundle 或非法公钥点都会
+  直接失败，不再产出空/错格式 HAP。
+- 含新 Lite 身份的 HAP 尚待重新安装到 Pocket 2；**用户尚未主动打开确认**
+  「手表 Lite 公钥指纹未配置」提示是否消失、回执监听是否继续。截屏验证时
   手机正被用户使用，未取得素阅界面证据，不能据此宣称已解决。
 - 真正传书仍需 GT 4 回 `RESULT ok=true`；当前**未验证**。
+  `206 COMMUNICATION_FAILURE` 不能只归因于指纹，错误码原样保留。
 - GBK 解码在目标系统的实际可用性属于**待验证**项。
 
 ## 构建
 
 - `tools/build_phone_hap.sh`（需要 DevEco `hvigorw` + API 26 SDK）。
-  本地默认从 `signing/watch/*.p7b` 取手表证书指纹，也支持
-  `SUYUE_WATCH_FINGERPRINT=<64位hex>` 显式指定；同样会在最终签名 HAP
-  的 `ets/modules.abc` 中核对指纹和 `client_id` 元数据，缺一即失败。
+  本地默认从 `signing/watch/*.p7b`/证书生成 Lite 公钥身份，也支持
+  `SUYUE_WATCH_LITE_FINGERPRINT=<完整身份>` 显式指定；会在最终签名 HAP
+  的 `ets/modules.abc` 中核对完整 Lite 身份和 `client_id` 元数据，缺一即失败。
 - `.github/workflows/phone_hap.yml`：自托管 `hmos-deveco` runner，
   签名材料经 `secrets.PHONE_SIGNING_MATERIAL` 注入；`fingerprints.watch`
-  必须是当前 GT4 HAP 的签名证书 SHA-256（不是手机 APK），CI 以
-  `--fingerprint-format hex64` 校验并传给构建脚本交叉核对。
+  必须是当前 GT4 HAP 的 **Lite 公钥身份**（`con.xiwei.suyue.gt4_<Base64>`，
+  不是 64 位证书 SHA-256），CI 以共享格式校验并传给构建脚本交叉核对。
 
 - UI：`entry/src/main/ets/pages/Index.ets`
 - Ability：`entry/src/main/ets/entryability/EntryAbility.ets`

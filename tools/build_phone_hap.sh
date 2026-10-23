@@ -54,8 +54,12 @@ if [ -z "$INJECT_CLIENT_ID" ]; then
 fi
 
 IDENTITY_FILE="entry/src/main/ets/services/PeerIdentityConfig.g.ts"
-IDENTITY_VAR="INJECTED_WATCH_FINGERPRINT"
+IDENTITY_VAR="INJECTED_WATCH_LITE_FINGERPRINT"
 WATCH_BUNDLE="con.xiwei.suyue.gt4"
+# issue #13: GT4 Lite 身份 = bundleName + "_" + Base64(原始 EC 公钥点)。
+# 旧的 SUYUE_WATCH_FINGERPRINT 只作为兼容别名；若仍是 64 位证书
+# SHA-256，extract_watch_fingerprint.py --format lite 会明确拒绝。
+WATCH_LITE_ENV="${SUYUE_WATCH_LITE_FINGERPRINT:-${SUYUE_WATCH_FINGERPRINT:-}}"
 
 MODULE_JSON5_BACKUP=""
 IDENTITY_BACKUP=""
@@ -87,14 +91,19 @@ if grep -q "\"$CLIENT_ID_PLACEHOLDER\"" "$MODULE_JSON5"; then
     --placeholder "$CLIENT_ID_PLACEHOLDER"
 fi
 
-# ---------- GT 4 手表证书指纹注入（issue #12 P0）----------
-# Wear Engine 的 remoteApp 必须是「手表 bundleName + 手表签名证书的
-# DER-SHA256」。本脚本在 assembleHap **之前**解析真实证书，而不是相信
-# 源码里的空占位、HAP 文件哈希、公钥哈希、Client ID 或随机值。
+# ---------- GT 4 Lite 公钥指纹注入（issue #13 P0）----------
+# 华为 FAQ（2026-09-20）按“被识别端”平台区分：
+#   GT 4 是 Lite Wearable 应用，手机→手表的 remoteApp fingerprint
+#   必须是 bundleName + "_" + Base64(签名证书里的原始 EC 公钥点)。
+#   不是证书 DER-SHA256，不是整张证书/SPKI 的 Base64，也不是公钥
+#   十六进制文本的 Base64。
 #
-# 指纹来源优先级：
-#   1. SUYUE_WATCH_FINGERPRINT 明确指定的已确证值（CI/复现构建）；
-#   2. 已经注入且非空的 PeerIdentityConfig.g.ts（CI 的 inject_signing.py）；
+# 本脚本在 assembleHap **之前**从真实手表 profile/cert 解析原始
+# EC 公钥点（P-256/P-384/P-521 均可），再注入 WATCH_PEER。
+# 来源优先级：
+#   1. SUYUE_WATCH_LITE_FINGERPRINT 明确指定的已确证 Lite 值；
+#      （兼容旧名 SUYUE_WATCH_FINGERPRINT，但 64 位 SHA-256 会被拒绝）
+#   2. 已注入且非空的 PeerIdentityConfig.g.ts（CI 的 inject_signing.py）；
 #   3. signing/watch/*.p7b 内嵌 development-certificate（首选，带包名校验）；
 #   4. signing/shared/*.cer 证书链的终端证书（有歧义就失败，不取第一张）。
 # 若 3/4 同时存在，两者必须指向同一张证书。
@@ -103,7 +112,6 @@ fi
 # 本脚本注入时才备份，并在 EXIT trap 中与 module.json5 一起恢复。
 WATCH_PROFILE="${SUYUE_WATCH_PROFILE:-}"
 WATCH_CERT="${SUYUE_WATCH_CERT:-}"
-WATCH_FP_ENV="${SUYUE_WATCH_FINGERPRINT:-}"
 
 shopt -s nullglob
 if [ -z "$WATCH_PROFILE" ]; then
@@ -134,7 +142,7 @@ if [ -z "$WATCH_CERT" ]; then
 fi
 shopt -u nullglob
 
-EXISTING_WATCH_FP="$(python3 - "$IDENTITY_FILE" "$IDENTITY_VAR" <<'PY'
+EXISTING_WATCH_LITE="$(python3 - "$IDENTITY_FILE" "$IDENTITY_VAR" <<'PY'
 import re
 import sys
 path, name = sys.argv[1], sys.argv[2]
@@ -148,69 +156,78 @@ match = re.search(
 print(match.group(1) if match else '__MISSING__')
 PY
 )"
-if [ "$EXISTING_WATCH_FP" = "__MISSING__" ]; then
-  echo "ERROR: $IDENTITY_FILE 中找不到 $IDENTITY_VAR 的 '$IDENTITY_VAR = ...' 声明" >&2
+if [ "$EXISTING_WATCH_LITE" = "__MISSING__" ]; then
+  echo "ERROR: $IDENTITY_FILE 中找不到 $IDENTITY_VAR 的声明" >&2
   echo "       拒绝在身份文件结构不明时继续构建。" >&2
   exit 1
 fi
 
 if [ -z "$WATCH_PROFILE" ] && [ -z "$WATCH_CERT" ] && \
-   [ -z "$WATCH_FP_ENV" ] && [ -z "$EXISTING_WATCH_FP" ]; then
+   [ -z "$WATCH_LITE_ENV" ] && [ -z "$EXISTING_WATCH_LITE" ]; then
   cat >&2 <<'MSG'
-ERROR: 找不到 GT 4 手表签名证书指纹，拒绝产出“能装但发送必禁用”的手机 HAP。
+ERROR: 找不到 GT 4 Lite 公钥指纹，拒绝产出“能装但发送必禁用”的手机 HAP。
 
 需要以下任一材料：
-  - signing/watch/<watch>.p7b（内含 bundle-info.development-certificate，首选）；
+  - signing/watch/<watch>.p7b（内含 development-certificate，首选）；
   - signing/shared/debug.cer（手表签名证书或证书链）；
-  - 已确证的 SUYUE_WATCH_FINGERPRINT=<64位hex>。
+  - 已确证的 SUYUE_WATCH_LITE_FINGERPRINT=
+    con.xiwei.suyue.gt4_<Base64(原始 EC 公钥点)>。
 
-如果手表签名材料不在这台机器上，请从当前 GT 4 已安装 HAP 的签名证书
-（或 AGC 的 SHA256 证书指纹）取得，不能用手机 HAP 文件哈希/公钥哈希/
-Client ID/设备 UUID 代替。材料放在 signing/ 下（已被 .gitignore 忽略）。
+旧 SUYUE_WATCH_FINGERPRINT 的 64 位证书 SHA-256 不能用于 GT4 Lite；
+整张证书 DER/SPKI 的 Base64、公钥十六进制文本的 Base64 也不行。
+材料放在 signing/ 下（已被 .gitignore 忽略）。
 MSG
   exit 1
 fi
 
-EXTRACT_ARGS=(--bundle "$WATCH_BUNDLE")
+EXTRACT_ARGS=(--bundle "$WATCH_BUNDLE" --format lite)
 [ -n "$WATCH_PROFILE" ] && EXTRACT_ARGS+=(--profile "$WATCH_PROFILE")
 [ -n "$WATCH_CERT" ] && EXTRACT_ARGS+=(--cert "$WATCH_CERT")
-[ -n "$WATCH_FP_ENV" ] && EXTRACT_ARGS+=(--fingerprint "$WATCH_FP_ENV")
-[ -n "$EXISTING_WATCH_FP" ] && EXTRACT_ARGS+=(--fingerprint "$EXISTING_WATCH_FP")
+[ -n "$WATCH_LITE_ENV" ] && EXTRACT_ARGS+=(--fingerprint "$WATCH_LITE_ENV")
+[ -n "$EXISTING_WATCH_LITE" ] && EXTRACT_ARGS+=(--fingerprint "$EXISTING_WATCH_LITE")
 
-if ! EXPECTED_WATCH_FP="$(python3 \
+if ! EXPECTED_WATCH_LITE="$(python3 \
     "$REPO_ROOT/tools/extract_watch_fingerprint.py" \
     "${EXTRACT_ARGS[@]}")"; then
-  echo "ERROR: 无法从手表签名材料解析出可信的 64 位证书 SHA-256。" >&2
-  echo "       已拒绝继续；不会用空值/随机值/文件哈希冒充指纹。" >&2
+  echo "ERROR: 无法从手表签名材料解析出可信的 GT4 Lite 公钥指纹。" >&2
+  echo "       已拒绝继续；不会用证书 SHA-256/整张证书 Base64/随机值冒充。" >&2
   exit 1
 fi
-EXPECTED_WATCH_FP="$(printf '%s' "$EXPECTED_WATCH_FP" | tr -d '[:space:]')"
+EXPECTED_WATCH_LITE="$(printf '%s' "$EXPECTED_WATCH_LITE" | tr -d '[:space:]')"
+case "$EXPECTED_WATCH_LITE" in
+  "$WATCH_BUNDLE"_*) ;;
+  *)
+    echo "ERROR: 解析结果不是 ${WATCH_BUNDLE}_ 开头的 Lite 身份：${EXPECTED_WATCH_LITE:0:24}…" >&2
+    exit 1
+    ;;
+esac
 
-if [ -z "$EXISTING_WATCH_FP" ]; then
+if [ -z "$EXISTING_WATCH_LITE" ]; then
   IDENTITY_BACKUP="$(mktemp)"
   cp -f "$IDENTITY_FILE" "$IDENTITY_BACKUP"
   python3 "$REPO_ROOT/tools/inject_signing.py" \
-    --fingerprint-value "$EXPECTED_WATCH_FP" \
+    --fingerprint-value "$EXPECTED_WATCH_LITE" \
     --identity-file "$IDENTITY_FILE" \
     --identity-var "$IDENTITY_VAR" \
     --fingerprint-key watch \
-    --fingerprint-format hex64
+    --fingerprint-format lite \
+    --watch-bundle "$WATCH_BUNDLE"
 else
-  if [ "$EXISTING_WATCH_FP" != "$EXPECTED_WATCH_FP" ]; then
-    echo "ERROR: $IDENTITY_FILE 中已注入的指纹与本次证书解析结果不一致：" >&2
-    echo "       existing=${EXISTING_WATCH_FP:0:8}… expected=${EXPECTED_WATCH_FP:0:8}…" >&2
-    echo "       拒绝让构建产物与证书材料各说各话。" >&2
+  if [ "$EXISTING_WATCH_LITE" != "$EXPECTED_WATCH_LITE" ]; then
+    echo "ERROR: $IDENTITY_FILE 中已注入的 Lite 身份与本次材料解析结果不一致：" >&2
+    echo "       existing=${EXISTING_WATCH_LITE:0:32}… expected=${EXPECTED_WATCH_LITE:0:32}…" >&2
+    echo "       拒绝让构建产物与签名材料各说各话。" >&2
     exit 1
   fi
-  echo "WATCH_FINGERPRINT_ALREADY_INJECTED=yes（沿用现有注入；最终产物仍会核对）" >&2
+  echo "WATCH_LITE_ALREADY_INJECTED=yes（沿用现有注入；最终产物仍会核对）" >&2
 fi
 
-if ! grep -q "export const $IDENTITY_VAR = '$EXPECTED_WATCH_FP';" \
+if ! grep -Fq "export const $IDENTITY_VAR = '$EXPECTED_WATCH_LITE';" \
     "$IDENTITY_FILE"; then
-  echo "ERROR: 指纹注入后源码断言失败：$IDENTITY_VAR 未变成预期值。" >&2
+  echo "ERROR: 身份注入后源码断言失败：$IDENTITY_VAR 未变成预期 Lite 值。" >&2
   exit 1
 fi
-echo "WATCH_FINGERPRINT_INJECTED=yes bundle=$WATCH_BUNDLE sha256_prefix=${EXPECTED_WATCH_FP:0:8}…"
+echo "WATCH_LITE_INJECTED=yes bundle=$WATCH_BUNDLE value_prefix=${EXPECTED_WATCH_LITE:0:24}…"
 
 "$HVIGORW" --mode module -p product="$PRODUCT" -p buildMode="$MODE" assembleHap --no-daemon
 
@@ -356,7 +373,7 @@ fi
   --device phone \
   --mode "$MODE" \
   --expect-metadata "client_id=$CLIENT_ID" \
-  --expect-compiled-string "$EXPECTED_WATCH_FP"
+  --expect-compiled-string "$EXPECTED_WATCH_LITE"
 
 if [ "$UNSIGNED" = "1" ]; then
   cat >&2 <<'MSG'

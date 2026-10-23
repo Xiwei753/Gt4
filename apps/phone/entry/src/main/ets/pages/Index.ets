@@ -22,15 +22,12 @@ import { BookTransferService } from '../services/BookTransferService';
 import { deviceNotice, planRetry, MAX_AUTO_RETRIES,
   runDeviceRefresh } from '../services/WearAuthPolicy';
 
-// 双端身份严格分离（P0-1/P0-2）：
-//   WATCH_PEER：对端 GT 4 身份，作为
-//     remoteApp 用于发送与回执校验；
-//   PHONE_SELF：本机身份，仅供手表校验
-//     消息来源。两者指纹独立注入，互不
-//     代替。指纹为空时发送明确禁用。
-// 指纹由 CI 从 Secrets 注入
-// （services/PeerIdentityConfig.g.ts），
-// 不写死、不提交假值。
+// 双端身份严格分离（issue #13）：
+//   WATCH_PEER：对端 GT 4 Lite 身份，手机发送/注册回执时
+//     使用 con.xiwei.suyue.gt4_Base64(原始 EC 公钥点)；
+//   PHONE_SELF：手机 APP ID，供手表登记“消息来自哪部手机”，
+//     不是 OAuth Client ID，也不是证书 SHA-256。
+// 两者方向、格式不同，互不代替；任一方为空/格式错误时发送明确禁用。
 
 @Entry
 @Component
@@ -48,6 +45,8 @@ struct Index {
   @State private deviceBusy: boolean = false;
   @State private transferText: string = '未开始传输';
   @State private sending: boolean = false;
+  // 身份配置错误或“未配置”提示；发送门禁仍由 isConfigured 决定。
+  @State private identityStatus: string = '';
   // 当前在途 transferId（取消时用，P1-7）。
   @State private activeTransferId: string = '';
   private repository: BookRepository | null = null;
@@ -81,7 +80,15 @@ struct Index {
   }
 
   onPageShow(): void {
-    loadPeerIdentities();
+    this.identityStatus = loadPeerIdentities();
+    if (this.identityStatus.length === 0 && !isConfigured(WATCH_PEER)) {
+      this.identityStatus =
+        '手表 Lite 公钥指纹未配置（需要 con.xiwei.suyue.gt4_' +
+        'Base64(原始 EC 公钥点)），发送保持禁用';
+    }
+    if (this.identityStatus.length > 0) {
+      console.error('suyue peer identity: ' + this.identityStatus);
+    }
     this.refresh();
     this.refreshDevices();
   }
@@ -183,7 +190,7 @@ struct Index {
     this.selectedDevice = e;
     this.deviceStatus = '已选择：' + device.name;
     if (!isConfigured(WATCH_PEER)) {
-      this.deviceStatus += '；手表签名指纹未配置，' +
+      this.deviceStatus += '；手表 Lite 公钥指纹未配置或格式错误，' +
         '发送将保持禁用';
     }
     // 注册手表 → 手机的消息接收（RESULT 回执）。
@@ -279,7 +286,7 @@ struct Index {
   private async sendBook(book: BookMeta): Promise<void> {
     if (!this.canSend() || this.transferService === null) {
       this.transferText =
-        '发送不可用：请先选择设备、配置指纹并成功注册回执';
+        '发送不可用：请先选择设备、配置手表 Lite 公钥指纹并成功注册回执';
       return;
     }
     if (!this.canTransferBook(book)) {
@@ -430,6 +437,10 @@ struct Index {
         Text('发送到 GT 4').fontSize(22)
           .fontWeight(FontWeight.Medium).fontColor('#f2f2f2')
         Text(this.deviceStatus).fontSize(14).fontColor('#a7abb4')
+        if (this.identityStatus.length > 0) {
+          Text(this.identityStatus).fontSize(13)
+            .fontColor('#f87171')
+        }
         if (this.devices.length > 0) {
           Row() {
             ForEach(this.devices, (device: TargetDevice,

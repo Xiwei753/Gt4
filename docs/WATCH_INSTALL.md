@@ -238,7 +238,9 @@ adb -s TNL0220908013936 push \
 
 - `targetSdkVersion` = `5.1.0(18)`、`compatibleSdkVersion` = `4.0.0(10)`
   已参照 Lite 示例调整，但**尚未经 GT4 真机确认适配**。
-- Wear Engine 接收依赖手机端证书指纹，尚未配置（见 `wear/PeerConfig.js`）。
+- Wear Engine 接收需要手机 APP ID（`bundle-info.app-identifier`）和
+  手表 `supportLists` 授权；构建脚本已支持从真实手机 profile 注入，
+  但仍需重打并安装 GT4 HAP 后真机确认（见 `wear/PeerConfig.js`）。
 - **真机安装与运行尚未做**：签名通过只证明 HAP 完整、证书链有效、
   包名与 profile 一致。设备端还会校验该 UDID 是否在授权列表、有效期与
   设备调试状态。这些都没在 GT 4 上验证过，因此第 1 阶段"可安装"验收

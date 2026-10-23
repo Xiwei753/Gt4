@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Resolve the GT 4 app signing-certificate SHA-256.
+"""Resolve the GT 4 Lite Wear Engine peer identity.
 
-The Wear Engine peer identity is ``bundleName + certificate fingerprint``.
-The fingerprint is the SHA-256 of the DER-encoded signing certificate, not
-the HAP file hash, the public-key hash, the profile hash, or a device ID.
+For a Lite Wearable target, the Huawei Wear Engine identity is
+``bundleName + '_' + Base64(raw EC public point)``.  The point is the
+uncompressed SEC1 point from the signing certificate (first byte 0x04),
+NOT a certificate SHA-256 and NOT Base64 of the SPKI/DER or of the hex text.
+
+``--format sha256`` keeps the old certificate-digest output for diagnostics
+only.  It is not the phone->watch peer identity.
 
 Sources, in order of strength:
 
@@ -16,11 +20,11 @@ Sources, in order of strength:
    supplied, the profile certificate must be present in the chain.  Without
    a profile, exactly one end-entity certificate must be identifiable; an
    ambiguous chain is an error (never "take the first").
-3. ``--fingerprint``: an explicit, already-verified 64-hex value.  It is
-   normalised and, when any material is also supplied, must match it.
+3. ``--fingerprint``: an explicit, already-verified value in the selected
+   format.  When material is supplied, it must match.
 
-Only the normalised fingerprint is written to stdout.  Diagnostics go to
-stderr without printing the full digest.
+Only the normalised identity is written to stdout.  Diagnostics go to
+stderr.
 """
 import argparse
 import hashlib
@@ -30,6 +34,13 @@ import re
 import ssl
 import subprocess
 import sys
+
+from peer_identity_formats import (
+    IdentityFormatError,
+    extract_ec_point_from_spki_der,
+    format_watch_lite,
+    validate_watch_lite,
+)
 
 WATCH_BUNDLE = 'con.xiwei.suyue.gt4'
 HEX64 = re.compile(r'^[0-9a-f]{64}$')
@@ -115,7 +126,7 @@ def read_profile(path, bundle):
     if not isinstance(pem, str) or not pem.strip():
         fail('profile 缺少 bundle-info.development-certificate')
     digest, der = sha256_pem(pem, 'profile development-certificate')
-    return digest, der
+    return digest, der, pem
 
 
 def split_der_objects(raw):
@@ -245,10 +256,10 @@ def choose_chain_certificate(chain, expected_der=None):
         if len(matches) != 1:
             fail('证书链中找不到 profile 指定的开发证书'
                  '（或找到多张相同证书），拒绝猜测')
-        return matches[0]['sha256'], matches[0]['der']
+        return matches[0]['sha256'], matches[0]['der'], matches[0]['pem']
 
     if len(entries) == 1:
-        return entries[0]['sha256'], entries[0]['der']
+        return entries[0]['sha256'], entries[0]['der'], entries[0]['pem']
 
     # Prefer an explicit end-entity certificate.  A chain normally has
     # exactly one CA:FALSE leaf; roots/intermediates are CA:TRUE.
@@ -256,7 +267,7 @@ def choose_chain_certificate(chain, expected_der=None):
     if not candidates:
         candidates = [e for e in entries if not e['is_ca']]
     if len(candidates) == 1:
-        return candidates[0]['sha256'], candidates[0]['der']
+        return candidates[0]['sha256'], candidates[0]['der'], candidates[0]['pem']
     if not candidates:
         fail('证书链中没有可识别的终端证书（CA:FALSE）；'
              '请用 --profile 或 --fingerprint 明确指定')
@@ -272,11 +283,31 @@ def choose_chain_certificate(chain, expected_der=None):
                 if other['index'] != e['index'])
     ]
     if len(leaves) == 1:
-        return leaves[0]['sha256'], leaves[0]['der']
+        return leaves[0]['sha256'], leaves[0]['der'], leaves[0]['pem']
 
     fail('证书链中有 %d 张候选终端证书，无法确定哪张签了 GT 4 应用；'
          '请用 --profile 或 --fingerprint 明确指定，不能静默取第一张'
          % len(candidates))
+
+
+def public_key_spki_der(pem):
+    result = openssl(['x509', '-pubkey', '-noout'],
+                     stdin=pem.encode('ascii'))
+    if result.returncode != 0:
+        fail('无法从证书提取公钥：%s' % short(result.stderr))
+    der = openssl(['pkey', '-pubin', '-outform', 'DER'],
+                  stdin=result.stdout)
+    if der.returncode != 0:
+        fail('无法把证书公钥转为 SPKI DER：%s' % short(der.stderr))
+    return der.stdout
+
+
+def lite_from_pem(pem, bundle):
+    try:
+        point = extract_ec_point_from_spki_der(public_key_spki_der(pem))
+        return format_watch_lite(point, bundle)
+    except IdentityFormatError as exc:
+        fail('无法生成 GT 4 Lite 公钥指纹：%s' % exc)
 
 
 def main():
@@ -287,26 +318,38 @@ def main():
                         help='PEM/DER 证书或证书链')
     parser.add_argument('--bundle', default=WATCH_BUNDLE,
                         help='期望的手表 bundleName（默认 %s）' % WATCH_BUNDLE)
+    parser.add_argument('--format', default='lite',
+                        choices=['lite', 'sha256'],
+                        help='lite=官方 Lite 公钥指纹（默认）；'
+                             'sha256=仅诊断用的证书摘要')
     parser.add_argument('--fingerprint', action='append', default=[],
-                        help='已确证的 64 位 hex 指纹，可重复；必须与材料一致')
+                        help='已确证的完整身份值，可重复；必须与材料一致')
     args = parser.parse_args()
 
-    explicit = [
-        normalize_fingerprint(value, '--fingerprint')
-        for value in args.fingerprint
-    ]
+    explicit = []
+    for value in args.fingerprint:
+        if args.format == 'lite':
+            try:
+                explicit.append(validate_watch_lite(value, args.bundle))
+            except IdentityFormatError as exc:
+                fail('--fingerprint 不是合法的 GT 4 Lite 身份：%s' % exc)
+        else:
+            explicit.append(normalize_fingerprint(value, '--fingerprint'))
     if len(set(explicit)) > 1:
-        fail('给出的多个指纹不一致，拒绝猜测')
+        fail('给出的多个身份值不一致，拒绝猜测')
 
     profile_digest = None
     profile_der = None
+    profile_pem = None
     if args.profile:
-        profile_digest, profile_der = read_profile(args.profile, args.bundle)
+        profile_digest, profile_der, profile_pem = read_profile(
+            args.profile, args.bundle)
 
     material_digest = profile_digest
+    material_pem = profile_pem
     if args.cert:
         chain = load_cert_chain(args.cert)
-        cert_digest, _ = choose_chain_certificate(
+        cert_digest, _, cert_pem = choose_chain_certificate(
             chain, expected_der=profile_der)
         if material_digest and cert_digest != material_digest:
             fail('证书链终端证书与 profile 的开发证书不是同一张：'
@@ -314,15 +357,20 @@ def main():
                  % (material_digest[:8] + '…',
                     cert_digest[:8] + '…'))
         material_digest = cert_digest
+        material_pem = cert_pem
 
-    if explicit and material_digest:
-        if explicit[0] != material_digest:
-            fail('显式指纹与签名材料不一致：explicit=%s material=%s'
-                 % (explicit[0][:8] + '…', material_digest[:8] + '…'))
+    actual = None
+    if material_pem:
+        actual = (lite_from_pem(material_pem, args.bundle)
+                  if args.format == 'lite' else material_digest)
+    if explicit and actual:
+        if explicit[0] != actual:
+            fail('显式身份值与签名材料不一致：explicit=%s material=%s'
+                 % (explicit[0][:20] + '…', actual[:20] + '…'))
     elif explicit:
-        material_digest = explicit[0]
-    elif not material_digest:
-        fail('没有可用的手表签名材料或指纹；请提供 '
+        actual = explicit[0]
+    elif not actual:
+        fail('没有可用的手表签名材料或身份值；请提供 '
              '--profile/--cert，或已确证的 --fingerprint')
 
     source = []
@@ -334,9 +382,9 @@ def main():
         source.append('explicit')
     if not source:
         source.append('material')
-    print(material_digest)
-    print('WATCH_FINGERPRINT_SOURCE=%s bundle=%s sha256_prefix=%s…'
-          % ('+'.join(source), args.bundle, material_digest[:8]),
+    print(actual)
+    print('WATCH_FINGERPRINT_SOURCE=%s bundle=%s format=%s prefix=%s…'
+          % ('+'.join(source), args.bundle, args.format, actual[:20]),
           file=sys.stderr)
 
 

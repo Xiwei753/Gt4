@@ -88,15 +88,21 @@ AGC 里建手表应用时把 `com` 打成了 `con`，**已确认保留**。原�
 
 ## 用法
 
-- **手机（本地，issue #12）**：`tools/build_phone_hap.sh debug` 会读取
+- **手机（本地，issue #13）**：`tools/build_phone_hap.sh debug` 会读取
   `signing/watch/*.p7b` 内嵌的 `development-certificate`，核对
-  `bundle-name = con.xiwei.suyue.gt4` 后取 DER-SHA256 注入手机
-  `PeerIdentityConfig.g.ts`；也可用 `SUYUE_WATCH_FINGERPRINT=<64位hex>`
-  显式指定并与材料交叉核对。缺材料/非法指纹会直接失败，构建结束或
-  失败都会恢复源码占位。
+  `bundle-name = con.xiwei.suyue.gt4` 后取**证书里的原始 EC 公钥点**
+  （未压缩点，首字节 `0x04`），按官方 Lite 格式生成
+  `con.xiwei.suyue.gt4_<标准 Base64>` 并注入手机
+  `PeerIdentityConfig.g.ts`；也可用
+  `SUYUE_WATCH_LITE_FINGERPRINT=<完整 Lite 身份>` 显式指定并与材料交叉核对。
+  64 位证书 SHA-256 会被明确拒绝，不能冒充 Lite 公钥身份。缺材料/非法值
+  会直接失败，构建结束或失败都会恢复源码占位。
 - **手表（本地已跑通，产出已签名 HAP）**：`tools/build_watch_lite.sh release`。
   脚本按 `WATCH_SIGN_*` 环境变量 → `signing/shared` + `signing/watch` 的
-  顺序找材料，找到且**包名匹配**时自动走：未签名构建 →
+  顺序找材料，并从 `signing/phone/*.p7b`（或 `SUYUE_PHONE_APP_ID`）取得
+  **手机 APP ID**，在构建前注入 `PhonePeerConfig.g.js` 与
+  `config.json` 的 `supportLists=com.xiwei.suyue:<APP ID>`，构建后恢复源码。
+  找到且**包名匹配**时自动走：未签名构建 →
   `hap-sign-tool sign-app` → `verify-app`，产物
   `entry-default-<mode>-signed.hap`。实测结果（含包内嵌 profile 的
   解析）见 [../docs/WATCH_INSTALL.md](../docs/WATCH_INSTALL.md)。

@@ -3,8 +3,8 @@
     "bundleName": "con.xiwei.suyue.gt4",
     "vendor": "Xiwei753",
     "version": {
-      "code": 1000002,
-      "name": "0.1.2"
+      "code": 1000003,
+      "name": "0.1.3"
     }
   },
   "deviceConfig": {},
@@ -32,7 +32,7 @@
       "customizeData": [
         {
           "name": "supportLists",
-          "value": "com.xiwei.suyue:CONFIGURE_WITH_SIGNED_PHONE_FINGERPRINT",
+          "value": "com.xiwei.suyue:CONFIGURE_WITH_PHONE_APP_ID",
           "extra": ""
         }
       ]
