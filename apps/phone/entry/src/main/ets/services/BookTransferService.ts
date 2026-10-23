@@ -416,6 +416,11 @@ export class BookTransferService {
           return false;
         }
       } catch (error) {
+        // 诊断用：只记录阶段/重试次数和 SDK 返回文本（含 code），
+        // 不打印正文、密钥或设备随机 ID。206 等失败因此可定位。
+        const detail = error && error.message ? error.message : 'unknown';
+        hilog.error(0x0000, TAG,
+          'send attempt %{public}d failed: %{public}s', attempt, detail);
         this.waiters.fail(transferId, 'E_PEER_UNAVAILABLE');
         if (attempt > retry) {
           this.finishTransfer(transferId);
