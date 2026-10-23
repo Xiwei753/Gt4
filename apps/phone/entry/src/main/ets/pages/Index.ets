@@ -290,12 +290,16 @@ struct Index {
     this.sending = true;
     this.activeTransferId = '';
     this.transferText = '正在发送《' + book.title + '》……';
+    let lastFailure = '手表未确认入库';
     const ok = await this.transferService.sendBook(
       book, device, WATCH_PEER,
       {
         onProgress: (progress: TransferProgress) => {
           if (progress.transferId) {
             this.activeTransferId = progress.transferId;
+          }
+          if (progress.message) {
+            lastFailure = progress.message;
           }
           this.transferText = progress.message +
             (progress.percent > 0 &&
@@ -310,10 +314,10 @@ struct Index {
       this.getRepository().markStatus(book.bookId,
         BookStatus.SENT);
     } else {
-      this.transferText = '发送失败：手表未确认入库';
+      this.transferText = '发送失败：' + lastFailure;
       this.getRepository().markStatus(book.bookId,
         BookStatus.TRANSFER_FAILED,
-        'watch did not confirm');
+        lastFailure);
     }
     this.refresh();
   }

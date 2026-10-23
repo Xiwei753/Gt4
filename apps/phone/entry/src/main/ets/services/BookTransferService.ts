@@ -133,7 +133,7 @@ export class BookTransferService {
           v: 0, type: 'ERROR',
           transferId: transferId,
           code: 'E_CANCELLED'
-        });
+        }, 'ERROR');
     } catch (error) {
       hilog.warn(0x0000, TAG,
         'cancel notice failed');
@@ -151,16 +151,23 @@ export class BookTransferService {
 
   private async sendMessage(device: TargetDevice,
     appParam: wearEngine.P2pAppParam,
-    payload: object): Promise<void> {
+    payload: object, label: string): Promise<void> {
     const message: wearEngine.P2pMessage = {
       content: this.encoder.encodeInto(
         JSON.stringify(payload))
     };
+    hilog.info(0x0000, TAG,
+      'sendMessage %{public}s bytes=%{public}d',
+      label, message.content.length);
     // Wear Engine 的 sendMessage 返回 Promise<P2pResult>。
     // 必须等真正发送结束：旧写法调用后直接 resolve，
     // 异步失败也会被误判成成功，导致直接开始文件传输。
     const result = await this.p2pClient.sendMessage(
       device.randomId, appParam, message);
+    hilog.info(0x0000, TAG,
+      'sendMessage %{public}s result=%{public}s',
+      label, result && result.code !== undefined ?
+        String(result.code) : 'undefined');
     if (result && result.code !== undefined &&
         result.code !==
           wearEngine.P2pResultCode.COMMUNICATION_SUCCESS) {
@@ -178,9 +185,12 @@ export class BookTransferService {
     filePath: string,
     onPercent: (percent: number) => void):
   Promise<void> {
+    hilog.info(0x0000, TAG,
+      'transferFile start path=%{public}s', filePath);
     const p2pFile: wearEngine.P2pFile = {
       file: fs.openSync(filePath, fs.OpenMode.READ_ONLY)
     };
+    hilog.info(0x0000, TAG, 'transferFile opened');
     if (this.inFlight &&
         this.inFlight.transferId === transferId) {
       this.inFlight.p2pFile = p2pFile;
@@ -210,9 +220,20 @@ export class BookTransferService {
           appParam, p2pFile, (error, result) => {
             try {
               if (error) {
+                hilog.error(0x0000, TAG,
+                  'transferFile callback error=%{public}s',
+                  String(error.code));
                 settle(new Error('transfer failed: ' +
                   error.code));
                 return;
+              }
+              if (result) {
+                hilog.info(0x0000, TAG,
+                  'transferFile callback code=%{public}s progress=%{public}d',
+                  result.code !== undefined ?
+                    String(result.code) : 'undefined',
+                  typeof result.progress === 'number' ?
+                    result.progress : -1);
               }
               if (result && typeof result.progress === 'number') {
                 onPercent(result.progress);
@@ -235,6 +256,10 @@ export class BookTransferService {
             }
           });
       } catch (callError) {
+        hilog.error(0x0000, TAG,
+          'transferFile call threw: %{public}s',
+          callError instanceof Error ?
+            callError.message : String(callError));
         settle(callError instanceof Error ? callError :
           new Error('transferFile call failed'));
       }
@@ -334,7 +359,7 @@ export class BookTransferService {
             formats: ['utf8-text'], ack: true,
             chunkBytes: null, fileChannel: true
           }
-        });
+        }, 'HELLO');
 
         // BOOK_META
         progress.state = TransferState.SENDING;
@@ -356,7 +381,7 @@ export class BookTransferService {
           chunks: book.chunks,
           chunkBytes: book.chunkBytes,
           chapters: book.chapters
-        });
+        }, 'BOOK_META');
 
         // 文件通道：整本规范化文件。
         progress.message = '通过文件通道传输正文';
@@ -416,6 +441,10 @@ export class BookTransferService {
           return false;
         }
       } catch (error) {
+        hilog.error(0x0000, TAG,
+          'sendBook attempt %{public}d failed: %{public}s',
+          attempt,
+          error instanceof Error ? error.message : String(error));
         this.waiters.fail(transferId, 'E_PEER_UNAVAILABLE');
         if (attempt > retry) {
           this.finishTransfer(transferId);
