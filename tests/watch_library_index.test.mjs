@@ -53,6 +53,10 @@ const setFailMoves = (n) => writeFileSync(
 const clearFailMoves = () =>
   rmSync(sandboxFile('.fail_move_count'),
     { force: true });
+const setFailWrites = (n) => writeFileSync(
+  sandboxFile('.fail_write_count'), String(n));
+const clearFailWrites = () =>
+  rmSync(sandboxFile('.fail_write_count'), { force: true });
 
 const bookBytes = enc.encode('索引回滚测试正文。'.repeat(40));
 const meta = {
@@ -143,10 +147,11 @@ const okWritebook = (id, title) => {
   assert.equal(extractFileRef(null), null);
 }
 
-// ---- P0-4: tmp 写成功但 move 失败 → 回滚快照 ----
+// ---- P0-4 / issue #9 A4: tmp 写失败 → 回滚快照 ----
 let baselineCount = 0;
 {
   clearFailMoves();
+  clearFailWrites();
   // 先写入一本成功书籍，建立"上一份好快照"。
   const first = okWritebook('1111111111111111', '第一本');
   const added = await wait((cb) =>
@@ -157,16 +162,15 @@ let baselineCount = 0;
   assert.ok(before.some((e) => e.bookId === '1111111111111111'),
     'baseline entry must be present');
 
-  // 下一次保存：两次 move 都失败（commit 的重试
-  // 也在计数内），保存失败 → 触发回滚。
-  setFailMoves(2);
+  // 下一次保存：tmp 写入失败 → 保存失败 → 触发回滚。
+  setFailWrites(1);
   const second = okWritebook('2222222222222222', '第二本');
   const failed = await wait((cb) =>
     LibraryIndex.addBook(second, cb));
   assert.equal(failed.ok, false,
-    'save must fail while move is failing');
-  assert.equal(failed.reason, 'index_move');
-  clearFailMoves();
+    'save must fail while the tmp write is failing');
+  assert.equal(failed.reason, 'index_write');
+  clearFailWrites();
 
   // 回滚必须恢复上一份快照（第二本不得写入），
   // 且不能把失败的脏数据写回。
@@ -183,32 +187,55 @@ let baselineCount = 0;
   assert.equal(failed.rollback, undefined);
 }
 
+// ---- issue #9 A4: move 失败不得删除原索引（回退覆盖写，不丢数据）----
+{
+  clearFailWrites();
+  const first = indexOnDisk();
+  setFailMoves(3);
+  const moveBook = okWritebook('5555555555555555', '移动失败书');
+  const added = await wait((cb) =>
+    LibraryIndex.addBook(moveBook, cb));
+  clearFailMoves();
+  assert.equal(added.ok, true,
+    'commit must fall back to overwrite (never delete the original)');
+  const after = indexOnDisk();
+  assert.equal(after.length, first.length + 1);
+  assert.ok(after.some((e) => e.bookId === '5555555555555555'));
+  // 旧条目仍在（没有把原索引删掉）。
+  for (const e of first) {
+    assert.ok(after.some((x) => x.bookId === e.bookId),
+      'original entries must survive a move failure');
+  }
+}
+
 // ---- P0-4: 更新已有书籍失败 → 保留旧元数据 ----
 {
+  const before = indexOnDisk();
   const updated = okWritebook('1111111111111111', '改名后的第二版');
-  setFailMoves(2);
+  setFailWrites(1);
   const failed = await wait((cb) =>
     LibraryIndex.addBook(updated, cb));
-  clearFailMoves();
+  clearFailWrites();
   assert.equal(failed.ok, false);
   const after = indexOnDisk();
-  assert.equal(after.length, baselineCount);
+  assert.equal(after.length, before.length);
   const entry = after.find((e) => e.bookId === '1111111111111111');
   assert.equal(entry.title, '第一本',
     'failed update must keep the previous title');
 }
 
-// ---- P0-4: 目标不可覆盖 → 删除后重试成功 ----
+// ---- issue #9 A4: 目标不可覆盖 → move 失败，改为覆盖写成功 ----
 {
+  const before = indexOnDisk();
   writeFileSync(sandboxFile('.no_overwrite'), '');
   const third = okWritebook('3333333333333333', '第三本');
   const added = await wait((cb) =>
     LibraryIndex.addBook(third, cb));
   rmSync(sandboxFile('.no_overwrite'), { force: true });
   assert.equal(added.ok, true,
-    'commit must fall back to delete+move when overwrite is unsupported');
+    'commit must fall back to overwrite when move cannot replace the target');
   const after = indexOnDisk();
-  assert.equal(after.length, baselineCount + 1);
+  assert.equal(after.length, before.length + 1);
   assert.ok(after.some((e) => e.bookId === '3333333333333333'));
 }
 

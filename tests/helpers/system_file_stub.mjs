@@ -30,9 +30,13 @@ export default {
     catch (e) { fail(o.fail); }
   },
   mkdir(o) {
-    try { mkdirSync(resolve(o.uri),
-      { recursive: !!o.recursive }); ok(o.success); }
-    catch (e) { fail(o.fail, -1); }
+    try {
+      mkdirSync(resolve(o.uri),
+        { recursive: !!o.recursive }); ok(o.success);
+    } catch (e) {
+      // 目录已存在等 → 300（I/O），与真机 mkdir 语义一致。
+      fail(o.fail, e && e.code === 'EEXIST' ? 300 : -1);
+    }
   },
   readText(o) {
     try {
@@ -58,11 +62,20 @@ export default {
   },
   writeText(o) {
     try {
+      // 失败注入（issue #9 数据完整性回归）：N 次 writeText 失败。
+      const wf = ROOT + '/.fail_write_count';
+      if (existsSync(wf)) {
+        const n = Number(readFileSync(wf, 'utf8'));
+        if (n > 0) {
+          writeFileSync(wf, String(n - 1));
+          throw new Error('injected write failure');
+        }
+      }
       const p = resolve(o.uri);
       mkdirSync(dirname(p), { recursive: true });
       writeFileSync(p, o.text, o.append ? 'utf8' : undefined);
       ok(o.success);
-    } catch (e) { fail(o.fail, -1); }
+    } catch (e) { fail(o.fail, 300); }
   },
   readArrayBuffer(o) {
     try {

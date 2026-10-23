@@ -58,10 +58,11 @@ async function list() {
   assert.deepEqual(books, [], 'first install must be an empty shelf');
   assert.equal(diag.state, 'missing');
   assert.equal(diag.code, 301);
-  assert.equal(diag.api, 'readArrayBuffer');
+  assert.equal(diag.api, 'access',
+    'a genuinely missing index is detected by file.access (301)');
 }
 
-// ---- 2. 小索引（两本）：按顺序加载 + ok ----
+// ---- 2. 小索引（两本）：按顺序加载 + ok（简单 readText）----
 {
   reset();
   seed([meta('1111111111111111', '第一本'),
@@ -72,6 +73,8 @@ async function list() {
     ['1111111111111111', '2222222222222222']);
   assert.deepEqual(books.map((b) => b.title), ['第一本', '第二本']);
   assert.equal(diag.state, 'ok');
+  assert.equal(diag.api, 'readText',
+    'a small index must use the upstream readText({uri}) style');
 }
 
 // ---- 3. 索引 > 4096 字节，且中文标题正好跨分块边界 ----
@@ -109,20 +112,20 @@ async function list() {
   const entries = [meta('4444444444444444', '保留')];
   seed(entries);
   const before = readFileSync(booksJson, 'utf8');
-  const original = systemFile.readArrayBuffer;
-  systemFile.readArrayBuffer = (o) => o.fail && o.fail({}, 202);
+  const original = systemFile.readText;
+  systemFile.readText = (o) => o.fail && o.fail({}, 202);
   try {
     const { books, diag } = await list();
     assert.deepEqual(books, []);
     assert.equal(diag.state, 'error');
     assert.equal(diag.code, 202);
-    assert.equal(diag.api, 'readArrayBuffer');
+    assert.equal(diag.api, 'readText');
     assert.equal(existsSync(booksJson), true,
       'an index read error must not delete books.json');
     assert.equal(readFileSync(booksJson, 'utf8'), before,
       'an index read error must not rewrite/clear the index');
   } finally {
-    systemFile.readArrayBuffer = original;
+    systemFile.readText = original;
   }
 }
 
@@ -130,30 +133,33 @@ async function list() {
 {
   reset();
   seed([meta('5555555555555555', '保留')]);
-  const original = systemFile.readArrayBuffer;
-  systemFile.readArrayBuffer = (o) => o.fail && o.fail({}, 300);
+  const original = systemFile.readText;
+  systemFile.readText = (o) => o.fail && o.fail({}, 300);
   try {
     const { diag } = await list();
     assert.equal(diag.state, 'error');
     assert.equal(diag.code, 300);
   } finally {
-    systemFile.readArrayBuffer = original;
+    systemFile.readText = original;
   }
 }
 
-// ---- 6. 读索引不回调 → 队列看门狗释放，后续读取仍能完成 ----
+// ---- 6. 读索引不回调 → 队列看门狗释放，并回报结构化超时 ----
 {
   reset();
   seed([meta('6666666666666666', '后续')]);
   libraryIndex.setQueueTimeout(40);
-  const original = systemFile.readArrayBuffer;
-  let firstCalled = false;
-  systemFile.readArrayBuffer = () => {};
-  libraryIndex.listBooks(() => { firstCalled = true; }, () => {});
-  await new Promise((r) => setTimeout(r, 120));
-  assert.equal(firstCalled, false,
-    'a hung index read must not fake a callback');
-  systemFile.readArrayBuffer = original;
+  const original = systemFile.readText;
+  let firstDiag = null;
+  let firstBooks = null;
+  systemFile.readText = () => {};
+  libraryIndex.listBooks((b) => { firstBooks = b; },
+    (d) => { firstDiag = d; });
+  await new Promise((r) => setTimeout(r, 150));
+  assert.ok(firstDiag && firstDiag.state === 'error',
+    'a hung index read must report a structured error, not hang');
+  assert.deepEqual(firstBooks, []);
+  systemFile.readText = original;
   const books = await settle((done) =>
     libraryIndex.listBooks(done, () => {}));
   assert.equal(books.length, 1,
@@ -175,6 +181,25 @@ async function list() {
     'the stub must reproduce the real >4 KB readText = 302 limit');
 }
 
-console.info('PASS: index read is chunked, distinguishes 301/202/' +
-  '300/timeout, survives >4 KB and multibyte chunk boundaries ' +
-  '(issue #8)');
+// ---- 8. readText 报 302 时自动回退分块 readArrayBuffer ----
+{
+  reset();
+  seed([meta('8888888888888888', '回退')]);
+  writeFileSync(join(sandbox, '.readtext_302'), '');
+  try {
+    const { books, diag } = await list();
+    assert.equal(books.length, 1,
+      'a 302 on the small readText path must fall back to chunked read');
+    assert.equal(books[0].bookId, '8888888888888888');
+    assert.equal(diag.state, 'ok');
+    assert.equal(diag.api, 'readArrayBuffer',
+      'the 302 fallback must report readArrayBuffer');
+  } finally {
+    rmSync(join(sandbox, '.readtext_302'), { force: true });
+  }
+}
+
+console.info('PASS: index read is probe-first (access/get), uses ' +
+  'small readText then chunked readArrayBuffer, distinguishes ' +
+  '301/202/300/timeout, 302-fallback, survives > 4 KB and ' +
+  'multibyte chunk boundaries (issue #8/#9)');
