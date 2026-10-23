@@ -7,10 +7,13 @@ name: Phone Stage HAP build (self-hosted DevEco required)
 #   keyAlias/keyPassword/storePassword: 口令
 #   signAlg: 默认 SHA256withECDSA
 #   fingerprints: {"phone": 64位hex, "watch": 64位hex}
-#   —— 手表证书指纹注入手机侧 PeerIdentityConfig.g.ts，
-#     作为 remoteApp 用于发送与回执校验。材料只在
-#     构建生命周期内存在，结束步骤（if: always()）
-#     统一清理。
+#   —— fingerprints.watch 必须是**当前 GT 4 HAP 签名证书的 DER-SHA256**，
+#     不是手机 HAP/APK 指纹、HAP 文件哈希或公钥哈希。两端 profile
+#     可能复用同一张账号级证书，摘要相同是允许的；身份按
+#     bundleName + fingerprint 区分。
+#   手表证书指纹注入手机侧 PeerIdentityConfig.g.ts，作为 remoteApp
+#   用于发送与回执校验；最终 HAP 的 ets/modules.abc 会再核对一次。
+#   材料只在构建生命周期内存在，结束步骤（if: always()）统一清理。
 on:
   push:
     branches: [main, 'auto-issue-*']
@@ -52,9 +55,31 @@ jobs:
             --build-profile apps/phone/build-profile.json5 \
             --identity-file apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts \
             --identity-var INJECTED_WATCH_FINGERPRINT \
-            --fingerprint-key watch
+            --fingerprint-key watch \
+            --fingerprint-format hex64
+
+      - name: Export watch fingerprint for build-time cross-check
+        id: watch-fingerprint
+        env:
+          PHONE_SIGNING_MATERIAL: ${{ secrets.PHONE_SIGNING_MATERIAL }}
+        run: |
+          FP="$(python3 - <<'PY'
+          import json, os
+          material = json.loads(os.environ["PHONE_SIGNING_MATERIAL"])
+          value = str((material.get("fingerprints") or {}).get("watch") or "")
+          print(value.strip().lower())
+          PY
+          )"
+          if ! printf '%s' "$FP" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "ERROR: fingerprints.watch 不是 64 位 hex 证书 SHA-256。" >&2
+            echo "必须是当前 GT 4 HAP 的签名证书 DER-SHA256，不能用手机 HAP/APK 指纹。" >&2
+            exit 1
+          fi
+          echo "fingerprint=$FP" >> "$GITHUB_OUTPUT"
 
       - name: Build Stage HAP
+        env:
+          SUYUE_WATCH_FINGERPRINT: ${{ steps.watch-fingerprint.outputs.fingerprint }}
         run: tools/build_phone_hap.sh release
 
       - name: Locate HAP

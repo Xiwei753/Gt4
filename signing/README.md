@@ -88,6 +88,12 @@ AGC 里建手表应用时把 `com` 打成了 `con`，**已确认保留**。原�
 
 ## 用法
 
+- **手机（本地，issue #12）**：`tools/build_phone_hap.sh debug` 会读取
+  `signing/watch/*.p7b` 内嵌的 `development-certificate`，核对
+  `bundle-name = con.xiwei.suyue.gt4` 后取 DER-SHA256 注入手机
+  `PeerIdentityConfig.g.ts`；也可用 `SUYUE_WATCH_FINGERPRINT=<64位hex>`
+  显式指定并与材料交叉核对。缺材料/非法指纹会直接失败，构建结束或
+  失败都会恢复源码占位。
 - **手表（本地已跑通，产出已签名 HAP）**：`tools/build_watch_lite.sh release`。
   脚本按 `WATCH_SIGN_*` 环境变量 → `signing/shared` + `signing/watch` 的
   顺序找材料，找到且**包名匹配**时自动走：未签名构建 →

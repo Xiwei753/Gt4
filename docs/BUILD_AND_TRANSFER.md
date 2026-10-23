@@ -10,7 +10,7 @@
 | 项目入口 | `apps/watch/entry/src/main/config.json` | `apps/phone/entry/src/main/module.json5` |
 | 构建 | 需要匹配 Lite Wearable 的旧式/兼容 SDK、Hvigor Legacy 或对应 DevEco 环境 | 适配 Stage 的 Hvigor + 鸿蒙 CLI |
 | 安装 | 需先验证开发者注册、签名和 DevEco Assistant/HDEA 手机中转安装路径 | HAP 可通过 hdc 安装到手机 |
-| CI 状态 | 已建立 Lite HAP 打包 workflow（自托管 DevEco runner，未实际运行）；尚未产出任何 HAP | 已建立 Stage HAP 打包 workflow（自托管 DevEco runner，未实际运行）；尚未产出任何 HAP |
+| CI 状态 | 已建立 Lite HAP 打包 workflow（自托管 DevEco runner，未实际运行）；尚未产出任何 HAP | 手机 Stage HAP 已本机真实编译/签名/安装（issue #12）；自托管 CI 未实际运行 |
 
 ## 为什么不直接搬其他端内核
 
@@ -59,8 +59,36 @@ hdc install -r <signed.hap>      -> install bundle successfully
 「发送到 GT 4」曾显示 `设备发现失败：Wear Engine 不可用`——这是 issue #5 之前的旧文案
 （把「空列表 / 异常」一律当成「Wear Engine 不可用」）。现已改为：先显示 Wear Engine
 **授权状态**并提供「授权手表访问」入口，未授权 / 被拒 / 未审批 / 空列表分别给出可区分
-文案与错误码（`WearAuthPolicy.js` 分类）。本轮仍**未注入手表指纹**，按设计传书处于
-禁用状态，不是传书已打通。**双端互通仍未验证。**
+文案与错误码（`WearAuthPolicy.js` 分类）。
+
+2026-10-23（issue #12）本地构建已从真实手表签名材料解析并注入指纹。
+首次注入构建（已用 hdc 覆盖安装并启动）：
+
+```text
+source=signing/watch/debug.p7b (bundle-name=con.xiwei.suyue.gt4)
+certificate DER-SHA256=fbdee2e1…a2701c1（完整值由本地证书计算）
+WATCH_FINGERPRINT_INJECTED=yes
+METADATA_OK client_id=<本地注入值>
+COMPILED_STRING_OK entry=ets/modules.abc count=1
+HAP=entry-default-debug-signed.hap size=317941 signed=yes
+sha256=98775693a84d940474ac20c4a7fb7dc04b942e24ab41332d970a8e7b361dd34c
+```
+
+最终代码复核构建（仅本地；此后未再操作手机）：
+
+```text
+WATCH_FINGERPRINT_INJECTED=yes bundle=con.xiwei.suyue.gt4
+METADATA_OK client_id=6917618613178762508
+COMPILED_STRING_OK entry=ets/modules.abc count=1
+HAP_OK ... size=317945 mode=debug signed=yes
+sha256=09b3bd8a82f44d0ab3930a5b68536c3670025422d1964c7871fc297469c7abc6
+```
+
+两次构建走同一条“解析证书 → 注入 → 编译 → 签名 → 最终 HAP 校验”路径；
+最终复核 HAP 未再次安装。截屏时手机正被用户使用，没有取得素阅界面
+证据，因此**不能确认**「手表签名指纹未配置」提示已消失、回执监听已
+继续；真机传书也没有拿到 GT 4 的 `RESULT ok=true`。
+**双端互通仍未验证，issue #12 暂不可关闭。**
 
 ## 实施状态（auto-issue-1 分支）
 
@@ -76,6 +104,7 @@ hdc install -r <signed.hap>      -> install bundle successfully
 | 复核轮 2 | issue #1 第三轮施工单修复 | 源码完成；新增 waiter/索引/注入三类失败回归；HAP 与真机仍阻断 |
 | issue #5 | 手机 Wear Engine 授权 / 结构化错误码 | 源码完成；真机互通待验证 |
 | issue #6 | Client ID 元数据 + 设备发现重试治理 | 源码完成；本机签名 HAP 校验 `METADATA_OK`；Pocket 2 复测待完成 |
+| issue #12 | 本地 HAP 自动注入 GT4 证书指纹 | 构建/签名/安装完成，`COMPILED_STRING_OK`；素阅 UI 与 GT4 `RESULT ok=true` 待用户/真机确认 |
 
 ### 第三轮修复明细（第二轮复核施工单）
 
@@ -187,8 +216,9 @@ GT 4 46mm 与 Pocket 2 真机、Wear Engine 文件通道回调
 **仍阻断真机验收的环境**：自托管 `hmos-deveco` runner、
 `WATCH_SIGNING_MATERIAL`/`PHONE_SIGNING_MATERIAL`
 Secrets、GT 4 46mm 与 Pocket 2 真机、Wear Engine
-文件通道回调字段名（`data.file`）真机核对、双端证书
-指纹的 CI 配置。
+文件通道回调字段名（`data.file`）真机核对。手机侧证书
+指纹的本地注入与 CI hex64 校验已实现（issue #12），但
+自托管 runner 尚未实跑，真机 UI 与 `RESULT ok=true` 仍缺。
 
 ### issue #6 修复明细：Wear Engine Client ID 元数据 + 设备发现重试治理
 
@@ -234,6 +264,54 @@ Secrets、GT 4 46mm 与 Pocket 2 真机、Wear Engine
 **真机复测（Pocket 2 上 `getConnectedDevices` 不再报 `1008509999`）
 仍待完成**，查到设备列表前不宣称已发现 GT 4。
 
+### issue #12 修复明细：本地 HAP 自动注入 GT 4 证书指纹
+
+**根因**：`PeerIdentityConfig.g.ts` 的
+`INJECTED_WATCH_FINGERPRINT` 是仓库空占位；本地
+`tools/build_phone_hap.sh` 只注入 Client ID，不解析手表证书，
+所以构建出的 HAP 必然让 `isConfigured(WATCH_PEER)` 为 false，
+界面显示「手表签名指纹未配置」并禁用发送。
+
+**修复**：
+
+1. 新增 `tools/extract_watch_fingerprint.py`：
+   - 优先读 `signing/watch/*.p7b` 的
+     `bundle-info.development-certificate`，并核对
+     `bundle-name == con.xiwei.suyue.gt4`；
+   - 也支持 PEM/DER 证书或证书链，取唯一终端证书
+     （`CA:FALSE`）；有 profile 时要求链中唯一匹配。
+     多候选无法确定直接失败，**不静默取第一张**；
+   - 支持 `SUYUE_WATCH_FINGERPRINT` 显式值，并与材料交叉核对；
+   - 只接受/输出小写、无冒号的 64 位 hex DER-SHA256；
+     不取 HAP 文件哈希、公钥哈希、profile 文件哈希或随机值。
+2. `tools/build_phone_hap.sh` 在 `assembleHap` **之前**解析并
+   调用 `tools/inject_signing.py --fingerprint-value ... --fingerprint-format hex64`
+   注入 `INJECTED_WATCH_FINGERPRINT`；与 Client ID 共用
+   `restore_sources` EXIT trap，构建成功或失败都恢复源码占位。
+   缺手表证书/profile、指纹非法、注入失败时在产出可安装 HAP 前失败。
+3. `tests/build_artifact_check.sh` 新增
+   `--expect-compiled-string`：只扫描最终 HAP 的
+   `ets/modules.abc`（不扫可能回显源码的 `sourceMaps.map`），
+   确认指纹真的进入 ArkTS 编译产物；同时保留
+   `--expect-metadata client_id=...`。
+4. CI `phone_hap.yml` 以 `--fingerprint-format hex64` 校验
+   `fingerprints.watch`，并导出给构建脚本交叉核对；注释明确
+   它必须是当前 GT4 HAP 的签名证书 DER-SHA256，不是手机 APK。
+   两端复用同一张账号级证书时摘要相同是允许的，身份按
+   `bundleName + fingerprint` 区分。
+5. 回归测试：`tests/watch_fingerprint.test.mjs`
+   （PEM/DER/证书链/ p7b/歧义/bundle/显式值）、
+   `tests/phone-artifact-check.test.mjs`（ABC 正例、source map
+   假阳性、缺 ABC、client_id）、`tests/inject_signing.test.mjs`
+   （本地直注与互斥）、`tests/source-contract.test.mjs`
+   （构建契约、trap、门禁）。
+
+**边界**：本修复只解决“手机 HAP 里没有手表证书指纹”的本地构建
+阻断，不改变 Wear Engine 授权、发现、重试或传输协议。手表端
+`supportLists` 仍按 `tools/inject_signing.py` 注入手机证书指纹；
+本次没有重打手表 HAP。真机 UI 与传书结果仍未确认，不能把
+“构建/安装成功”当成“传书打通”。
+
 ## 现有源码不能直接认定兼容的地方
 
 - `apps/watch/build-profile.json5` 暂时采用轻智能手表示例的 `6.1.1(24)` 模板数值，但**没有确认为 GT 4 开发安装实际可用的版本**。
@@ -244,7 +322,7 @@ Secrets、GT 4 46mm 与 Pocket 2 真机、Wear Engine
 不静默把占位值当真值用。
 - 手表文件通道依赖 Wear Engine 回调给出的文件路径字段：实现按 `file`/`name`/`uri`/`filePath` 逐字段探测并记录来源，**字段名待真机核对**。
 - 手表单本在途互斥（`E_BUSY`）：并发传书会被拒绝，手机侧同样限制并发发送。
-- 证书指纹格式（hex / 编码字符串）以 GT4 Lite SDK 实测为准；当前注入脚本默认宽松校验，可用 `--fingerprint-format hex64` 收紧。
+- 手机侧证书指纹固定为 64 位 hex DER-SHA256（issue #12，构建脚本与 CI 均用 `--fingerprint-format hex64`）；手表 `supportLists` / `PhonePeerConfig.g.js` 的格式仍以 GT4 Lite SDK 实测为准，注入脚本默认宽松校验。
 - `tests/build_artifact_check.sh` 只做容器/清单级检查，**不构成证书签名验证**；手机包验签由 workflow 的 `hap-sign-tool verify-app` 步骤负责（需要真实工具链）。手表 Lite 单 BIN 的 `verify-app` 在本机对 0xBE 格式走 ELF 路径、必然失败，故由 `tools/sign_hap.sh` 记为显式 WARNING（`VERIFY_UNSUPPORTED_FOR_LITE_BIN`），**不当作验签通过**；详见 `docs/WATCH_INSTALL.md`。
 - 目前只有 Node 测试（`tests/`）。Node 通过不代表 Lite JS 编译器/ArkTS 编译器通过，也不代表 Wear Engine 真机互通。
 - 两套应用包名保留历史命名，以避免与签名注册和传输配置脱节。

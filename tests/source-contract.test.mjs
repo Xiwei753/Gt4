@@ -79,7 +79,12 @@ assert.ok(phoneIndexFull.includes('clearRetryTimer'),
 assert.ok(phoneDeviceService.includes('deviceQueryInFlight'),
   'device service must serialize device discovery (single in-flight query)');
 assert.ok(read('README.md').startsWith('# 素阅 · suyue'));
-assert.ok(read('docs/BUILD_AND_TRANSFER.md').includes('尚未产出任何 HAP'));
+const buildDoc = read('docs/BUILD_AND_TRANSFER.md');
+assert.ok(buildDoc.includes('issue #12') &&
+  buildDoc.includes('COMPILED_STRING_OK'),
+  'build docs must record the issue #12 artifact identity check');
+assert.ok(buildDoc.includes('暂不可关闭'),
+  'build docs must not claim real-device transfer is complete');
 const protocolReadme = read('shared/protocol/README.md');
 for (const t of ['BOOK_META', 'CHUNK', 'ACK', 'FINISH', 'RESULT',
   'RESUME', 'ERROR', 'E_MISSING_CHUNKS', 'E_DIGEST_MISMATCH']) {
@@ -538,6 +543,47 @@ for (const script of [watchBuild, phoneBuild]) {
   assert.ok(script.includes('entry-default-$MODE-'),
     'build must pick the HAP matching the requested mode');
 }
+
+// issue #12：手机本地构建必须从真实手表签名材料解析证书指纹，
+// 在 assembleHap 前注入，并在最终 installable HAP 的 ABC 里复核。
+const watchFingerprintTool = read(
+  'tools/extract_watch_fingerprint.py');
+assert.ok(watchFingerprintTool.includes('development-certificate'),
+  'watch fingerprint extractor must read the profile development cert');
+assert.ok(watchFingerprintTool.includes('bundle-name'),
+  'watch fingerprint extractor must verify the watch bundle name');
+assert.ok(watchFingerprintTool.includes('CA:FALSE'),
+  'watch fingerprint extractor must identify an end-entity cert');
+assert.ok(watchFingerprintTool.includes('不能静默取第一张'),
+  'ambiguous chains must fail instead of picking the first cert');
+assert.ok(phoneBuild.includes('extract_watch_fingerprint.py'),
+  'phone build must resolve the watch fingerprint from signing material');
+assert.ok(phoneBuild.includes('SUYUE_WATCH_FINGERPRINT'),
+  'phone build must allow an explicitly verified fingerprint');
+assert.ok(phoneBuild.includes('INJECTED_WATCH_FINGERPRINT'),
+  'phone build must inject the watch peer fingerprint');
+assert.ok(phoneBuild.includes('IDENTITY_BACKUP') &&
+  phoneBuild.includes('restore_sources'),
+  'phone build must restore PeerIdentityConfig.g.ts via trap');
+assert.ok(phoneBuild.includes('--expect-compiled-string'),
+  'phone build must verify the fingerprint in the final HAP');
+assert.ok(artifactCheck.includes('--expect-compiled-string') &&
+  artifactCheck.includes('ets/modules.abc'),
+  'artifact check must inspect compiled ArkTS bytecode, not just source');
+assert.ok(read('tools/inject_signing.py').includes(
+  '--fingerprint-value'),
+  'local and CI must share one fingerprint injection/validation path');
+assert.ok(phoneWf.includes('--fingerprint-format hex64'),
+  'phone CI must enforce the 64-hex certificate fingerprint format');
+assert.ok(phoneWf.includes('fingerprints.watch') &&
+  phoneWf.includes('SUYUE_WATCH_FINGERPRINT'),
+  'phone CI must pass the verified watch fingerprint to the build cross-check');
+assert.ok(phoneShelf.includes('手表签名指纹未配置') &&
+  phoneShelf.includes('isConfigured(WATCH_PEER)'),
+  'source code must keep the fail-closed send gate');
+assert.ok(read('apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts')
+  .includes("INJECTED_WATCH_FINGERPRINT = ''"),
+  'repo must keep the empty watch fingerprint placeholder');
 
 // P1-9：transferFile 句柄只在终态关闭。
 assert.ok(transferService.includes('let settled = false'),

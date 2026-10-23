@@ -2,7 +2,7 @@
 
 独立 **ArkTS Stage** 工程，优先面向 Pocket 2（HarmonyOS 7 / API 26）。
 
-## 已实现（源码级，未在 DevEco 编译/真机验证）
+## 已实现（源码级；HAP 已本地编译/签名/安装，真机传书待验证）
 
 - `entry/src/main/ets/pages/Index.ets`：真实书库列表 + 文档选择器导入；
   选择文件 ≠ 导入成功，只有沙箱复制、解析、登记后才显示 `ready`。
@@ -50,15 +50,29 @@
   `transferFile` 与回执时序均**待验证**。授权入口在素阅应用内
   「发送到 GT 4」卡片，**不需要**（也找不到）走运动健康的
   「设备能力开放 / 应用授权」入口。
-- 手机签名指纹读取（当前为空，发送保持禁用）。
-- 在 Pocket 2 上编译、签名、安装与真机验证（当前没有编译产物）。
+- **手机侧手表证书指纹已改为构建期解析/注入**：本地
+  `tools/build_phone_hap.sh` 从 `signing/watch/debug.p7b` 的
+  `bundle-info.development-certificate` 取 GT4 证书 SHA-256
+  （或用 `SUYUE_WATCH_FINGERPRINT` 显式指定），校验 64 位 hex、
+  bundle 名和证书链后写入 `PeerIdentityConfig.g.ts`，构建结束/失败
+  自动恢复。缺材料、非法值或多候选无法确定时构建直接失败，不再产出
+  空指纹 HAP。
+- 含指纹的 HAP 已覆盖安装到 Pocket 2；**用户尚未主动打开确认**
+  「手表签名指纹未配置」提示是否消失、回执监听是否继续。截屏验证时
+  手机正被用户使用，未取得素阅界面证据，不能据此宣称已解决。
+- 真正传书仍需 GT 4 回 `RESULT ok=true`；当前**未验证**。
 - GBK 解码在目标系统的实际可用性属于**待验证**项。
 
 ## 构建
 
 - `tools/build_phone_hap.sh`（需要 DevEco `hvigorw` + API 26 SDK）。
+  本地默认从 `signing/watch/*.p7b` 取手表证书指纹，也支持
+  `SUYUE_WATCH_FINGERPRINT=<64位hex>` 显式指定；同样会在最终签名 HAP
+  的 `ets/modules.abc` 中核对指纹和 `client_id` 元数据，缺一即失败。
 - `.github/workflows/phone_hap.yml`：自托管 `hmos-deveco` runner，
-  签名材料经 `secrets.PHONE_SIGNING_MATERIAL` 注入。
+  签名材料经 `secrets.PHONE_SIGNING_MATERIAL` 注入；`fingerprints.watch`
+  必须是当前 GT4 HAP 的签名证书 SHA-256（不是手机 APK），CI 以
+  `--fingerprint-format hex64` 校验并传给构建脚本交叉核对。
 
 - UI：`entry/src/main/ets/pages/Index.ets`
 - Ability：`entry/src/main/ets/entryability/EntryAbility.ets`

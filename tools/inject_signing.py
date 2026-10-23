@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""CI 签名与身份注入（施工单 P1-7 / 第二轮 P0-1）。
+"""签名材料落盘与身份注入（施工单 P1-7 / 第二轮 P0-1 / issue #12）。
 
-把 Secrets 中的签名材料（JSON：base64 编码的
-storeFile/certpath/profile + 别名/口令 + 双端
-证书指纹）落盘到构建目录，并把：
+两种入口共用同一套指纹校验与文件注入：
+
+  * ``--material-json``：CI 把 Secrets 中的签名材料（JSON：base64 编码的
+    storeFile/certpath/profile + 别名/口令 + 双端证书指纹）落盘，并把
+    签名配置/身份写入构建目录；
+  * ``--fingerprint-value``：本地构建已从证书/profile 解析出指纹时，
+    只做校验并写入身份文件，不落盘任何签名材料、不改 build-profile。
+
+材料模式会把：
 
   1. 真实 signingConfigs 写入 build-profile.json5；
   2. 对端证书指纹写入身份配置文件
@@ -56,6 +62,10 @@ def validate_fingerprint(value, fmt, where):
              '（--fingerprint-format hex64）' % where)
     if fmt == 'raw' and len(text) > 256:
         fail('%s 指纹长度异常（>256）' % where)
+    # 证书 SHA-256 的线上格式统一为小写、无分隔符；显式值也不应把
+    # 大写/显示格式带进最终身份常量。
+    if fmt == 'hex64':
+        return text.lower()
     return text
 
 
@@ -85,12 +95,27 @@ def inject_manifest(path, peer_bundle, fingerprint):
         handle.write('\n')
 
 
+def inject_identity(path, identity_var, fingerprint):
+    with open(path, 'r', encoding='utf-8') as handle:
+        identity_text = handle.read()
+    pattern = "export const %s = '';" % identity_var
+    if pattern not in identity_text:
+        fail('身份文件中未找到 %s 的空占位' % identity_var)
+    identity_text = identity_text.replace(
+        pattern,
+        'export const %s = \'%s\';' % (identity_var, fingerprint))
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write(identity_text)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--material-json', required=True,
+    ap.add_argument('--material-json', default='',
                     help='SIGNING_MATERIAL 环境变量（JSON）')
-    ap.add_argument('--signing-dir', required=True,
-                    help='材料落盘目录（跨 step 持久）')
+    ap.add_argument('--fingerprint-value', default='',
+                    help='已确证的 64 位 hex 指纹；本地构建只注入身份时使用')
+    ap.add_argument('--signing-dir', default='',
+                    help='材料落盘目录（跨 step 持久，仅材料模式需要）')
     ap.add_argument('--build-profile', default='',
                     help='要写入 signingConfigs 的 build-profile.json5')
     ap.add_argument('--external-signing', action='store_true',
@@ -112,6 +137,37 @@ def main():
                     help='supportLists 中的对端（手机）包名')
     args = ap.parse_args()
 
+    if args.material_json and args.fingerprint_value:
+        fail('--material-json 与 --fingerprint-value 不能同时使用')
+    if not args.material_json and not args.fingerprint_value:
+        fail('必须提供 --material-json 或 --fingerprint-value')
+
+    # 本地构建：签名证书/profile 已在 build_phone_hap.sh 中解析，
+    # 这里只复用同一套 hex64 校验与占位替换，不伪造材料。
+    if args.fingerprint_value:
+        fingerprint = validate_fingerprint(
+            args.fingerprint_value,
+            args.fingerprint_format,
+            '指纹')
+        inject_identity(args.identity_file,
+                        args.identity_var,
+                        fingerprint)
+        if args.manifest:
+            if not args.manifest_peer_bundle:
+                fail('--manifest 需要同时提供 '
+                     '--manifest-peer-bundle')
+            inject_manifest(args.manifest,
+                            args.manifest_peer_bundle,
+                            fingerprint)
+        print('fingerprint %s injected (format=%s)%s'
+              % (args.fingerprint_key,
+                 args.fingerprint_format,
+                 '; supportLists updated'
+                 if args.manifest else ''))
+        return
+
+    if not args.signing_dir:
+        fail('材料模式必须提供 --signing-dir')
     try:
         material = json.loads(args.material_json)
     except ValueError as exc:
@@ -194,21 +250,9 @@ def main():
         fingerprints.get(args.fingerprint_key),
         args.fingerprint_format,
         'fingerprints.%s' % args.fingerprint_key)
-    with open(args.identity_file, 'r',
-              encoding='utf-8') as handle:
-        identity_text = handle.read()
-    pattern = ("export const %s = '';" %
-               args.identity_var)
-    if pattern not in identity_text:
-        fail('身份文件中未找到 %s 的空占位' %
-             args.identity_var)
-    identity_text = identity_text.replace(
-        pattern,
-        'export const %s = \'%s\';' % (
-            args.identity_var, fingerprint))
-    with open(args.identity_file, 'w',
-              encoding='utf-8') as handle:
-        handle.write(identity_text)
+    inject_identity(args.identity_file,
+                    args.identity_var,
+                    fingerprint)
 
     # 手表 Manifest：supportLists 必须与真实
     # 手机证书指纹一致，否则手表不会授权

@@ -176,6 +176,57 @@ const { createRequire } = await import('node:module');
   assert.equal(loaded.stdout, "a' b$\\\\c");
 }
 
+// ---- 8. 本地构建直接注入指纹（issue #12）----
+// build_phone_hap.sh 已从证书/profile 解析出指纹，只复用这里的
+// hex64 校验与空占位替换；不应要求伪造 material JSON。
+{
+  const hex = '12'.repeat(32);
+  const dir = join(tmp, 'direct');
+  mkdirSync(dir, { recursive: true });
+  const identity = join(dir, 'PeerIdentityConfig.g.ts');
+  copyFileSync(join(REPO,
+    'apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts'),
+    identity);
+  const args = [
+    join(REPO, 'tools/inject_signing.py'),
+    '--fingerprint-value', hex,
+    '--identity-file', identity,
+    '--identity-var', 'INJECTED_WATCH_FINGERPRINT',
+    '--fingerprint-key', 'watch',
+    '--fingerprint-format', 'hex64'
+  ];
+  const run = spawnSync('python3', args, { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  const afterDirect = readFileSync(identity, 'utf8');
+  assert.ok(afterDirect.includes(
+    "export const INJECTED_WATCH_FINGERPRINT = '" + hex + "';"),
+    'direct mode must replace the empty placeholder');
+
+  const bad = spawnSync('python3', [
+    join(REPO, 'tools/inject_signing.py'),
+    '--fingerprint-value', 'not-a-cert-sha256',
+    '--identity-file', identity,
+    '--identity-var', 'INJECTED_WATCH_FINGERPRINT',
+    '--fingerprint-key', 'watch',
+    '--fingerprint-format', 'hex64'
+  ], { encoding: 'utf8' });
+  assert.notEqual(bad.status, 0,
+    'direct mode must enforce hex64');
+  assert.equal(readFileSync(identity, 'utf8'), afterDirect,
+    'failed validation must not mutate the identity file');
+
+  const both = spawnSync('python3', [
+    join(REPO, 'tools/inject_signing.py'),
+    '--material-json', material(hex),
+    '--fingerprint-value', hex,
+    '--identity-file', identity,
+    '--identity-var', 'INJECTED_WATCH_FINGERPRINT',
+    '--fingerprint-key', 'watch'
+  ], { encoding: 'utf8' });
+  assert.notEqual(both.status, 0,
+    'material mode and direct fingerprint mode must be exclusive');
+}
+
 console.info('PASS: signing injection (manifest ' +
   'supportLists, placeholder guard, fingerprint format ' +
-  'policy, signingConfigs, identity file)');
+  'policy, signingConfigs, identity file, direct fingerprint value)');

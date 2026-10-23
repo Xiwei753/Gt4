@@ -25,7 +25,7 @@
 # （workflow 中的 verify-signature 步骤）。
 set -euo pipefail
 
-HAP="${1:?usage: build_artifact_check.sh <path-to.hap> [--bundle ID] [--device TYPE] [--mode debug|release] [--expect-fingerprint VALUE] [--expect-books-report PATH]}"
+HAP="${1:?usage: build_artifact_check.sh <path-to.hap> [--bundle ID] [--device TYPE] [--mode debug|release] [--expect-fingerprint VALUE] [--expect-compiled-string VALUE] [--expect-books-report PATH]}"
 shift || true
 
 BUNDLE=""
@@ -36,6 +36,7 @@ EXPECT_BIN_SHA256=""
 SOURCE_MANIFEST=""
 EXPECT_BOOKS_REPORT=""
 EXPECT_METADATA=()
+EXPECT_COMPILED_STRINGS=()
 SINGLE_BIN=0
 MANIFEST_ORIGIN="embedded"
 while [ "$#" -gt 0 ]; do
@@ -46,6 +47,7 @@ while [ "$#" -gt 0 ]; do
     --expect-fingerprint) EXPECT_FINGERPRINT="${2:?--expect-fingerprint needs a value}"; shift 2 ;;
     --expect-bin-sha256) EXPECT_BIN_SHA256="${2:?--expect-bin-sha256 needs a value}"; shift 2 ;;
     --expect-metadata) EXPECT_METADATA+=("${2:?--expect-metadata needs NAME=VALUE}"); shift 2 ;;
+    --expect-compiled-string) EXPECT_COMPILED_STRINGS+=("${2:?--expect-compiled-string needs a value}"); shift 2 ;;
     --source-manifest) SOURCE_MANIFEST="${2:?--source-manifest needs a value}"; shift 2 ;;
     --expect-books-report) EXPECT_BOOKS_REPORT="${2:?--expect-books-report needs a value}"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -283,6 +285,56 @@ PY
     exit 1
   fi
   echo "$METADATA_OUT"
+fi
+
+# 6c) ArkTS 编译常量校验（issue #12）：源码里注入过指纹，不等于最终
+#     installable HAP 的字节码里还有。Stage HAP 的 ets/modules.abc 是
+#     真正随包执行的字节码；在它里面找不到期望字符串就失败，不能拿
+#     “构建期源码临时有值”冒充“包内已有值”。
+#     只扫 ets/modules.abc，不扫 sourceMaps.map（后者可能回显源码）。
+if [ "${#EXPECT_COMPILED_STRINGS[@]}" -gt 0 ]; then
+  if ! COMPILED_OUT="$(python3 - "$HAP" "${EXPECT_COMPILED_STRINGS[@]}" <<'PY'
+import sys
+import zipfile
+
+hap = sys.argv[1]
+expected = sys.argv[2:]
+try:
+    with zipfile.ZipFile(hap) as archive:
+        names = archive.namelist()
+        if 'ets/modules.abc' not in names:
+            sys.stderr.write(
+                "FAIL: Stage HAP has no ets/modules.abc; cannot verify "
+                "compiled identity constants: %s\n" % hap)
+            sys.exit(1)
+        data = archive.read('ets/modules.abc')
+except (OSError, zipfile.BadZipFile) as exc:
+    sys.stderr.write("FAIL: cannot read ets/modules.abc: %s\n" % exc)
+    sys.exit(1)
+
+missing = []
+for index, value in enumerate(expected):
+    text = str(value)
+    probes = [
+        text.encode('utf-8'),
+        text.encode('utf-16-le'),
+        text.encode('utf-16-be'),
+    ]
+    if not any(probe and probe in data for probe in probes):
+        missing.append(index)
+if missing:
+    sys.stderr.write(
+        "FAIL: ets/modules.abc is missing expected compiled string(s) "
+        "at index(es) %s; the source injection did not reach the "
+        "installable HAP\n" % missing)
+    sys.exit(1)
+print("COMPILED_STRING_OK entry=ets/modules.abc count=%d" % len(expected))
+PY
+)"; then
+    echo "FAIL: final HAP compiled-identity check failed: $HAP" >&2
+    exit 1
+  fi
+  echo "$COMPILED_OUT"
 fi
 
 # 7) Lite Wearable 快照完整性（issue #2 新增）。
