@@ -6,9 +6,12 @@ name: Phone Stage HAP build (self-hosted DevEco required)
 #   storeFileB64/certpathB64/profileB64: base64 编码的签名文件
 #   keyAlias/keyPassword/storePassword: 口令
 #   signAlg: 默认 SHA256withECDSA
-#   fingerprints: {"phone": 64位hex, "watch": 64位hex}
-#   —— 手表证书指纹注入手机侧 PeerIdentityConfig.g.ts，
-#     作为 remoteApp 用于发送与回执校验。材料只在
+#   fingerprints:
+#     phone: 64位hex
+#     watch: con.xiwei.suyue.gt4_<Base64(手表签名证书原始未压缩EC公钥点)>
+#   —— 手机→GT 4 的 WATCH_PEER 必须是 Lite 公钥指纹，不再是
+#     64 位证书 SHA-256。本地/CI 都按 watch-lite 格式严格校验，
+#     旧值会让构建明确失败而不是带着错误身份打包装机。材料只在
 #     构建生命周期内存在，结束步骤（if: always()）
 #     统一清理。
 on:
@@ -52,7 +55,8 @@ jobs:
             --build-profile apps/phone/build-profile.json5 \
             --identity-file apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts \
             --identity-var INJECTED_WATCH_FINGERPRINT \
-            --fingerprint-key watch
+            --fingerprint-key watch \
+            --fingerprint-format watch-lite
 
       - name: Build Stage HAP
         run: tools/build_phone_hap.sh release

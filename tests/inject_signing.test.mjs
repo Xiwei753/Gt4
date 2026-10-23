@@ -152,6 +152,24 @@ const { createRequire } = await import('node:module');
     'com.xiwei.suyue:b64AGF0dGVzdA==');
 }
 
+// ---- 5b. 手机→GT 4 必须按 Lite 公钥指纹注入，旧 hex64 明确失败 ----
+{
+  const lite = 'con.xiwei.suyue.gt4_' +
+    'BEWzvDkxDn4ueCkVNgwzqmrFXjhblq+CrbN+HUw4tLR5tMCz5ovAToeq9JX2' +
+    'WFzIO7SoU4YKrDY85m5QgsLEWok=';
+  const s = stage('watch-lite', lite, { format: 'watch-lite' });
+  assert.equal(s.run.status, 0, s.run.stderr);
+  const identity = readFileSync(s.identity, 'utf8');
+  assert.ok(identity.includes("'" + lite + "'"),
+    'Lite fingerprint must be injected verbatim (case, +, /, =)');
+  const old = stage('watch-lite-old-hex', 'ab'.repeat(32),
+    { format: 'watch-lite' });
+  assert.notEqual(old.run.status, 0,
+    '64-hex certificate SHA-256 must be rejected for WATCH_PEER');
+  assert.ok(old.run.stderr.includes('Base64'),
+    'failure must explain the expected Lite format');
+}
+
 // ---- 6. 缺指纹字段 → 失败 ----
 {
   const s = stage('missing-fp', '');

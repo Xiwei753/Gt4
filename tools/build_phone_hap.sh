@@ -54,13 +54,21 @@ if [ -z "$INJECT_CLIENT_ID" ]; then
 fi
 
 MODULE_JSON5_BACKUP=""
+IDENTITY_TS="entry/src/main/ets/services/PeerIdentityConfig.g.ts"
+IDENTITY_BACKUP=""
 restore_module_json5() {
   if [ -n "$MODULE_JSON5_BACKUP" ] && [ -f "$MODULE_JSON5_BACKUP" ]; then
     cp -f "$MODULE_JSON5_BACKUP" "$MODULE_JSON5"
     rm -f "$MODULE_JSON5_BACKUP"
   fi
 }
-trap restore_module_json5 EXIT
+restore_identity_config() {
+  if [ -n "$IDENTITY_BACKUP" ] && [ -f "$IDENTITY_BACKUP" ]; then
+    cp -f "$IDENTITY_BACKUP" "$IDENTITY_TS"
+    rm -f "$IDENTITY_BACKUP"
+  fi
+}
+trap 'restore_module_json5; restore_identity_config' EXIT
 
 if grep -q "\"$CLIENT_ID_PLACEHOLDER\"" "$MODULE_JSON5"; then
   if [ -z "$INJECT_CLIENT_ID" ]; then
@@ -78,6 +86,94 @@ if grep -q "\"$CLIENT_ID_PLACEHOLDER\"" "$MODULE_JSON5"; then
     --placeholder "$CLIENT_ID_PLACEHOLDER"
 fi
 
+# ---------- WATCH_PEER：GT 4 Lite 指纹（issue #14）----------
+# 手机 → 手表使用的对端身份是
+#   con.xiwei.suyue.gt4_<Base64(手表签名证书原始未压缩 EC 公钥点)>
+# 不再使用 64 位证书 SHA-256。值优先取显式环境变量 / CI 已注入值，
+# 否则从实际给 GT 4 签名的手表 profile（其次证书链）现场提取；
+# 三者同时存在时互相核对，不一致即失败。构建结束还原源码。
+WATCH_BUNDLE="con.xiwei.suyue.gt4"
+WATCH_SIGNING_DIR="${WATCH_SIGNING_DIR:-$REPO_ROOT/signing}"
+find_first() {
+  find "$1" -maxdepth 1 -name "$2" -type f 2>/dev/null | head -n 1
+}
+
+WATCH_PROFILE="${WATCH_SIGN_PROFILE:-}"
+if [ -z "$WATCH_PROFILE" ] && [ -d "$WATCH_SIGNING_DIR" ]; then
+  for d in "$WATCH_SIGNING_DIR/watch" "$WATCH_SIGNING_DIR"; do
+    f="$(find_first "$d" '*.p7b')"
+    [ -n "$f" ] && { WATCH_PROFILE="$f"; break; }
+  done
+fi
+WATCH_CERT="${WATCH_SIGN_CER:-}"
+if [ -z "$WATCH_CERT" ] && [ -d "$WATCH_SIGNING_DIR" ]; then
+  for d in "$WATCH_SIGNING_DIR/shared" "$WATCH_SIGNING_DIR/watch" \
+      "$WATCH_SIGNING_DIR"; do
+    f="$(find_first "$d" '*.cer')"
+    [ -n "$f" ] && { WATCH_CERT="$f"; break; }
+  done
+fi
+
+EXISTING_WATCH_FP="$(python3 - "$IDENTITY_TS" <<'PY'
+import re, sys
+try:
+    text = open(sys.argv[1], encoding='utf-8').read()
+except OSError:
+    print('')
+    raise SystemExit(0)
+m = re.search(r"export const INJECTED_WATCH_FINGERPRINT = '([^']*)';", text)
+print(m.group(1) if m else '')
+PY
+)"
+EXPLICIT_WATCH_FP="${SUYUE_WATCH_PEER_FINGERPRINT:-}"
+if [ -n "$EXPLICIT_WATCH_FP" ] && [ -n "$EXISTING_WATCH_FP" ] \
+    && [ "$EXPLICIT_WATCH_FP" != "$EXISTING_WATCH_FP" ]; then
+  echo "ERROR: SUYUE_WATCH_PEER_FINGERPRINT 与 PeerIdentityConfig.g.ts" >&2
+  echo "       中已注入的 WATCH_PEER 不一致，拒绝猜测使用哪一个。" >&2
+  exit 1
+fi
+WATCH_PEER_FP="${EXPLICIT_WATCH_FP:-$EXISTING_WATCH_FP}"
+
+MATERIAL_ARGS=()
+[ -n "$WATCH_PROFILE" ] && MATERIAL_ARGS+=(--profile "$WATCH_PROFILE")
+[ -n "$WATCH_CERT" ] && MATERIAL_ARGS+=(--cert "$WATCH_CERT")
+
+if [ -n "$WATCH_PEER_FP" ]; then
+  WATCH_PEER_FP="$(python3 "$REPO_ROOT/tools/watch_peer_fingerprint.py" \
+    --bundle "$WATCH_BUNDLE" --expect "$WATCH_PEER_FP" \
+    "${MATERIAL_ARGS[@]}")"
+else
+  WATCH_PEER_FP="$(python3 "$REPO_ROOT/tools/watch_peer_fingerprint.py" \
+    --bundle "$WATCH_BUNDLE" "${MATERIAL_ARGS[@]}")"
+fi
+if [ -z "$WATCH_PEER_FP" ]; then
+  echo "ERROR: 未能确定 GT 4 的 Lite 对端指纹。" >&2
+  echo "       请提供实际给 GT 4 签名的手表 profile（WATCH_SIGN_PROFILE" >&2
+  echo "       或 signing/watch/*.p7b）或证书链，或显式设置" >&2
+  echo "       SUYUE_WATCH_PEER_FINGERPRINT。禁止猜测或生成假值。" >&2
+  exit 1
+fi
+
+if [ "$WATCH_PEER_FP" != "$EXISTING_WATCH_FP" ]; then
+  IDENTITY_BACKUP="$(mktemp)"
+  cp -f "$IDENTITY_TS" "$IDENTITY_BACKUP"
+  python3 - "$IDENTITY_TS" "$WATCH_PEER_FP" <<'PY'
+import sys
+path, value = sys.argv[1:]
+text = open(path, encoding='utf-8').read()
+old = "export const INJECTED_WATCH_FINGERPRINT = '';"
+new = "export const INJECTED_WATCH_FINGERPRINT = '" + value + "';"
+if old not in text:
+    raise SystemExit('ERROR: PeerIdentityConfig.g.ts 缺少 WATCH_PEER 空占位')
+open(path, 'w', encoding='utf-8').write(text.replace(old, new, 1))
+PY
+fi
+if ! grep -qF "INJECTED_WATCH_FINGERPRINT = '$WATCH_PEER_FP';" "$IDENTITY_TS"; then
+  echo "ERROR: WATCH_PEER Lite 指纹未写入 PeerIdentityConfig.g.ts" >&2
+  exit 1
+fi
+echo "WATCH_PEER_LITE_FINGERPRINT=$WATCH_PEER_FP"
+
 "$HVIGORW" --mode module -p product="$PRODUCT" -p buildMode="$MODE" assembleHap --no-daemon
 
 # Stage 的产物命名随是否签名而变：
@@ -93,6 +189,25 @@ if [ -z "$HAP" ]; then
   echo "       $OUT_DIR/" >&2
   exit 1
 fi
+
+# 源码里注入成功不等于编进了包：在真正产物中断言一次，
+# 避免“配置正确但构建缓存/编译分支漏掉”的假成功。
+if ! python3 - "$HAP" "$WATCH_PEER_FP" <<'PY'
+import sys
+import zipfile
+
+hap, expected = sys.argv[1], sys.argv[2].encode('utf-8')
+with zipfile.ZipFile(hap) as archive:
+    for info in archive.infolist():
+        if expected in archive.read(info):
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+then
+  echo "ERROR: 构建产物中找不到 WATCH_PEER Lite 指纹：$HAP" >&2
+  exit 1
+fi
+echo "WATCH_PEER_IN_HAP_OK"
 
 # ---------- 外部签名 ----------
 # 与手表侧同一套规则与同一份实现（tools/sign_hap.sh）：Stage 工程的

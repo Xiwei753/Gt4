@@ -14,12 +14,13 @@ storeFile/certpath/profile + 别名/口令 + 双端
      metaData.customizeData 的 supportLists
      占位符替换为真实手机指纹。
 
-指纹格式（第二轮 P1-9）：不同 SDK 版本的
-Wear Engine 可能要求 hex 摘要或编码后的
-指纹字符串，格式**以 GT4 Lite SDK 实测为准**。
-默认只做结构性校验（非空、不含空白/引号/
-冒号等破坏分隔符的字符）；确认为 64 位 hex
-时可用 --fingerprint-format hex64 收紧。
+指纹格式（第二轮 P1-9 / issue #14）：默认只做
+结构性校验（非空、不含空白/引号/冒号等破坏
+分隔符的字符）。确认为 64 位 hex 时可用
+--fingerprint-format hex64；手机→GT 4 的
+WATCH_PEER 必须用 --fingerprint-format watch-lite，
+即 <bundle>_<Base64(未压缩 EC 公钥点)>，旧 hex64
+会在注入阶段直接失败。
 
 绝不提交材料：所有写入都在工作区，
 workflow 的清理步骤（if: always()）负责
@@ -34,6 +35,8 @@ import shlex
 import sys
 
 HEX64 = re.compile(r'^[0-9a-f]{64}$')
+LITE_B64 = re.compile(r'^[A-Za-z0-9+/]+={0,2}$')
+EC_POINT_LENGTHS = (65, 97, 133)
 # 指纹字符串不得包含会破坏 manifest 值
 # （bundle:fingerprint）或 JS 字面量的字符。
 FORBIDDEN = re.compile(r'[\s:;,\'"\\]')
@@ -44,7 +47,32 @@ def fail(msg):
     sys.exit(1)
 
 
-def validate_fingerprint(value, fmt, where):
+def validate_watch_lite(text, bundle, where):
+    prefix = bundle + '_'
+    if not text.startswith(prefix):
+        fail('%s 必须是 <%s>_<Base64(未压缩 EC 公钥点)>；'
+             '64 位证书 SHA-256 不能作为 Lite 对端指纹' % (where, bundle))
+    payload = text[len(prefix):]
+    if not payload or len(payload) % 4 != 0 \
+            or not LITE_B64.match(payload):
+        fail('%s 的 Base64 部分不是标准 Base64（保留大小写与 +/=）'
+             % where)
+    try:
+        point = base64.b64decode(payload, validate=True)
+    except ValueError:
+        fail('%s 的 Base64 部分不是合法 Base64' % where)
+    if base64.b64encode(point).decode('ascii') != payload:
+        fail('%s 的 Base64 不是规范编码（大小写/填充不一致）' % where)
+    if len(point) not in EC_POINT_LENGTHS:
+        fail('%s 公钥必须是未压缩 EC 点（65/97/133 字节），实际 %d'
+             % (where, len(point)))
+    if point[0] != 0x04:
+        fail('%s 公钥首字节必须是 0x04（未压缩点），实际 0x%02x'
+             % (where, point[0]))
+    return text
+
+
+def validate_fingerprint(value, fmt, where, watch_lite_bundle):
     text = str(value or '').strip()
     if not text:
         fail('%s 指纹为空' % where)
@@ -54,6 +82,8 @@ def validate_fingerprint(value, fmt, where):
     if fmt == 'hex64' and not HEX64.match(text.lower()):
         fail('%s 指纹不是 64 位十六进制'
              '（--fingerprint-format hex64）' % where)
+    if fmt == 'watch-lite':
+        validate_watch_lite(text, watch_lite_bundle, where)
     if fmt == 'raw' and len(text) > 256:
         fail('%s 指纹长度异常（>256）' % where)
     return text
@@ -103,9 +133,13 @@ def main():
                     choices=['phone', 'watch'],
                     help='注入哪一个对端指纹')
     ap.add_argument('--fingerprint-format', default='raw',
-                    choices=['raw', 'hex64'],
+                    choices=['raw', 'hex64', 'watch-lite'],
                     help='指纹格式校验（默认 raw 宽松；'
-                         '确认为 64 位 hex 时用 hex64）')
+                         '64 位 hex 用 hex64；手机→GT 4 的'
+                         'WATCH_PEER 用 watch-lite）')
+    ap.add_argument('--watch-lite-bundle',
+                    default='con.xiwei.suyue.gt4',
+                    help='watch-lite 格式的手表包名')
     ap.add_argument('--manifest', default='',
                     help='手表 config.json（注入 supportLists）')
     ap.add_argument('--manifest-peer-bundle', default='',
@@ -193,7 +227,8 @@ def main():
     fingerprint = validate_fingerprint(
         fingerprints.get(args.fingerprint_key),
         args.fingerprint_format,
-        'fingerprints.%s' % args.fingerprint_key)
+        'fingerprints.%s' % args.fingerprint_key,
+        args.watch_lite_bundle)
     with open(args.identity_file, 'r',
               encoding='utf-8') as handle:
         identity_text = handle.read()
