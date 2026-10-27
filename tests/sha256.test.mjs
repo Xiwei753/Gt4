@@ -11,7 +11,7 @@ import { join } from 'node:path';
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-sha-'));
 const modPath = join(tmp, 'Sha256.mjs');
 writeFileSync(modPath, readFileSync(
-  'apps/watch/entry/src/main/js/MainAbility/util/Sha256.js', 'utf8'));
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/util/Sha256.js', 'utf8'));
 const { sha256Bytes, createSha256 } = await import(modPath);
 
 const enc = new TextEncoder();

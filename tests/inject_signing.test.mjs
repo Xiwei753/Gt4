@@ -43,12 +43,12 @@ function stageWatch(name, value) {
   const buildProfile = join(dir, 'build-profile.json5');
   const identity = join(dir, 'PhonePeerConfig.g.js');
   const manifest = join(dir, 'config.json');
-  copyFileSync(join(REPO, 'apps/watch/build-profile.json5'),
+  copyFileSync(join(REPO, 'watch/huawei/watch-lite/build-profile.json5'),
     buildProfile);
   copyFileSync(join(REPO,
-    'apps/watch/entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js'),
+    'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js'),
     identity);
-  copyFileSync(join(REPO, 'apps/watch/entry/src/main/config.json'),
+  copyFileSync(join(REPO, 'watch/huawei/watch-lite/entry/src/main/config.json'),
     manifest);
   return { dir, buildProfile, identity, manifest };
 }
@@ -73,7 +73,7 @@ function stagePhone(name) {
   const dir = dirFor(name);
   const identity = join(dir, 'PeerIdentityConfig.g.ts');
   copyFileSync(join(REPO,
-    'apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts'),
+    'harmony/entry/src/main/ets/services/PeerIdentityConfig.g.ts'),
     identity);
   return { dir, identity };
 }
@@ -127,10 +127,10 @@ function injectPhoneLite(dir, value, extraArgs = [], bundle = '') {
     .find((e) => e.name === 'supportLists').value =
     'com.xiwei.suyue:' + 'ff'.repeat(32);
   writeFileSync(s.manifest, JSON.stringify(manifest, null, 2));
-  copyFileSync(join(REPO, 'apps/watch/build-profile.json5'),
+  copyFileSync(join(REPO, 'watch/huawei/watch-lite/build-profile.json5'),
     s.buildProfile);
   copyFileSync(join(REPO,
-    'apps/watch/entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js'),
+    'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js'),
     s.identity);
   const run = injectWatch(s, APP_ID);
   assert.notEqual(run.status, 0,

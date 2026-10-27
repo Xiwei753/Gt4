@@ -344,7 +344,7 @@ fi
 #    结果是 BUILD SUCCESSFUL、HAP 也产出了，但缺少该页 .bc，
 #    手表上打不开这个页面——绿色构建掩盖了坏应用。
 #    实测触发原因：该 JerryScript 构建没有 RegExp，正则字面量在
-#    解析期报 SyntaxError（详见 apps/watch/.../util/Validate.js）。
+#    解析期报 SyntaxError（详见 watch/huawei/watch-lite/.../util/Validate.js）。
 #    这里把"缺快照"变成硬失败，不再靠人眼翻构建日志。
 if [ "$DEVICE" = "liteWearable" ] && [ "$SINGLE_BIN" = "0" ]; then
   ENTRIES="$(unzip -Z1 "$HAP" 2>/dev/null)" || ENTRIES=""
@@ -367,7 +367,7 @@ if [ "$DEVICE" = "liteWearable" ] && [ "$SINGLE_BIN" = "0" ]; then
     echo "FAIL: Lite HAP is missing JerryScript snapshots for:$MISSING" >&2
     echo "      hvigor 会报 BUILD SUCCESSFUL，但这些页面在设备上起不来。" >&2
     echo "      lite-snapshot-plugin 只打印错误，不会让构建失败；" >&2
-    echo "      排查方向见 apps/watch/entry/src/main/js/MainAbility/util/Validate.js。" >&2
+    echo "      排查方向见 watch/huawei/watch-lite/entry/src/main/js/MainAbility/util/Validate.js。" >&2
     exit 1
   fi
 fi

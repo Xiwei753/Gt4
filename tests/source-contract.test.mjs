@@ -5,21 +5,21 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const read = (path) => readFileSync(path, 'utf8');
-const watchConfig = JSON.parse(read('apps/watch/entry/src/main/config.json'));
-const phoneManifest = read('apps/phone/entry/src/main/module.json5');
-const phoneIndex = read('apps/phone/entry/src/main/ets/pages/Index.ets');
-const phoneAppJson = JSON.parse(read('apps/phone/AppScope/app.json5'));
+const watchConfig = JSON.parse(read('watch/huawei/watch-lite/entry/src/main/config.json'));
+const phoneManifest = read('harmony/entry/src/main/module.json5');
+const phoneIndex = read('harmony/entry/src/main/ets/pages/Index.ets');
+const phoneAppJson = JSON.parse(read('harmony/AppScope/app.json5'));
 const watchPages = watchConfig.module.js[0].pages;
 assert.equal(watchConfig.module.deviceType[0], 'liteWearable');
 assert.deepEqual(watchPages, ['pages/index/index', 'pages/reader/reader']);
 for (const page of watchPages) {
   for (const ext of ['js', 'hml', 'css']) {
-    assert.ok(existsSync('apps/watch/entry/src/main/js/MainAbility/' + page + '.' + ext));
+    assert.ok(existsSync('watch/huawei/watch-lite/entry/src/main/js/MainAbility/' + page + '.' + ext));
   }
 }
 assert.equal(watchConfig.module.abilities[0].icon, '$media:icon');
-assert.ok(existsSync('apps/watch/entry/src/main/resources/base/media/icon.png'));
-assert.ok(existsSync('apps/watch/entry/src/main/resources/base/media/icon_small.png'));
+assert.ok(existsSync('watch/huawei/watch-lite/entry/src/main/resources/base/media/icon.png'));
+assert.ok(existsSync('watch/huawei/watch-lite/entry/src/main/resources/base/media/icon_small.png'));
 assert.ok(phoneManifest.includes('stageMode') === false, 'module is a Stage manifest, not a lite JS manifest');
 // issue #6 P0-A：Wear Engine 读取设备前先从 module.metadata 取应用级
 // client_id；缺失会在设备发现时报 1008509999（应用身份未配置）。
@@ -45,24 +45,24 @@ assert.ok(phoneIndex.includes('DocumentViewPicker'), 'phone must expose a real d
 // 旧版本/上一本书已经创建 files/books 时，mkdirSync(path, true) 仍可能
 // 抛 13900015 File exists；导入必须把它当成“目录已存在”，不能拒绝新书。
 const phoneImportService = read(
-  'apps/phone/entry/src/main/ets/services/BookImportService.ts');
+  'harmony/entry/src/main/ets/services/BookImportService.ts');
 assert.ok(phoneImportService.includes('fileIo.accessSync(booksDir)'),
   'phone import must tolerate an existing books directory (13900015 File exists)');
 assert.ok(phoneIndex.includes('importBook'), 'phone index must run a real import flow');
 assert.ok(phoneIndex.includes('BookRepository'), 'phone index must list a real library');
 assert.ok(phoneIndex.includes('素阅'), 'displayed app name');
-assert.equal(JSON.parse(read('apps/watch/entry/src/main/resources/base/element/string.json')).string[0].value, '素阅');
+assert.equal(JSON.parse(read('watch/huawei/watch-lite/entry/src/main/resources/base/element/string.json')).string[0].value, '素阅');
 assert.ok(phoneAppJson.app.icon === '$media:app_icon', 'phone app icon must exist');
-assert.ok(existsSync('apps/phone/AppScope/resources/base/media/app_icon.png'));
+assert.ok(existsSync('harmony/AppScope/resources/base/media/app_icon.png'));
 for (const svc of ['BookImportService', 'TextDecodeService',
   'EpubImportService', 'BookRepository', 'ZipReader',
   'WearDeviceService', 'BookTransferService']) {
-  assert.ok(existsSync('apps/phone/entry/src/main/ets/services/' + svc + '.ts'),
+  assert.ok(existsSync('harmony/entry/src/main/ets/services/' + svc + '.ts'),
     'phone service missing (pure logic layer lives in .ts): ' + svc);
 }
-assert.ok(existsSync('apps/phone/entry/src/main/ets/model/BookModels.ts'));
-assert.ok(existsSync('apps/phone/entry/src/main/ets/model/TransferModels.ts'));
-const phoneIndexFull = read('apps/phone/entry/src/main/ets/pages/Index.ets');
+assert.ok(existsSync('harmony/entry/src/main/ets/model/BookModels.ts'));
+assert.ok(existsSync('harmony/entry/src/main/ets/model/TransferModels.ts'));
+const phoneIndexFull = read('harmony/entry/src/main/ets/pages/Index.ets');
 assert.ok(phoneIndexFull.includes('listDevices'),
   'phone index must discover devices');
 assert.ok(phoneIndexFull.includes('registerMessageReceiver'),
@@ -72,8 +72,8 @@ assert.ok(phoneIndexFull.includes('RESULT'),
 assert.ok(phoneIndexFull.includes('transferService'),
   'phone index must use BookTransferService');
 // issue #6 P0-B：设备发现必须用有上限的退避重试策略，且确定性失败不自动重试。
-const phoneDeviceService = read('apps/phone/entry/src/main/ets/services/WearDeviceService.ts');
-const phonePolicy = read('apps/phone/entry/src/main/ets/services/WearAuthPolicy.js');
+const phoneDeviceService = read('harmony/entry/src/main/ets/services/WearDeviceService.ts');
+const phonePolicy = read('harmony/entry/src/main/ets/services/WearAuthPolicy.js');
 assert.ok(phonePolicy.includes('app_client_id_not_configured'),
   'policy must classify 1008509999 as app identity misconfiguration');
 assert.ok(phonePolicy.includes('planRetry') && phonePolicy.includes('isRetryable'),
@@ -91,7 +91,7 @@ assert.ok(buildDoc.includes('issue #12') &&
   'build docs must record the issue #12 artifact identity check');
 assert.ok(buildDoc.includes('暂不可关闭'),
   'build docs must not claim real-device transfer is complete');
-const protocolReadme = read('shared/protocol/README.md');
+const protocolReadme = read('protocol/README.md');
 for (const t of ['BOOK_META', 'CHUNK', 'ACK', 'FINISH', 'RESULT',
   'RESUME', 'ERROR', 'E_MISSING_CHUNKS', 'E_DIGEST_MISMATCH']) {
   assert.ok(protocolReadme.includes(t),
@@ -99,7 +99,7 @@ for (const t of ['BOOK_META', 'CHUNK', 'ACK', 'FINISH', 'RESULT',
 }
 for (const ex of ['hello', 'book-meta', 'chunk', 'ack', 'result',
   'resume', 'error']) {
-  assert.ok(existsSync('shared/protocol/examples/' + ex + '.json'),
+  assert.ok(existsSync('protocol/examples/' + ex + '.json'),
     'protocol example missing: ' + ex);
 }
 // 手表端：新书库/接收器/工具模块必须存在，且页面
@@ -121,11 +121,11 @@ const watchFiles = [
   'reader/CrownInput.js'
 ];
 for (const rel of watchFiles) {
-  assert.ok(existsSync('apps/watch/entry/src/main/js/MainAbility/' + rel),
+  assert.ok(existsSync('watch/huawei/watch-lite/entry/src/main/js/MainAbility/' + rel),
     'watch module missing: ' + rel);
 }
 const watchManifest = JSON.parse(read(
-  'apps/watch/entry/src/main/config.json'));
+  'watch/huawei/watch-lite/entry/src/main/config.json'));
 assert.equal(watchManifest.app.bundleName, 'con.xiwei.suyue.gt4',
   'watch bundle identity must not change when updating the package');
 assert.ok(Number.isInteger(watchManifest.app.version.code) &&
@@ -136,7 +136,7 @@ assert.ok(typeof watchManifest.app.version.name === 'string' &&
   'watch package update must carry a new version name');
 assert.ok(read('tools/build_watch_lite.sh').includes('WATCH_BUILD_SOURCE_VERSION='),
   'local watch build must report the manifest version it built');
-const watchReader = read('apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.js');
+const watchReader = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.js');
 assert.ok(!watchReader.includes('getDemoBook'),
   'reader must open by bookId, not the demo getter');
 // issue #10：Lite Wearable 通过目标页 data 的**同名字段**注入路由参数，
@@ -162,17 +162,17 @@ assert.ok(watchReader.includes('saveProgress('),
   'reader must persist progress through ProgressStore');
 assert.ok(watchReader.includes('crownProxy'),
   'reader must own the hidden slider ref used as crown proxy');
-const crownInput = read('apps/watch/entry/src/main/js/MainAbility/reader/CrownInput.js');
+const crownInput = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/CrownInput.js');
 assert.ok(crownInput.includes("'unverified'"),
   'crown input must not claim verified support without a device run');
-const watchIndex = read('apps/watch/entry/src/main/js/MainAbility/pages/index/index.js');
+const watchIndex = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/index/index.js');
 assert.ok(watchIndex.includes('listBooks'),
   'index page must list the real library');
 assert.ok(watchIndex.includes('askDelete'),
   'index page must support delete');
 // 书架行不能同时绑定「打开」和子元素「删除」：
 // Lite >= API6 点击会冒泡，删书会顺手打开阅读页。
-const shelfHml = read('apps/watch/entry/src/main/js/MainAbility/pages/index/index.hml');
+const shelfHml = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/index/index.hml');
 assert.ok(!/<div class="book-row"[^>]*onclick=/.test(shelfHml),
   'book row must not open when the child delete button is clicked');
 assert.ok(shelfHml.includes('class="book-info" onclick="openBook({{$item.bookId}})"'),
@@ -195,7 +195,7 @@ assert.ok(shelfHml.includes('<list class="book-list"') &&
   shelfHml.includes('for="{{ books }}"') &&
   shelfHml.includes('tid="bookId"'),
   'shelf must use a real <list>/<list-item> container with tid=bookId');
-const shelfCss = read('apps/watch/entry/src/main/js/MainAbility/pages/index/index.css');
+const shelfCss = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/index/index.css');
 assert.ok(/\.book-list\s*\{[^}]*height:/.test(shelfCss),
   'shelf list must have an explicit height so rows are not collapsed');
 // issue #10 第二次真机回归：list-item 默认高度为 0，
@@ -225,7 +225,7 @@ assert.ok(!watchIndex.includes('importBundledBooks') &&
 assert.ok(watchIndex.includes('loadExternal'),
   'external books load in the background, built-in shelf does not wait');
 const bookSource = read(
-  'apps/watch/entry/src/main/js/MainAbility/storage/BundledBookSource.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/BundledBookSource.js');
 assert.ok(bookSource.includes('readBundledWindow') &&
   bookSource.includes('rawfile/gt4books') &&
   bookSource.includes('file.copy'),
@@ -237,7 +237,7 @@ assert.ok(!bookSource.includes('getChunk') &&
   !bookSource.includes('decodeBase64'),
   'bundled text must NOT be compiled into JS data modules');
 const catalogSrc = read(
-  'apps/watch/entry/src/main/js/MainAbility/books/BookCatalog.g.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/books/BookCatalog.g.js');
 assert.ok(catalogSrc.includes('export var BOOKS'),
   'catalog module must export BOOKS metadata');
 assert.ok(watchReader.includes('isBundled') &&
@@ -248,7 +248,7 @@ assert.ok(watchReader.includes('startReading') &&
   watchReader.includes('scheduleSave'),
   'reader must restore progress before drawing and persist page turns');
 const watchProgress = read(
-  'apps/watch/entry/src/main/js/MainAbility/storage/ProgressStore.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/ProgressStore.js');
 assert.ok(watchProgress.includes('setProgressTimeout') &&
   watchProgress.includes('timeout'),
   'KV progress store must fail clearly when storage does not callback');
@@ -263,10 +263,10 @@ assert.ok(watchReader.indexOf('loadProgress(this.bookId') <
   watchReader.includes('if (!progress.ok)') &&
   watchReader.includes('阅读位置读取失败'),
   'reader must restore saved position before initial page, never overwrite bad state');
-const watchStorage = read('apps/watch/entry/src/main/js/MainAbility/storage/BookStorage.js');
+const watchStorage = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/BookStorage.js');
 assert.ok(watchStorage.includes('setOperationTimeout'),
   'storage file ops must have a no-callback timeout guard');
-const watchIndexStore = read('apps/watch/entry/src/main/js/MainAbility/storage/LibraryIndex.js');
+const watchIndexStore = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/LibraryIndex.js');
 assert.ok(watchIndexStore.includes('setQueueTimeout') &&
   watchIndexStore.includes("'missing'"),
   'index queue must expose a watchdog and distinguish missing vs error');
@@ -285,7 +285,7 @@ assert.ok(!watchIndexStore.includes('length: 65536'),
 // 于是 HAP 里缺少该页 .bc，构建显示 BUILD SUCCESSFUL，页面在手表上
 // 却起不来。曾在 reader.js/TransferLogic.js/BookStorage.js 命中此坑。
 // 这里扫描手表源码，禁止再次引入正则与实测缺失的 API。
-const WATCH_JS_ROOT = 'apps/watch/entry/src/main/js/MainAbility';
+const WATCH_JS_ROOT = 'watch/huawei/watch-lite/entry/src/main/js/MainAbility';
 const watchJsFiles = [];
 (function walk(dir) {
   for (const name of readdirSync(dir)) {
@@ -393,13 +393,13 @@ for (const file of watchJsFiles) {
 // P0-1/P0-2：双端身份分离，手机不得把
 // 自己的包名当 remoteApp。
 const peerIdentity = read(
-  'apps/phone/entry/src/main/ets/model/PeerIdentity.ts');
+  'harmony/entry/src/main/ets/model/PeerIdentity.ts');
 assert.ok(peerIdentity.includes('PHONE_SELF'),
   'PeerIdentity must define PHONE_SELF');
 assert.ok(peerIdentity.includes('WATCH_PEER'),
   'PeerIdentity must define WATCH_PEER');
 const peerPolicy = read(
-  'apps/phone/entry/src/main/ets/model/PeerIdentityPolicy.js');
+  'harmony/entry/src/main/ets/model/PeerIdentityPolicy.js');
 assert.ok(peerPolicy.includes('validateWatchLiteFingerprint') &&
   peerPolicy.includes('validatePhoneAppId'),
   'issue #13 must validate both identity directions separately');
@@ -424,7 +424,7 @@ assert.ok(
 assert.equal(watchConfig.app.bundleName, WATCH_BUNDLE,
   'watch Manifest bundleName must equal what the watch peer config declares');
 assert.ok(
-  read('apps/watch/entry/src/main/js/MainAbility/wear/PeerConfig.js')
+  read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/PeerConfig.js')
     .includes("'" + WATCH_BUNDLE + "'"),
   'watch PeerConfig must self-report the same bundle name as its Manifest');
 // 两个包名不能撞在一起：手机与手表是各自独立的 HAP。
@@ -445,7 +445,7 @@ assert.ok(phoneIndexFull.includes('WATCH_PEER'),
 assert.ok(phoneIndexFull.includes('isConfigured'),
   'phone index must gate sending on identity config');
 const transferService = read(
-  'apps/phone/entry/src/main/ets/services/BookTransferService.ts');
+  'harmony/entry/src/main/ets/services/BookTransferService.ts');
 assert.ok(transferService.includes('peer: { bundleName'),
   'sendBook must take the peer identity object');
 // remoteApp 只能由对端身份构造。
@@ -455,13 +455,13 @@ assert.ok(!transferService.includes(
 
 // P0-3：BookMeta 携带消息通道分块描述。
 const bookModels = read(
-  'apps/phone/entry/src/main/ets/model/BookModels.ts');
+  'harmony/entry/src/main/ets/model/BookModels.ts');
 assert.ok(bookModels.includes('chunks: number'),
   'BookMeta must declare chunks');
 assert.ok(bookModels.includes('chunkBytes: number'),
   'BookMeta must declare chunkBytes');
 const importService = read(
-  'apps/phone/entry/src/main/ets/services/BookImportService.ts');
+  'harmony/entry/src/main/ets/services/BookImportService.ts');
 assert.ok(importService.includes('chunks,'),
   'import must populate chunks in the meta');
 assert.ok(importService.includes('chunkBytes:'),
@@ -481,7 +481,7 @@ assert.ok(!importService.includes(
 // P0-5：文件通道必须复制落盘后校验，不能
 // 直接 commit 外部 tempUri。
 const watchReceiver = read(
-  'apps/watch/entry/src/main/js/MainAbility/wear/WearReceiver.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/WearReceiver.js');
 assert.ok(watchReceiver.includes('isFileType'),
   'watch receiver must handle the file channel branch');
 assert.ok(watchReceiver.includes('receiveFile('),
@@ -489,11 +489,11 @@ assert.ok(watchReceiver.includes('receiveFile('),
 assert.ok(watchReceiver.includes('Wear message received type='),
   'watch must log whether HELLO/BOOK_META actually reached the receiver');
 const wearDeviceService = read(
-  'apps/phone/entry/src/main/ets/services/WearDeviceService.ts');
+  'harmony/entry/src/main/ets/services/WearDeviceService.ts');
 assert.ok(wearDeviceService.includes('receiver registered: bundle='),
   'phone must log successful message receiver registration');
 const incomingReceiver = read(
-  'apps/watch/entry/src/main/js/MainAbility/wear/IncomingBookReceiver.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/IncomingBookReceiver.js');
 assert.ok(incomingReceiver.includes('copyFile('),
   'file channel must copy the received file into the sandbox');
 assert.ok(incomingReceiver.includes('verifyFile('),
@@ -542,16 +542,16 @@ assert.ok(artifactCheck.includes('deviceTypes'),
   'artifact check must verify the device type');
 assert.ok(artifactCheck.includes('buildMode'),
   'artifact check must verify the build mode');
-const transferCode = read('apps/phone/entry/src/main/ets/services/BookTransferService.ts');
+const transferCode = read('harmony/entry/src/main/ets/services/BookTransferService.ts');
 assert.ok(transferCode.includes('await this.p2pClient.sendMessage('),
   'phone must await asynchronous Wear Engine message delivery');
 assert.ok(transferCode.includes('wearEngine.P2pResultCode.COMMUNICATION_SUCCESS') &&
   !transferCode.includes('result.code === 0'),
   'file transfer completion must use Huawei success enum, not numeric zero');
-const wearDeviceCode = read('apps/phone/entry/src/main/ets/services/WearDeviceService.ts');
+const wearDeviceCode = read('harmony/entry/src/main/ets/services/WearDeviceService.ts');
 assert.ok(wearDeviceCode.includes('registered.appParam, registered.callback'),
   'unsubscribe must reuse the registered appParam and callback');
-const phoneShelf = read('apps/phone/entry/src/main/ets/pages/Index.ets');
+const phoneShelf = read('harmony/entry/src/main/ets/pages/Index.ets');
 assert.ok(phoneShelf.includes('this.receiverReady'),
   'sending must be disabled if RESULT receiver registration failed');
 assert.ok(phoneShelf.includes('private canTransferBook(') &&
@@ -610,7 +610,7 @@ assert.ok(!phoneWf.includes('--fingerprint-format hex64'),
 assert.ok(phoneShelf.includes('手表 Lite 公钥指纹未配置') &&
   phoneShelf.includes('isConfigured(WATCH_PEER)'),
   'source code must keep the fail-closed send gate');
-assert.ok(read('apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts')
+assert.ok(read('harmony/entry/src/main/ets/services/PeerIdentityConfig.g.ts')
   .includes("INJECTED_WATCH_LITE_FINGERPRINT = ''"),
   'repo must keep the empty watch Lite identity placeholder');
 
@@ -636,7 +636,7 @@ assert.ok(sendBookBody.indexOf('markUploaded') >
 
 // P1-11：流式 SHA-256 与导入上限。
 const sha256Module = read(
-  'apps/watch/entry/src/main/js/MainAbility/util/Sha256.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/util/Sha256.js');
 assert.ok(sha256Module.includes('createSha256'),
   'Sha256 must expose a streaming hasher');
 assert.ok(transferLogicSrc().includes('createDigestVerifier'),
@@ -646,7 +646,7 @@ assert.ok(importService.includes('MAX_BOOK_BYTES'),
 
 // P1-12：索引原子写 + 串行化 + 回滚。
 const libraryIndex = read(
-  'apps/watch/entry/src/main/js/MainAbility/storage/LibraryIndex.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/LibraryIndex.js');
 assert.ok(libraryIndex.includes('INDEX_TMP'),
   'index must write to a temp file first');
 assert.ok(libraryIndex.includes('enqueue'),
@@ -657,11 +657,11 @@ assert.ok(libraryIndex.includes('rollback'),
 // #10 GT4 阅读界面：正文页只有正文；右滑进设置、左滑返回。
 // 不能再把页码、书名、上/下页、字号或主题按钮塞到阅读页。
 const readerJs = read(
-  'apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.js');
 const readerHml = read(
-  'apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.hml');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.hml');
 const readerCss = read(
-  'apps/watch/entry/src/main/js/MainAbility/pages/reader/reader.css');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.css');
 assert.ok(readerJs.includes('settingsOpen') &&
   readerJs.includes("e.direction === 'left'") &&
   !readerJs.includes("e.direction === 'right'") &&
@@ -738,14 +738,14 @@ assert.ok(readerJs.includes('takeCanvasPage(') &&
   !readerJs.includes('setTimeout('),
   'one Canvas draw path without pixel readback, fallback, or retry timers');
 assert.ok(!read(
-  'apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js')
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js')
   .includes('getImageData(') &&
   !read(
-    'apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js')
+    'watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js')
   .includes('measureText('),
   'Lite reader must not use expensive native pixel or measurement loops');
 const liteCanvasRenderer = read(
-  'apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js');
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js');
 assert.ok(!liteCanvasRenderer.includes('ctx.clearRect(') &&
   !liteCanvasRenderer.includes("typeof ctx.clearRect") &&
   liteCanvasRenderer.includes("typeof ctx.fillRect") &&
@@ -777,7 +777,7 @@ assert.ok(!crownInput.includes("return 'supported'"),
 // TransferLogic 源码（静态检查用）。
 function transferLogicSrc() {
   return read(
-    'apps/watch/entry/src/main/js/MainAbility/wear/TransferLogic.js');
+    'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/TransferLogic.js');
 }
 
 // ---- 第二轮复核（第三轮修复）静态检查 ----
@@ -786,7 +786,7 @@ function transferLogicSrc() {
 // 仓库里保持占位符；构建脚本必须传 --manifest，
 // 且清理步骤还原 config.json。
 const watchConfigSrc = read(
-  'apps/watch/entry/src/main/config.json');
+  'watch/huawei/watch-lite/entry/src/main/config.json');
 assert.ok(watchConfigSrc.includes(
   'com.xiwei.suyue:CONFIGURE_WITH_PHONE_APP_ID'),
   'repo keeps the supportLists placeholder for build-time injection');
@@ -794,7 +794,7 @@ assert.ok(watchBuildScript.includes('--manifest '),
   'watch build must inject the phone APP ID into supportLists');
 assert.ok(watchBuildScript.includes('--manifest-peer-bundle'),
   'watch build must name the phone peer bundle');
-assert.ok(watchBuildScript.includes('apps/watch/entry/src/main/config.json') ||
+assert.ok(watchBuildScript.includes('watch/huawei/watch-lite/entry/src/main/config.json') ||
   watchBuildScript.includes('WATCH_CONFIG_FILE'),
   'watch build must point at the watch manifest');
 assert.ok(watchWf.includes('git checkout --') &&
@@ -819,12 +819,12 @@ assert.ok(incomingReceiver.includes('activeTransferId'),
   'receiver must track the single in-flight transfer');
 assert.ok(transferLogicSrc().includes("'E_BUSY'"),
   'TransferLogic must define E_BUSY');
-assert.ok(read('shared/protocol/README.md').includes('E_BUSY'),
+assert.ok(read('protocol/README.md').includes('E_BUSY'),
   'protocol spec must document E_BUSY');
 
 // P0-3：waiter 纯逻辑模块 + 取消接真实 SDK。
 assert.ok(existsSync(
-  'apps/phone/entry/src/main/ets/services/TransferWaiters.js'),
+  'harmony/entry/src/main/ets/services/TransferWaiters.js'),
   'waiter registry module must exist');
 assert.ok(transferService.includes('createWaiterRegistry'),
   'send service must use the waiter registry');
@@ -849,7 +849,7 @@ assert.ok(libraryIndex.includes('E_ROLLBACK_MISMATCH'),
 
 // P1-5：演示书生成器必须移除，迁移只看真实文件。
 assert.ok(!existsSync(
-  'apps/watch/entry/src/main/js/MainAbility/storage/BookFiles.js'),
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/BookFiles.js'),
   'demo generator must be deleted');
 assert.ok(!watchIndex.includes('initializeLibrary'),
   'index page must not call any demo generator');

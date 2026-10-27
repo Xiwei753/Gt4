@@ -43,12 +43,12 @@
 /dist/
 
 # 手表内置书籍构建资源（issue #10 复核后）：正文作为临时 rawfile 资源
-# 放进 apps/watch/.../resources/rawfile/，书单只留元数据；构建结束由 trap
+# 放进 watch/huawei/watch-lite/.../resources/rawfile/，书单只留元数据；构建结束由 trap
 # 还原/清理。下面再兜一层，万一被中断也不入库——私人小说正文不得提交到
 # 公开仓库，也不得打印进日志。
-apps/watch/entry/src/main/js/MainAbility/books/BookText_*.g.js
-apps/watch/entry/src/main/js/MainAbility/books/books_report.json
-apps/watch/entry/src/main/resources/rawfile/
+watch/huawei/watch-lite/entry/src/main/js/MainAbility/books/BookText_*.g.js
+watch/huawei/watch-lite/entry/src/main/js/MainAbility/books/books_report.json
+watch/huawei/watch-lite/entry/src/main/resources/rawfile/
 /watch-books/
 .watch-books-build/
 *.watch-books.tmp

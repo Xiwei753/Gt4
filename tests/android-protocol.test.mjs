@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Android 侧协议一致性交叉验证（issue #3）。
 //
-// 目的：Android APK 是同一套 shared/protocol v0 的“手机”生产者，
+// 目的：Android APK 是同一套 protocol v0 的“手机”生产者，
 // 不引入第三套协议。本测试把 Android 的产物形状与共享示例、
 // 以及与 Kotlin 源码里的常量做静态对齐，Node 即可运行：
 //   node tests/android-protocol.test.mjs
@@ -21,7 +21,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 // ---------- 1) 共享示例（含 Android 新增示例）字段齐全 ----------
-const EXAMPLES = new URL('../shared/protocol/examples/', import.meta.url);
+const EXAMPLES = new URL('../protocol/examples/', import.meta.url);
 const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 for (const f of files) {
   const msg = JSON.parse(readFileSync(new URL(f, EXAMPLES), 'utf8'));
@@ -75,7 +75,7 @@ for (const key of META_KEYS) {
     'android BOOK_META must carry ' + key);
 }
 const SRC = new URL(
-  '../apps/android/app/src/main/java/com/xiwei/suyue/', import.meta.url);
+  '../android/app/src/main/java/com/xiwei/suyue/', import.meta.url);
 const read = (rel) => readFileSync(new URL(rel, SRC), 'utf8');
 
 const bookModels = read('model/BookModels.kt');

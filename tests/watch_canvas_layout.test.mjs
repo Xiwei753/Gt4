@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // #11：验证轻量线性圆屏排版和单次 Canvas 绘制。不调用像素回读或测字接口。
 import assert from 'node:assert/strict';
-import { takeCanvasPage } from '../apps/watch/entry/src/main/js/MainAbility/reader/PageLayout.js';
-import {drawPage, pageColors, fontString} from '../apps/watch/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js';
+import { takeCanvasPage } from '../watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/PageLayout.js';
+import {drawPage, pageColors, fontString} from '../watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/CanvasTextRenderer.js';
 
 const OLD_SIZE = 420;
 const OLD_PADDING = 12;

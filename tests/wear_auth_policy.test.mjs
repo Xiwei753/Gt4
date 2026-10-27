@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const POLICY = 'apps/phone/entry/src/main/ets/services/WearAuthPolicy.js';
+const POLICY = 'harmony/entry/src/main/ets/services/WearAuthPolicy.js';
 const src = readFileSync(POLICY, 'utf8');
 // 纯逻辑不得引入 SDK，否则 Node 无法测试。
 assert.ok(!src.includes('@kit'),
@@ -215,7 +215,7 @@ assert.ok(p2pInitErr.text.includes('P2P 客户端创建'),
 
 // ---- 静态契约：不再依赖 DEVICE_IDENTIFIER，也不再有误导的授权按钮 ----
 const svc = readFileSync(
-  'apps/phone/entry/src/main/ets/services/WearDeviceService.ts', 'utf8');
+  'harmony/entry/src/main/ets/services/WearDeviceService.ts', 'utf8');
 assert.ok(!svc.includes('DEVICE_IDENTIFIER'),
   'device discovery must not depend on the DEVICE_IDENTIFIER permission');
 assert.ok(svc.includes('device_client'),
@@ -223,7 +223,7 @@ assert.ok(svc.includes('device_client'),
 assert.ok(svc.includes('ensureDeviceClient'),
   'service must lazily create the device client (constructor must not throw)');
 const page = readFileSync(
-  'apps/phone/entry/src/main/ets/pages/Index.ets', 'utf8');
+  'harmony/entry/src/main/ets/pages/Index.ets', 'utf8');
 assert.ok(!page.includes('requestAuth'),
   'page must not gate discovery/sending on an authorization request');
 assert.ok(!page.includes('授权手表访问'),

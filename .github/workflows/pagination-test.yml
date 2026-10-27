@@ -2,13 +2,14 @@ name: Source-only checks (not HAP build)
 on:
   push:
     paths:
-      - 'apps/watch/**'
-      - 'apps/phone/**'
+      - 'watch/huawei/watch-lite/**'
+      - 'harmony/**'
+      - 'android/**'
+      - 'protocol/**'
       - 'tests/**'
-      - 'tools/inject_signing.py'
-      - 'shared/**'
+      - 'tools/**'
       - 'README.md'
-      - 'docs/BUILD_AND_TRANSFER.md'
+      - 'docs/**'
       - '.github/workflows/pagination-test.yml'
   pull_request:
   workflow_dispatch:

@@ -11,13 +11,13 @@
 
 | 子系统 | 实际文件 | 当前状态 |
 | --- | --- | --- |
-| 手表书架入口 | `apps/watch/entry/src/main/js/MainAbility/pages/index` | 本地测试书可点击打开（未真机验证） |
+| 手表书架入口 | `watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/index` | 本地测试书可点击打开（未真机验证） |
 | 本地文件 | `storage/BookStorage.js` | 目录、原子提交、窗口读取、进度 JSON；演示书生成器已移除（空库不再重造测试书） |
 | 页码 | `reader/PageLayout.js` | UTF-8 解码与**估算字宽**分页，未做字体实测 |
 | 手表阅读页 | `pages/reader` | 上/下页、读取最近进度 |
 | Wear Engine | `wear/WearReceiver.js` | 消息注册入口；无手机指纹时停用；文件通道复制入沙箱并校验后入库 |
-| 手机 | `apps/phone` | 静态首页，没有选文件或发送能力 |
-| 协议 | `shared/protocol` | 草案，未绑定具体 Wear Engine 包 |
+| 手机 | `harmony` | 静态首页，没有选文件或发送能力 |
+| 协议 | `protocol` | 草案，未绑定具体 Wear Engine 包 |
 
 ## 已知风险
 

@@ -38,7 +38,7 @@ on:
   push:
     branches: [main, 'auto-issue-*']
     paths:
-      - 'apps/watch/**'
+      - 'watch/huawei/watch-lite/**'
       - 'tools/build_watch_lite.sh'
       - 'tools/inject_signing.py'
       - 'tools/extract_phone_app_id.py'
@@ -105,7 +105,7 @@ jobs:
       - name: Locate HAP
         id: hap
         run: |
-          HAP="$(find apps/watch/entry/build/default/outputs/default -name 'entry-default-debug-signed.hap' -type f | head -n 1)"
+          HAP="$(find watch/huawei/watch-lite/entry/build/default/outputs/default -name 'entry-default-debug-signed.hap' -type f | head -n 1)"
           if [ -z "$HAP" ]; then
             echo "ERROR: signed debug HAP not found" >&2
             exit 1
@@ -154,7 +154,7 @@ jobs:
         if: always()
         run: |
           rm -rf "$RUNNER_TEMP/suyue-signing"
-          git checkout -- apps/watch/build-profile.json5 \
-            apps/watch/entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js \
-            apps/watch/entry/src/main/config.json
+          git checkout -- watch/huawei/watch-lite/build-profile.json5 \
+            watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/PhonePeerConfig.g.js \
+            watch/huawei/watch-lite/entry/src/main/config.json
           echo "signing material removed; configs restored"

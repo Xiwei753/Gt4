@@ -2,7 +2,7 @@
 // #11：唯一圆屏 Canvas 分页路线。确保按行排字、UTF-8 偏移、字号变化。
 import assert from 'node:assert/strict';
 import { TextEncoder } from 'node:util';
-import { decodeAt, takeCanvasPage } from '../apps/watch/entry/src/main/js/MainAbility/reader/PageLayout.js';
+import { decodeAt, takeCanvasPage } from '../watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/PageLayout.js';
 const encode = new TextEncoder();
 const SIZE = {width:420,height:420,padding:16,lineHeightRatio:1.55};
 

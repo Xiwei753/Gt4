@@ -18,7 +18,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'suyue-tl-'));
 const loaded = new Map();
 const load = async (rel) => {
   if (loaded.has(rel)) return loaded.get(rel);
-  const srcPath = join('apps/watch/entry/src/main/js/MainAbility',
+  const srcPath = join('watch/huawei/watch-lite/entry/src/main/js/MainAbility',
     rel);
   let src = readFileSync(srcPath, 'utf8');
   const importRe = /from\s+'([^']+)'/g;

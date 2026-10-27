@@ -13,7 +13,7 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib';
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-zip-'));
 const modPath = join(tmp, 'ZipReader.mjs');
 writeFileSync(modPath, readFileSync(
-  'apps/phone/entry/src/main/ets/services/ZipReader.ts', 'utf8'));
+  'harmony/entry/src/main/ets/services/ZipReader.ts', 'utf8'));
 const { ZipReader, inflateRaw, crc32 } = await import(modPath);
 
 // ---------- inflateRaw 与 zlib 互操作 ----------

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Run: node --experimental-default-type=module tests/protocol.test.mjs
-// 按 shared/protocol/README.md 的 v0 规格独立验证：
+// 按 protocol/README.md 的 v0 规格独立验证：
 //   - 全部 examples 字段齐全、类型正确、示例自洽
 //   - CJK/emoji/CRLF 按 UTF-8 字节分块（允许劈开多字节字符），
 //     乱序到达、重复块幂等，拼接后 sha256 与原文一致
@@ -16,7 +16,7 @@ const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const b64decode = (s) => new Uint8Array(Buffer.from(s, 'base64'));
 
 // ---------- 示例校验 ----------
-const EXAMPLES = new URL('../shared/protocol/examples/', import.meta.url);
+const EXAMPLES = new URL('../protocol/examples/', import.meta.url);
 const files = readdirSync(EXAMPLES).filter((f) => f.endsWith('.json'));
 assert.ok(files.includes('hello.json'), 'hello example required');
 for (const f of files) {

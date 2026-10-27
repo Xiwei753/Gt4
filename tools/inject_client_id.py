@@ -3,7 +3,7 @@
 """构建期注入手机应用级 Client ID（issue #6 P0-A）。
 
 真实 Client ID 是 `com.xiwei.suyue` 的**唯一应用身份**，随 HAP 分发，
-不进入 git 历史。因此仓库里 `apps/phone/entry/src/main/module.json5`
+不进入 git 历史。因此仓库里 `harmony/entry/src/main/module.json5`
 的 `module.metadata` 只保留占位符 `CONFIGURE_WITH_AGC_CLIENT_ID`。
 
 本脚本由 `tools/build_phone_hap.sh` 在打包前调用，把占位符替换为真实值
@@ -36,7 +36,7 @@ def fail(msg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--manifest', required=True,
-                    help='apps/phone 下的 module.json5')
+                    help='harmony 下的 module.json5')
     ap.add_argument('--client-id', required=True,
                     help='真实应用级 Client ID（来自本地材料）')
     ap.add_argument('--placeholder', default=DEFAULT_PLACEHOLDER,
