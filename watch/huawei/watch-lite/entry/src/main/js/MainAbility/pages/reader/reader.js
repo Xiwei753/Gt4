@@ -20,8 +20,10 @@ import { openBook, readBytes } from '../../storage/BookStorage';
 import { isBundled, bundledEntry,
   readBundledWindow } from '../../storage/BundledBookSource';
 import { loadProgress,
-  saveProgress } from '../../storage/ProgressStore';
+  saveProgress, saveLastBook } from '../../storage/ProgressStore';
 import { takeCanvasPage } from '../../reader/PageLayout';
+import { normalizeChapters, chapterIndexAt,
+  chapterRows, chapterLabel } from '../../reader/Chapters';
 import { drawPage } from '../../reader/CanvasTextRenderer';
 import { loadReaderPreferences, saveReaderPreferences }
   from '../../storage/ReaderPreferences.js';
@@ -59,7 +61,14 @@ export default {
     crownStatus: 'unverified',
     isBusy: true,
     // 正文与设置互斥显示。左滑设置，系统右滑返回。
-    settingsOpen: false
+    settingsOpen: false,
+    // 章节面板嵌在设置页内，只展示当前章节附近的有界行数。
+    hasChapters: false,
+    chapterOpen: false,
+    chapterLabel: '',
+    chapterRows: [],
+    chapterPrevEnabled: false,
+    chapterNextEnabled: false
   },
   onInit() {
     this.history = [];
@@ -84,6 +93,10 @@ export default {
     this.ctx = null;
     // onShow 才允许取得 Canvas context；数据提前到达只保留 pending。
     this.canvasReady = false;
+    this.chapters = [];
+    this.chapterIndex = -1;
+    this.chapterOpen = false;
+    this.lastBookSaved = false;
     // Lite 通过目标页 data 同名字段注入 bookId（不再用旧的取参接口）；
     // 切勿在这里重置 this.bookId，否则会把收到的参数清空。
     const bookId = this.bookId;
@@ -101,6 +114,7 @@ export default {
     if (this.bundled) {
       const entry = bundledEntry(bookId);
       this.title = entry ? entry.title : '内置书籍';
+      this.setChapters(entry);
       this.startReading();
       return;
     }
@@ -114,9 +128,25 @@ export default {
       }
       getBook(bookId, (entry) => {
         this.title = entry ? entry.title : '未知书名';
+        this.setChapters(entry);
         this.startReading();
       });
     });
+  },
+  setChapters(entry) {
+    const total = entry && typeof entry.bytes === 'number' ?
+      entry.bytes : 0;
+    this.chapters = normalizeChapters(entry && entry.chapters, total);
+    this.hasChapters = this.chapters.length > 1;
+    this.refreshChapterView();
+  },
+  refreshChapterView() {
+    this.chapterIndex = chapterIndexAt(this.chapters, this.offset);
+    this.chapterLabel = chapterLabel(this.chapters, this.chapterIndex);
+    this.chapterRows = chapterRows(this.chapters, this.chapterIndex, 2);
+    this.chapterPrevEnabled = this.chapterIndex > 0;
+    this.chapterNextEnabled = this.chapterIndex >= 0 &&
+      this.chapterIndex < this.chapters.length - 1;
   },
   // 初次打开的书没有 per-book 阅读设置。原链路把位置与两次
   // 设置 KV 读取串在一起：只要“缺省设置”调用不及时返回，
@@ -209,7 +239,7 @@ export default {
     }
     return { width: width, height: height };
   },
-  loadPage(offset, previousOffset, done) {
+  loadPage(offset, previousOffset, done, skipSave) {
     if (this.isLoading || !this.bookId) return;
     this.isLoading = true;
     this.isBusy = true;
@@ -244,7 +274,8 @@ export default {
         data: data,
         offset: offset,
         previousOffset: previousOffset,
-        done: done
+        done: done,
+        skipSave: !!skipSave
       };
       this.renderPending();
     }, this.bundled ? (stage) => {
@@ -293,7 +324,8 @@ export default {
         // 消耗的仍是真实 UTF-8 字节数；保留上一页历史与回调。
         // 每次都前进才继续，避免空白输入无限循环。
         var nextStart = (pending.data.offset || 0) + layout.nextOffset;
-        this.loadPage(nextStart, pending.previousOffset, pending.done);
+        this.loadPage(nextStart, pending.previousOffset,
+          pending.done, pending.skipSave);
         return;
       }
       // 读完文件/遇到损坏字节也不能再伪装为绘制成功。
@@ -324,13 +356,19 @@ export default {
     this.isBusy = false;
     this.pageHint = this.progressError ||
       ('字节位置 ' + this.offset);
-    this.scheduleSave();
+    this.refreshChapterView();
+    // 前后台重绘不是新进度：不再把同一字节位置反复写回 KV。
+    if (!pending.skipSave) this.scheduleSave();
+    if (!this.lastBookSaved) {
+      this.lastBookSaved = true;
+      saveLastBook(this.bookId, function () {});
+    }
     if (pending.done) pending.done(true);
   },
   // 重绘当前页（设置返回 / 画布重建 / 主题变化后调用）。
   redraw() {
     if (!this.bookId) return;
-    this.loadPage(this.offset);
+    this.loadPage(this.offset, undefined, undefined, true);
   },
   // 后台**串行**保存进度：同一时刻只有一个写，避免多个异步写
   // 乱序覆盖更晚的进度；失败只记诊断、不回退已读位置。
@@ -357,7 +395,8 @@ export default {
           this.saveNext();
         } else if (this.returnToShelf) {
           this.returnToShelf = false;
-          router.replace({ uri: 'pages/index/index' });
+          router.replace({ uri: 'pages/index/index',
+            params: { resume: '0' } });
         }
       });
   },
@@ -399,12 +438,47 @@ export default {
   // 展开/收起设置行（现在是独占一屏的设置页，阅读位置不变）。
   openSettings() {
     this.settingsOpen = true;
+    this.chapterOpen = false;
+    this.refreshChapterView();
+  },
+  openChapters() {
+    if (!this.hasChapters) return;
+    this.settingsOpen = true;
+    this.chapterOpen = true;
+    this.refreshChapterView();
+  },
+  closeChapters() {
+    this.chapterOpen = false;
+    this.refreshChapterView();
   },
   // Canvas 始终挂载，返回阅读后只绘制一次当前页。
   closeSettings() {
     this.settingsOpen = false;
+    this.chapterOpen = false;
     if (this.pending) this.renderPending();
     else if (!this.isLoading) this.redraw();
+  },
+  jumpChapter(index) {
+    if (!this.hasChapters || this.isBusy) return;
+    if (index < 0 || index >= this.chapters.length) return;
+    const chapter = this.chapters[index];
+    this.userMoved = true;
+    this.settingsOpen = false;
+    this.chapterOpen = false;
+    this.loadPage(chapter.offset, this.offset);
+  },
+  previousChapter() {
+    if (!this.hasChapters) return;
+    const index = chapterIndexAt(this.chapters, this.offset);
+    if (index <= 0) return;
+    this.jumpChapter(index - 1);
+  },
+  nextChapter() {
+    if (!this.hasChapters) return;
+    const index = chapterIndexAt(this.chapters, this.offset);
+    const target = index < 0 ? 0 : index + 1;
+    if (target >= this.chapters.length) return;
+    this.jumpChapter(target);
   },
   // 左滑进入设置；右滑保留给 GT4 系统返回手势，不在应用拦截。
   // 左滑不再翻页，翻页用点按正文两侧或表冠。
@@ -514,7 +588,8 @@ export default {
   backToLibrary() {
     // 必须在退出前等待最后一次阅读位置写入完成（有 2.5 秒上限）。
     if (!this.progressReady || !this.bookId) {
-      router.replace({ uri: 'pages/index/index' });
+      router.replace({ uri: 'pages/index/index',
+        params: { resume: '0' } });
       return;
     }
     this.returnToShelf = true;

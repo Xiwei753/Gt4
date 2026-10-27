@@ -77,6 +77,10 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
   `app.bundleName`，不一致就拒绝签名。
   包内快照齐全：`app.bc` (806 B)、`pages/index/index.bc` (29,938 B)、
   `pages/reader/reader.bc` (21,802 B)。
+  > issue #17 复测（2026-10-27）：当前本机工具链的 **release** 构建再次出现
+  > `index.bc`/`reader.bc` 快照转换失败（在 #16 基线上同样可复现，非本次代码引入）；
+  > `tests/build_artifact_check.sh` 按设计硬失败。当前交付以 **debug 单 BIN 签名 HAP**
+  > 为准；release 快照仍需工具链侧修复后重验。
 - **包名**：手表 = **`con.xiwei.suyue.gt4`**（`con` 不是笔误：AGC 里
   实际注册的名字，已确认保留），手机 = `com.xiwei.suyue`。
   两者必须互不相同——双端靠包名区分自己与对端，撞名会让配对门控失效。
@@ -159,7 +163,7 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
   `bookId` = 规范化 UTF-8 的 SHA-256 前 16 位；同内容去重、同名加 ` (2)`；单本上限默认 8 MiB。**从不打印正文**。
 - 正文写入临时资源 `entry/src/main/resources/rawfile/gt4books/<bookId>.txt`（真实规范化字节，
   hvigor 会真正打进内层 `entry.bin`）；`books/BookCatalog.g.js` = `export var BOOKS =
-  [{bookId,title,bytes,file,sha256}]` —— **仅元数据，不含正文**；另有 `books_report.json`
+  [{bookId,title,bytes,file,sha256,chapters}]` —— **仅元数据，不含正文**；另有 `books_report.json`
   （含每本前 64 字节 base64 `probeB64`）供产物校验。
 - 仓库里的 `books/` 与 `rawfile/` 都是临时区：构建前备份、`trap ... EXIT` 还原/清理，
   `.gitignore` 屏蔽之，**私人正文不进公开仓库也不进日志**。
@@ -191,6 +195,30 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 **未验证**：GT 4 真机上 `internal://app/rawfile/...` 能否被 `@system.file` 读/复制，只能由目标固件判定；
 若两步都失败，阅读页会显示真实错误码（不再"看起来成功"）。真机只要两本内置书能打开看到正文即通过。
 **GT 4 真机闭环（打开内置书、翻页、字号、日夜、进度）仍待实测，本 issue 暂不可关闭。**
+
+## 章节、冷启动续读与长翻页（issue #17）
+
+- **章节索引在来源侧生成**：内置 TXT 由 `tools/prepare_watch_books.py` 识别行首的
+  「第…章/回/卷」「序章/楔子/番外/尾声」「Chapter N」等标题；手机 TXT 导入在
+  Harmony `BookImportService.ts` / Android `TxtImportService.kt` 做同一规则。每条只有
+  标题和规范化 **UTF-8 字节**起点/长度，绝不用字符下标或页码；识别不到可靠标题时整本
+  保持单章「正文」，不截断、不丢字。EPUB 仍沿用原有章节打包。
+- **手表章节面板**：阅读设置里新增「章节 · 当前标题」；面板只渲染当前章节附近最多 5 行，
+  另有上一章/下一章。跳转直接复用原有 `loadPage(byteOffset)`，渲染完成后按原进度规则保存。
+  旧书/无索引书没有章节入口，但正文、字号、主题和翻页完全不变。
+- **冷启动续读**：`ProgressStore` 另存一个 16 字符 `suyue.last` 键；每本书的真实位置仍是
+  `suyue.pos.<bookId>`，不复制进度。书架先同步渲染，再异步读取上次书籍：书还存在且可打开
+  才自动进入阅读页；被删除、索引不可用或读取超时则留在书架。显式返回书架会带
+  `resume=0`，不会马上又被自动打开；熄屏/`onShow` 不会重复路由。
+- **长时间翻页**：外部文件 `openBook/readBytes` 现在也有 settle-once 超时；单次读取
+  不回调时阅读页会显示错误并解锁，而不是永久停在 `isLoading`。迟到的底层回调被丢弃。
+  压力回归 `tests/watch_reader_stress.test.mjs` 连续翻页 4000 次并穿插前后台切换，
+  验证 `pending/isLoading` 归零、历史仍限制在 60 条。**这只证明代码路径有界，
+  真机长时间卡顿仍需实机复现与确认。**
+- 回归：`tests/watch_chapters.test.mjs`、`tests/watch_reader_chapters.test.mjs`、
+  `tests/prepare_watch_books.test.mjs`、`tests/watch_book_modules.test.mjs`、
+  `tests/watch_shelf_startup.test.mjs`、`tests/watch_reader_stress.test.mjs`。
+
 ## 未完成
 
 - **内置书 rawfile 读取未真机验证**（issue #10）：`internal://app/rawfile/...` 能否被
@@ -203,6 +231,8 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
   每页阈值多少，必须真机实测**（见 `reader/CrownInput.js` 顶部说明）。
 - 圆屏正文：Issue #11 使用常驻 `<canvas>` + 轻量字格计算，一页只绘制一次；
   GT4 固件能否实际显示中文仍须真机验证。
+- 章节面板、冷启动续读与长时间翻页（issue #17）：Node 压力测试和 HAP 编译已通过，
+  但尚未在 GT 4 上实测章节跳转、字号变化后位置、熄屏重开与连续久读。
 - 在 GT 4 46mm 上安装、启动、翻页、恢复进度，并核对
   `targetSdkVersion`/`compatibleSdkVersion` 的 `6.1.1(24)`
   是否为 GT 4 开发安装实际可用的版本。**编译通过不等于真机适配通过。**

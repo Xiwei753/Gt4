@@ -34,6 +34,9 @@
 1. `DocumentViewPicker` 获取 TXT/EPUB 的文件 URI（已实现选择）。
 2. TXT：`TextDecodeService` 识别编码（BOM/UTF-8 校验/GBK 候选），
    `BookImportService` 复制进沙箱并规范化 UTF-8；GBK 解码可用性**待真机验证**。
+   TXT 的正文章节标题（第…章/序章/番外/Chapter…）在规范化 UTF-8 字节上生成
+   `chapters: [{title, offset, length}]`，与 EPUB 章节使用同一传输元数据；识别不到时
+   整本作为单章「正文」（issue #17）。
 3. EPUB：`ZipReader`（纯 JS inflate，含穿越/bomb/CRC 防护）+
    `EpubImportService` 按 OPF/spine 顺序清洗章节；仅无 DRM。
 4. `BookRepository` 维护 `library.json` 索引，重启不丢书。

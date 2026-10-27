@@ -150,7 +150,8 @@ object BookImportService {
                         reason = "编码识别失败（GBK/GB18030 解码在当前系统不可用），未导入"
                     )
                 normalized = normalizedTxt.bytes
-                chapters = listOf(BookChapter("正文", 0L, normalized.size.toLong()))
+                chapters = TxtImportService.detectChapters(
+                    normalizedTxt.text, normalized)
                 title = displayFilename(context, uri).replace(Regex("\\.[^.]+$"), "")
             } else {
                 val epub = EpubImportService.importEpub(raw)

@@ -87,6 +87,51 @@ try {
     assert.equal(ids.size, 2);
   }
 
+  // (2b) TXT 章节标题 → 规范化 UTF-8 字节偏移；长度首尾连续覆盖全文。
+  {
+    const { books, res } = tmp();
+    const body = Buffer.from(
+      '版权页\n\n第一章 启程\n' + '甲😀'.repeat(30) +
+      '\n\nChapter 2 Return\n' + 'body '.repeat(40) +
+      '\n番外 一\n尾声\n' + '结局正文。'.repeat(20), 'utf8');
+    writeFileSync(join(books, '多章.txt'), body);
+    const r = run(books, res);
+    assert.equal(r.status, 0, r.stderr);
+    const book = manifestOf(res).books[0];
+    assert.ok(Array.isArray(book.chapters), 'manifest must include chapters');
+    assert.deepEqual(book.chapters.map((c) => c.title),
+      ['第一章 启程', 'Chapter 2 Return', '番外 一', '尾声']);
+    let cursor = 0;
+    for (const chapter of book.chapters) {
+      const at = body.indexOf(Buffer.from(chapter.title, 'utf8'));
+      assert.ok(at >= 0, 'test fixture heading must exist');
+      assert.equal(chapter.offset, at,
+        'chapter offset must be the real UTF-8 byte start');
+      assert.ok(chapter.offset >= cursor, 'chapters must be ordered');
+      assert.ok(body.subarray(chapter.offset).toString('utf8')
+        .startsWith(chapter.title),
+        'offset must land on the heading, not inside a UTF-8 sequence');
+      cursor = chapter.offset + chapter.length;
+    }
+    const last = book.chapters[book.chapters.length - 1];
+    assert.equal(last.offset + last.length, body.length,
+      'chapters must cover the whole normalized file without losing bytes');
+    for (let i = 1; i < book.chapters.length; i++) {
+      assert.equal(book.chapters[i - 1].offset + book.chapters[i - 1].length,
+        book.chapters[i].offset, 'chapter ranges must be contiguous');
+    }
+
+    const plain = Buffer.from('没有章节标题的连续正文。', 'utf8');
+    writeFileSync(join(books, '无章.txt'), plain);
+    const r2 = run(books, res);
+    assert.equal(r2.status, 0, r2.stderr);
+    const plainBook = manifestOf(res).books.find((b) => b.title === '无章');
+    assert.deepEqual(plainBook.chapters,
+      [{ title: '正文', offset: 0, length: plain.length }],
+      'no reliable headings -> one continuous chapter');
+    console.info('  [2b] 章节 UTF-8 偏移/连续区间/无章节回退 ✓');
+  }
+
   // (3) 同内容重复文件 → 只保留稳定顺序里的第一份。
   {
     const { books, res } = tmp();

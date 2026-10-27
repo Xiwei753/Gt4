@@ -15,21 +15,23 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeSystemFileStub } from './helpers/system_file_stub.mjs';
 import { createWatchLoader, writeWearEngineStub,
-  writeRouterStub } from './helpers/watch_module_loader.mjs';
+  writeRouterStub, writeStorageStub } from './helpers/watch_module_loader.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-shelf-'));
 const sandbox = mkdtempSync(join(tmpdir(), 'suyue-shelffs-'));
 const stubPath = writeSystemFileStub(tmp, sandbox);
 const wearengineStubPath = writeWearEngineStub(tmp);
 const routerStubPath = writeRouterStub(tmp);
+const storageStubPath = writeStorageStub(tmp);
 const load = createWatchLoader({ tmpDir: tmp, stubPath,
-  wearengineStubPath, routerStubPath });
+  wearengineStubPath, routerStubPath, storageStubPath });
 
 const pageMod = await load('pages/index/index.js');
 const BookStorage = await load('storage/BookStorage.js');
 const LibraryIndex = await load('storage/LibraryIndex.js');
 const systemFile = (await import(stubPath)).default;
 const router = (await import(routerStubPath)).default;
+const storage = (await import(storageStubPath)).default;
 
 BookStorage.setOperationTimeout(120);
 LibraryIndex.setQueueTimeout(60);
@@ -176,7 +178,67 @@ function newPage() {
   console.info('  [4] 传书消息只改提示，书架不受影响 ✓');
 }
 
+// ---- 5. 冷启动自动续读：只认仍存在的书，显式返回不重开 ----
+{
+  clearLibrary();
+  mkdirSync(join(root, 'books'), { recursive: true });
+  const ext = 'bbbbbbbbbbbbbbbb';
+  writeFileSync(bookFile(ext), 'resume me');
+  writeFileSync(indexFile, JSON.stringify([
+    { bookId: ext, title: '续读书', bytes: 9, addedAt: 1 }
+  ]));
+  for (const key of Object.keys(storage.__values)) {
+    delete storage.__values[key];
+  }
+  storage.__values['suyue.last'] = ext;
+  router.__calls.length = 0;
+  const page = newPage();
+  page.onInit();
+  await waitFor(() => router.__calls.length > 0, 1500);
+  assert.equal(router.__calls.length, 1,
+    'cold start must auto-open the last book exactly once');
+  assert.equal(router.__calls[0][1], 'pages/reader/reader');
+  assert.equal(router.__calls[0][2].bookId, ext);
+  page.onShow();
+  page.onShow();
+  assert.equal(router.__calls.length, 1,
+    'lifecycle onShow must not route again after auto-resume');
+  console.info('  [5a] 冷启动自动续读且 onShow 不重复进入 ✓');
+
+  // 被删除/文件不可访问：正常留在书架，不永久等待。
+  clearLibrary();
+  mkdirSync(join(root, 'books'), { recursive: true });
+  writeFileSync(indexFile, JSON.stringify([
+    { bookId: ext, title: '已删除', bytes: 9, addedAt: 1 }
+  ]));
+  router.__calls.length = 0;
+  const missing = newPage();
+  missing.onInit();
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(router.__calls.length, 0,
+    'missing last book must stay on the shelf');
+  assert.equal(missing.status, '书架为空：可从手机传书');
+  console.info('  [5b] 上次书籍被删除时降级回书架 ✓');
+
+  // 从阅读页显式返回：resume=0，不得再次自动打开。
+  clearLibrary();
+  mkdirSync(join(root, 'books'), { recursive: true });
+  writeFileSync(bookFile(ext), 'resume me');
+  writeFileSync(indexFile, JSON.stringify([
+    { bookId: ext, title: '续读书', bytes: 9, addedAt: 1 }
+  ]));
+  router.__calls.length = 0;
+  const back = newPage();
+  back.data.resume = '0';
+  back.resume = '0';
+  back.onInit();
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(router.__calls.length, 0,
+    'explicit shelf return must suppress auto-resume');
+  console.info('  [5c] 显式返回书架不自动重开 ✓');
+}
+
 rmSync(tmp, { recursive: true, force: true });
 rmSync(sandbox, { recursive: true, force: true });
 console.info('PASS: 开机即书架——启动同步显示书单、不读 books.json、' +
-  '索引损坏不阻塞、外部书目后台合入（issue #10）');
+  '索引损坏不阻塞、外部书目后台合入、冷启动续读（issue #10/#17）');

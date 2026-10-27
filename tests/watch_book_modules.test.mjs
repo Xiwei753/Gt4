@@ -80,10 +80,14 @@ for (const b of report.books) {
   assert.equal(b.sha256, digest, 'report sha256 must match source');
   assert.equal(b.bytes, raw.length, 'report bytes must match source');
   assert.equal(b.file, b.bookId + '.txt');
+  assert.deepEqual(b.chapters,
+    [{ title: '正文', offset: 0, length: raw.length }],
+    'no reliable headings -> one continuous 正文 chapter');
   assert.ok(catalog.includes(JSON.stringify(b.bookId)) &&
     catalog.includes(JSON.stringify(b.title)) &&
-    catalog.includes(JSON.stringify(b.file)),
-    'catalog must carry bookId/title/file metadata');
+    catalog.includes(JSON.stringify(b.file)) &&
+    catalog.includes('chapters:'),
+    'catalog must carry bookId/title/file/chapters metadata');
   // 资源文件必须逐字节等于规范化 UTF-8（BOM 已剥、去重后）。
   const onDisk = readFileSync(join(resourceDir, b.file));
   assert.ok(onDisk.equals(raw),

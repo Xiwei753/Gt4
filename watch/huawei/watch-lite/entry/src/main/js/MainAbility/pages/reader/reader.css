@@ -54,6 +54,15 @@
   align-items: center;
   justify-content: center;
 }
+.settings-page,
+.chapter-page {
+  width: 452px;
+  height: 452px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
 .settings-heading {
   width: 310px;
   height: 32px;
@@ -105,6 +114,36 @@
   justify-content: center;
   background-color: #273140;
   border-radius: 10px;
+}
+.chapter-list {
+  width: 340px;
+  height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.chapter-row {
+  width: 340px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chapter-row-text {
+  width: 330px;
+  height: 36px;
+  font-size: 14px;
+  color: #f2f2f2;
+  text-align: center;
+}
+.chapter-nav {
+  width: 310px;
+  height: 58px;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-around;
+  align-items: center;
 }
 .settings-hint {
   width: 310px;
