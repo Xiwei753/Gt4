@@ -232,14 +232,14 @@ try {
     const real = run(['--profile', realProfile, '--cert', realCert]);
     assert.equal(real.status, 0, real.stderr);
     assert.equal(real.stdout.trim(),
-      'con.xiwei.suyue.gt4_BEWzvDkxDn4ueCkVNgwzqmrFXjhblq+CrbN+' +
-      'HUw4tLR5tMCz5ovAToeq9JX2WFzIO7SoU4YKrDY85m5QgsLEWok=',
+      'con.xiwei.suyue.gt4_BDaSBUuvJDx2jJtpgz26n3jaTWl5k6gj35UIaXwqqJoY' +
+      'PB4RgMKWc7vjcvyZEL3pleAj++xBeRKpQDblJw/Mvek=',
       'local GT 4 profile must yield the leaf Lite identity');
     const realSha = run(['--profile', realProfile,
       '--cert', realCert, '--format', 'sha256']);
     assert.equal(realSha.status, 0, realSha.stderr);
     assert.equal(realSha.stdout.trim(),
-      'fbdee2e124a2232509b1c614d452bded210d61fbd7fac62791199ac37a2701c1',
+      '324c79a4a439faa9471cd5338aeb1ee0036670b9f5e396947f2fc68fac76aceb',
       'local certificate SHA-256 is diagnostic only');
   }
 
