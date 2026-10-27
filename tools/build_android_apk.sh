@@ -2,22 +2,22 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Local/reproducible Android APK build for suyue (issue #3).
 #
-# 产物：apps/android/app/build/outputs/apk/<mode>/app-<mode>.apk
+# 产物：android/app/build/outputs/apk/<mode>/app-<mode>.apk
 #
 # 诚实边界（照抄 HAP 侧的规矩）：
 #   - 需要一个真实的 Android SDK（ANDROID_HOME / ANDROID_SDK_ROOT /
-#     apps/android/local.properties 三者之一）。缺工具链就大声失败，
+#     android/local.properties 三者之一）。缺工具链就大声失败，
 #     不伪造成功。
 #   - 构建成功 ≠ 可安装到 nova 7 Pro，更 ≠ 能与 GT 4 配对传书。
 #     Wear Engine 配对还依赖 AGC 注册、签名指纹、Huawei Health 等，
 #     本脚本只保证 APK 容器/清单/签名信息自洽。
 #   - debug APK 用本机 debug 证书签名，其指纹**不是**手表端
 #     supportLists / Wear Engine 认可的正式手机指纹；要跑真机配对，
-#     需用注册过的 keystore 出 release 包（见 apps/android/README.md）。
+#     需用注册过的 keystore 出 release 包（见 android/README.md）。
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="$REPO_ROOT/apps/android"
+APP_DIR="$REPO_ROOT/android"
 cd "$APP_DIR"
 
 MODE="${1:-debug}"   # debug | release
@@ -33,7 +33,7 @@ if [ -z "$ANDROID_SDK" ] && [ -f "$APP_DIR/local.properties" ]; then
 fi
 if [ -z "$ANDROID_SDK" ] || [ ! -d "$ANDROID_SDK" ]; then
   echo "ERROR: 找不到 Android SDK。请设置 ANDROID_HOME/ANDROID_SDK_ROOT，" >&2
-  echo "       或在 apps/android/local.properties 写 sdk.dir=..." >&2
+  echo "       或在 android/local.properties 写 sdk.dir=..." >&2
   exit 1
 fi
 
@@ -184,7 +184,7 @@ else
 fi
 
 SHA="$(sha256sum "$APK" | awk '{print $1}')"
-echo "APK_OK path=$REPO_ROOT/apps/android/$APK size=$SIZE package=$PKG mode=$MODE signed=$SIGNED_STATE cert_dn='$CERT_DN' cert_sha256=$CERT_SHA256 sha256=$SHA wear_engine_authorized=$WEAR_AUTH note=apk-container-and-cert-check-not-device-install"
+echo "APK_OK path=$REPO_ROOT/android/$APK size=$SIZE package=$PKG mode=$MODE signed=$SIGNED_STATE cert_dn='$CERT_DN' cert_sha256=$CERT_SHA256 sha256=$SHA wear_engine_authorized=$WEAR_AUTH note=apk-container-and-cert-check-not-device-install"
 
 cat >&2 <<'MSG'
 

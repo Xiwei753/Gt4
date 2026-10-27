@@ -1,7 +1,7 @@
 # Android APK 工程状态与验收（议题 #3）
 
-本文件记录 `apps/android` 的工程决策、诚实边界与分阶段验收清单。
-面向用户的构建/安装说明见 [apps/android/README.md](../apps/android/README.md)。
+本文件记录 `android` 的工程决策、诚实边界与分阶段验收清单。
+面向用户的构建/安装说明见 [android/README.md](../android/README.md)。
 
 ## 1. 与议题 #2 / 分支的关系
 
@@ -12,8 +12,8 @@
     即本分支**已包含 #2 手表侧的改名与修复**（手表 `con.xiwei.suyue.gt4`、HarmonyOS 手机 `com.xiwei.suyue`）。
 - 因此本 App 的「手机」身份与手表端登记的手机身份处在同一基线上；但 **Android APK 的包名与
   证书指纹和 HarmonyOS 手机并不相同**（见第 2 节），必须在 AGC 单独登记。
-- 按议题约束：**不与 #2 并行修改** `apps/watch`、`apps/phone`、`tools/build_watch_lite.sh`、
-  `signing/`、CI 的手表/手机 workflow。本工程只新增 `apps/android/**`、`tools/build_android_apk.sh`、
+- 按议题约束：**不与 #2 并行修改** `watch/huawei/watch-lite`、`harmony`、`tools/build_watch_lite.sh`、
+  `signing/`、CI 的手表/手机 workflow。本工程只新增 `android/**`、`tools/build_android_apk.sh`、
   `.github/workflows/android_apk.yml`、Android 相关测试/示例/文档，并对 `README.md` 做少量追加说明。
 
 ## 2. 身份与签名（P0）
@@ -55,7 +55,7 @@
 - 重发：已发送 / 发送失败的书（`READY`/`SENT`/`TRANSFER_FAILED`）可直接重发；未完成导入的不可发送。
 - 书库索引：`library.json` 用 `AtomicFile` 原子写，写入失败会抛出并反馈界面，不静默丢索引。
 - 编码：GBK/GB18030 走**严格解码**（`CodingErrorAction.REPORT`），非法字节返回 `null`，不做静默替换。
-- 协议：`shared/protocol` v0，字段与 HarmonyOS 侧一致（Android 额外带 `encoding`）。
+- 协议：`protocol` v0，字段与 HarmonyOS 侧一致（Android 额外带 `encoding`）。
 - 构建/测试：独立 Gradle 工程，本机 `BUILD SUCCESSFUL`；另有 JVM 单元测试
   （`./gradlew :app:testDebugUnitTest`，覆盖回执关联 / 可发送状态 / 编码严格解码）。
 

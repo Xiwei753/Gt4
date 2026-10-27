@@ -14,7 +14,7 @@ import { join } from 'node:path';
 
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-wait-'));
 const src = readFileSync(
-  'apps/phone/entry/src/main/ets/services/TransferWaiters.js',
+  'harmony/entry/src/main/ets/services/TransferWaiters.js',
   'utf8');
 const modPath = join(tmp, 'TransferWaiters.mjs');
 writeFileSync(modPath, src);

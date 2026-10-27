@@ -7,7 +7,7 @@
 | | 手表 GT 4 46mm | 手机 Pocket 2 |
 | --- | --- | --- |
 | 运行时 | Lite Wearable / JS FA，HML + CSS | HarmonyOS NEXT / ArkTS Stage |
-| 项目入口 | `apps/watch/entry/src/main/config.json` | `apps/phone/entry/src/main/module.json5` |
+| 项目入口 | `watch/huawei/watch-lite/entry/src/main/config.json` | `harmony/entry/src/main/module.json5` |
 | 构建 | 需要匹配 Lite Wearable 的旧式/兼容 SDK、Hvigor Legacy 或对应 DevEco 环境 | 适配 Stage 的 Hvigor + 鸿蒙 CLI |
 | 安装 | 需先验证开发者注册、签名和 DevEco Assistant/HDEA 手机中转安装路径 | HAP 可通过 hdc 安装到手机 |
 | CI 状态 | 已建立 Lite HAP 打包 workflow（自托管 DevEco runner，未实际运行）；尚未产出任何 HAP | 手机 Stage HAP 已本机真实编译/签名/安装（issue #12）；自托管 CI 未实际运行 |
@@ -110,7 +110,7 @@ sha256=09b3bd8a82f44d0ab3930a5b68536c3670025422d1964c7871fc297469c7abc6
 ### 第三轮修复明细（第二轮复核施工单）
 
 **P0**
-1. **Manifest 授权指纹**：`apps/watch/entry/src/main/config.json`
+1. **Manifest 授权指纹**：`watch/huawei/watch-lite/entry/src/main/config.json`
    的 `supportLists` 构建期由 `tools/inject_signing.py`
    注入真实手机身份（issue #13 起为 APP ID；旧版为证书指纹，
    占位符缺失即 fail）；workflow
@@ -161,7 +161,7 @@ GT 4 46mm 与 Pocket 2 真机、Wear Engine 文件通道回调
 ### 第二轮修复明细（issue #1 复核施工单）
 
 **P0（传书闭环）**
-1. 双端身份分离：`apps/phone/.../model/PeerIdentity.ets`
+1. 双端身份分离：`harmony/.../model/PeerIdentity.ets`
    定义 `PHONE_SELF` 与 `WATCH_PEER`；指纹经 CI 生成
    `PeerIdentityConfig.g.ts` / 手表侧 `PhonePeerConfig.g.js`
    注入，空指纹明确禁用发送，不接受假值。
@@ -225,7 +225,7 @@ Secrets、GT 4 46mm 与 Pocket 2 真机、Wear Engine
 
 **P0-A：应用身份元数据与打包校验**
 
-1. `apps/phone/entry/src/main/module.json5` 的 `module.metadata` 新增
+1. `harmony/entry/src/main/module.json5` 的 `module.metadata` 新增
    `client_id`（应用级 Client ID），这是 Wear Engine 读取设备前必须的
    应用身份；缺失即报 `1008509999`。取值来源、与 APP ID / 项目级
    Client ID 的区别见 [WEAR_ENGINE_CLIENT_ID](WEAR_ENGINE_CLIENT_ID.md)。
@@ -377,7 +377,7 @@ watch: entry-default-debug-signed.hap size=419960
 
 ## 现有源码不能直接认定兼容的地方
 
-- `apps/watch/build-profile.json5` 暂时采用轻智能手表示例的 `6.1.1(24)` 模板数值，但**没有确认为 GT 4 开发安装实际可用的版本**。
+- `watch/huawei/watch-lite/build-profile.json5` 暂时采用轻智能手表示例的 `6.1.1(24)` 模板数值，但**没有确认为 GT 4 开发安装实际可用的版本**。
 - HML 页面的几何大小和字号尚未经真机校准；UTF-8 分页是估算字宽，不是字体像素测量。
 - `wear/WearReceiver.js` 的手机指纹经 CI 注入（`PhonePeerConfig.g.js`），未注入时停用消息接收；**系统级授权还需要 `config.json` 的 `supportLists` 同步注入**（workflow 已做，构建后从 HAP 内清单复验）。`wearengine.sendMsg` 的参数形状以华为 Lite 示例为准，**待真机验证**：其中
 `deviceId` 的占位回退值 `'remote'` 已确认未经真机验证，实现会优先采用从

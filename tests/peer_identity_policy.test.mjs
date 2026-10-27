@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-peer-policy-'));
 const copy = join(tmp, 'PeerIdentityPolicy.mjs');
 copyFileSync(join(process.cwd(),
-  'apps/phone/entry/src/main/ets/model/PeerIdentityPolicy.js'), copy);
+  'harmony/entry/src/main/ets/model/PeerIdentityPolicy.js'), copy);
 const policy = await import(pathToFileURL(copy).href);
 
 const WATCH_BUNDLE = 'con.xiwei.suyue.gt4';

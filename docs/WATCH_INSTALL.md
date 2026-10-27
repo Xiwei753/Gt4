@@ -54,7 +54,7 @@ tools/build_watch_lite.sh debug
 只有日志**同时**包含 `LITE_BIN_IDENTITY_OK`、`SIGNED_TOOL_OK`、
 `LITE_BIN_SIGNED_OK`、`HAP_OK`、`BIN_SHA256_MATCH`，并出现
 `VERIFY_UNSUPPORTED_FOR_LITE_BIN`（注意：**不是** `verify: Verify success`）
-才考虑安装 `apps/watch/entry/build/default/outputs/default/entry-default-debug-signed.hap`。
+才考虑安装 `watch/huawei/watch-lite/entry/build/default/outputs/default/entry-default-debug-signed.hap`。
 
 `verify-app -inForm bin` 对本 0xBE Lite BIN 必然报
 `verify: elf magic verify failed`，这是**签名工具的输入格式限制**
@@ -188,7 +188,7 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 
 # 2) 推到已授权、且已配对手表的中间手机（示例：nova 7 Pro）
 adb -s TNL0220908013936 push \
-  apps/watch/entry/build/default/outputs/default/entry-default-debug-signed.hap \
+  watch/huawei/watch-lite/entry/build/default/outputs/default/entry-default-debug-signed.hap \
   /sdcard/haps/suyue-issue10b-rawfile-3books.hap
 ```
 

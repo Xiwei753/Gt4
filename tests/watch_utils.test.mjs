@@ -12,7 +12,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'suyue-wu-'));
 const load = (rel) => {
   const p = join(tmp, rel.replaceAll('/', '_') + '.mjs');
   writeFileSync(p, readFileSync(
-    'apps/watch/entry/src/main/js/MainAbility/' + rel, 'utf8'));
+    'watch/huawei/watch-lite/entry/src/main/js/MainAbility/' + rel, 'utf8'));
   return import(p);
 };
 

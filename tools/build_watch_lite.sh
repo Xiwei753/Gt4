@@ -7,7 +7,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT/apps/watch"
+cd "$REPO_ROOT/watch/huawei/watch-lite"
 
 MODE="${1:-debug}"   # debug | release
 PRODUCT="${PRODUCT:-default}"
@@ -30,7 +30,7 @@ HVIGORW="$(command -v hvigorw || echo ./hvigorw)"
 # 此信息只证明本次构建选择了哪个源码版本；最终可安装性
 # 仍必须以签名 HAP/内层 BIN 检查及 GT4 真机安装结果为准。
 WATCH_SOURCE_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
-WATCH_SOURCE_VERSION="$(python3 - "$REPO_ROOT/apps/watch/entry/src/main/config.json" <<'PY'
+WATCH_SOURCE_VERSION="$(python3 - "$REPO_ROOT/watch/huawei/watch-lite/entry/src/main/config.json" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as f:
     v = json.load(f)['app']['version']
@@ -50,16 +50,16 @@ mkdir -p "$OUT_DIR"
 # 可选入口（向后兼容，不带变量＝与以前完全一致）：
 #   WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 # 构建期把选定 TXT **规范化后放进临时 rawfile 资源**
-#   apps/watch/entry/src/main/resources/rawfile/gt4books/<bookId>.txt
+#   watch/huawei/watch-lite/entry/src/main/resources/rawfile/gt4books/<bookId>.txt
 # 并生成**仅元数据**的
-#   apps/watch/entry/src/main/js/MainAbility/books/BookCatalog.g.js
+#   watch/huawei/watch-lite/entry/src/main/js/MainAbility/books/BookCatalog.g.js
 # 正文不进 JS（避免巨型 reader.js）——那被证明与本机 GT4 安装失败
 # （错误 34）时间相关；设备侧 storage/BundledBookSource.js 按需窗口读
 # rawfile，必要时先 file.copy 到私有目录再读。
 # 仓库里的 books/ 与 rawfile/ 都是可还原的临时区：带书构建前先备份，
 # 构建后由 trap 还原；私人正文既不进仓库、也不进日志（只打印书名与字节数）。
-BOOKS_JS_DIR="$REPO_ROOT/apps/watch/entry/src/main/js/MainAbility/books"
-RAWFILE_ROOT="$REPO_ROOT/apps/watch/entry/src/main/resources/rawfile"
+BOOKS_JS_DIR="$REPO_ROOT/watch/huawei/watch-lite/entry/src/main/js/MainAbility/books"
+RAWFILE_ROOT="$REPO_ROOT/watch/huawei/watch-lite/entry/src/main/resources/rawfile"
 BOOKS_RESOURCE_DIR="$RAWFILE_ROOT/gt4books"
 BOOKS_REPORT=""
 BOOKS_BACKUP=""
@@ -256,7 +256,7 @@ if [ -z "$HAP" ]; then
   exit 1
 fi
 
-echo "BUILT_UNSIGNED_HAP_PATH=$REPO_ROOT/apps/watch/$HAP"
+echo "BUILT_UNSIGNED_HAP_PATH=$REPO_ROOT/watch/huawei/watch-lite/$HAP"
 
 # ---- 签名（issue #2 实测路径）----------------------------------------
 # 为什么不用 hvigor 的 signingConfigs：在 Lite（legacyAppTasks/
@@ -369,7 +369,7 @@ if [ -n "$SIGN_P12" ] || [ -n "$SIGN_CER" ] || [ -n "$SIGN_PROFILE" ]; then
     --in "$HAP" \
     --out "$SIGNED_HAP" \
     --bundle 'con.xiwei.suyue.gt4' \
-    --source-manifest "$REPO_ROOT/apps/watch/entry/src/main/config.json" \
+    --source-manifest "$REPO_ROOT/watch/huawei/watch-lite/entry/src/main/config.json" \
     --p12 "$SIGN_P12" \
     --cer "$SIGN_CER" \
     --profile "$SIGN_PROFILE" \
@@ -391,7 +391,7 @@ if [ -n "$SIGN_P12" ] || [ -n "$SIGN_CER" ] || [ -n "$SIGN_PROFILE" ]; then
     else
       VERIFY_STATE="unknown"
     fi
-    echo "SIGNED_LITE_HAP_PATH=$REPO_ROOT/apps/watch/$HAP"
+    echo "SIGNED_LITE_HAP_PATH=$REPO_ROOT/watch/huawei/watch-lite/$HAP"
   elif [ "$SIGN_STATUS" = "3" ]; then
     cat >&2 <<'MSG'
 
@@ -410,9 +410,9 @@ MSG
 fi
 
 ARTIFACT_CHECK_ARGS=(
-  "$REPO_ROOT/apps/watch/$HAP"
+  "$REPO_ROOT/watch/huawei/watch-lite/$HAP"
   --bundle 'con.xiwei.suyue.gt4'
-  --source-manifest "$REPO_ROOT/apps/watch/entry/src/main/config.json"
+  --source-manifest "$REPO_ROOT/watch/huawei/watch-lite/entry/src/main/config.json"
   --device liteWearable
   --mode "$MODE"
   --expect-fingerprint "$PHONE_BUNDLE:$PHONE_APP_ID"
@@ -433,13 +433,13 @@ fi
 # BIN**，确认真实签进包里的 supportLists/APP ID 不是旧值或空值。
 # grep 不能加 -q：它提前退出会让上游 unzip/strings 收到 SIGPIPE，在
 # `set -o pipefail` 下把已命中的检查误判为失败（实际踩过）。
-if ! unzip -p "$REPO_ROOT/apps/watch/$HAP" '*.bin' 2>/dev/null \
+if ! unzip -p "$REPO_ROOT/watch/huawei/watch-lite/$HAP" '*.bin' 2>/dev/null \
     | strings | grep -F "$PHONE_BUNDLE:$PHONE_APP_ID" >/dev/null; then
   echo "ERROR: 最终 HAP 内层 BIN 未包含 supportLists=$PHONE_BUNDLE:$PHONE_APP_ID" >&2
   echo "       拒绝把旧 SHA-256/空值/未注入的包当成新身份产物。" >&2
   exit 1
 fi
-if ! unzip -p "$REPO_ROOT/apps/watch/$HAP" '*.bin' 2>/dev/null \
+if ! unzip -p "$REPO_ROOT/watch/huawei/watch-lite/$HAP" '*.bin' 2>/dev/null \
     | strings | grep -F "$PHONE_APP_ID" >/dev/null; then
   echo "ERROR: 最终 HAP 内层 BIN 未包含手机 APP ID。" >&2
   exit 1
@@ -455,7 +455,7 @@ fi
 
 # 单页最终 JS 大小：用于证明「没有巨型 reader.js」（issue #10 复核）。
 # 正文应在 rawfile 资源里，页面 JS 只带书单元数据。
-PAGE_JS_DIR="$REPO_ROOT/apps/watch/entry/build/default/intermediates/lite_source/default/assets/js/MainAbility"
+PAGE_JS_DIR="$REPO_ROOT/watch/huawei/watch-lite/entry/build/default/intermediates/lite_source/default/assets/js/MainAbility"
 if [ -d "$PAGE_JS_DIR" ]; then
   for page in index/index reader/reader; do
     js="$PAGE_JS_DIR/pages/$page.js"
@@ -467,11 +467,11 @@ fi
 
 if [ "$UNSIGNED" = "0" ]; then
   BIN_BUNDLE="$(python3 "$REPO_ROOT/tools/check_lite_bin.py" \
-      --hap "$REPO_ROOT/apps/watch/$HAP" --bundle 'con.xiwei.suyue.gt4' 2>/dev/null \
+      --hap "$REPO_ROOT/watch/huawei/watch-lite/$HAP" --bundle 'con.xiwei.suyue.gt4' 2>/dev/null \
       | sed -n 's/.*header bundleName=\([^ ]*\).*/\1/p')"
-  echo "WATCH_HAP_PATH=$REPO_ROOT/apps/watch/$HAP"
-  echo "WATCH_HAP_SIZE=$(stat -c%s "$REPO_ROOT/apps/watch/$HAP" 2>/dev/null || stat -f%z "$REPO_ROOT/apps/watch/$HAP")"
-  echo "WATCH_HAP_SHA256=$(sha256sum "$REPO_ROOT/apps/watch/$HAP" | awk '{print $1}')"
+  echo "WATCH_HAP_PATH=$REPO_ROOT/watch/huawei/watch-lite/$HAP"
+  echo "WATCH_HAP_SIZE=$(stat -c%s "$REPO_ROOT/watch/huawei/watch-lite/$HAP" 2>/dev/null || stat -f%z "$REPO_ROOT/watch/huawei/watch-lite/$HAP")"
+  echo "WATCH_HAP_SHA256=$(sha256sum "$REPO_ROOT/watch/huawei/watch-lite/$HAP" | awk '{print $1}')"
   echo "WATCH_HAP_BIN_BUNDLE=${BIN_BUNDLE:-unknown}"
   echo "WATCH_SIGN_STATUS=SIGNED_TOOL_OK"
   echo "WATCH_VERIFY_STATUS=${VERIFY_STATE:-unknown}"

@@ -52,7 +52,7 @@ Wear Engine 服务连接成功，但华为侧在读取设备列表**之前**发�
 
 ## 放在哪里
 
-`apps/phone/entry/src/main/module.json5` 的 `module.metadata` 数组：
+`harmony/entry/src/main/module.json5` 的 `module.metadata` 数组：
 
 ```json
 "metadata": [

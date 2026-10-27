@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const WATCH_ROOT =
-  'apps/watch/entry/src/main/js/MainAbility';
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility';
 
 export function createWatchLoader(options) {
   const tmpDir = options.tmpDir;

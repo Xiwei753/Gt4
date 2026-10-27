@@ -20,7 +20,7 @@ on:
   push:
     branches: [main, 'auto-issue-*']
     paths:
-      - 'apps/phone/**'
+      - 'harmony/**'
       - 'tools/build_phone_hap.sh'
       - 'tools/inject_signing.py'
       - 'tools/extract_watch_fingerprint.py'
@@ -56,7 +56,7 @@ jobs:
           python3 tools/inject_signing.py \
             --material-json "$PHONE_SIGNING_MATERIAL" \
             --signing-dir "$RUNNER_TEMP/suyue-signing" \
-            --build-profile apps/phone/build-profile.json5
+            --build-profile harmony/build-profile.json5
 
       - name: Export watch Lite fingerprint for build-time cross-check
         id: watch-fingerprint
@@ -88,7 +88,7 @@ jobs:
       - name: Locate HAP
         id: hap
         run: |
-          HAP="$(find apps/phone/entry/build/default/outputs/default -name 'entry-default-release-*.hap' -type f | head -n 1)"
+          HAP="$(find harmony/entry/build/default/outputs/default -name 'entry-default-release-*.hap' -type f | head -n 1)"
           if [ -z "$HAP" ]; then
             echo "ERROR: release HAP not found" >&2
             exit 1
@@ -142,6 +142,6 @@ jobs:
         if: always()
         run: |
           rm -rf "$RUNNER_TEMP/suyue-signing"
-          git checkout -- apps/phone/build-profile.json5 \
-            apps/phone/entry/src/main/ets/services/PeerIdentityConfig.g.ts
+          git checkout -- harmony/build-profile.json5 \
+            harmony/entry/src/main/ets/services/PeerIdentityConfig.g.ts
           echo "signing material removed; configs restored"

@@ -7,7 +7,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT/apps/phone"
+cd "$REPO_ROOT/harmony"
 
 MODE="${1:-debug}"   # debug | release
 PRODUCT="${PRODUCT:-default}"
@@ -341,7 +341,7 @@ if [ -n "$SIGN_P12" ] || [ -n "$SIGN_CER" ] || [ -n "$SIGN_PROFILE" ]; then
   fi
 fi
 
-echo "HAP_PATH=$REPO_ROOT/apps/phone/$HAP"
+echo "HAP_PATH=$REPO_ROOT/harmony/$HAP"
 # issue #6 P0-A：Wear Engine 需要应用级 client_id 元数据；源码里有不等于
 # 最终 HAP 里还在。此时 module.json5 已被注入真实值（见上文注入块），
 # 这里从源码取该值，再去最终 HAP 的清单里核对，缺项/空值/不一致一律失败
@@ -368,7 +368,7 @@ if [ "$CLIENT_ID" = "$CLIENT_ID_PLACEHOLDER" ]; then
   exit 1
 fi
 "$REPO_ROOT/tests/build_artifact_check.sh" \
-  "$REPO_ROOT/apps/phone/$HAP" \
+  "$REPO_ROOT/harmony/$HAP" \
   --bundle 'com.xiwei.suyue' \
   --device phone \
   --mode "$MODE" \

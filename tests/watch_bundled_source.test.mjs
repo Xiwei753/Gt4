@@ -24,7 +24,7 @@ import { createWatchLoader, writeWearEngineStub,
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..');
-const booksDirSrc = join(repo, 'apps', 'watch', 'entry',
+const booksDirSrc = join(repo, 'watch', 'huawei', 'watch-lite', 'entry',
   'src', 'main', 'js', 'MainAbility', 'books');
 const script = join(repo, 'tools', 'generate_watch_book_modules.py');
 

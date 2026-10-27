@@ -17,17 +17,17 @@ on:
   push:
     branches: [auto-issue-3, main]
     paths:
-      - 'apps/android/**'
+      - 'android/**'
       - 'tools/build_android_apk.sh'
       - '.github/workflows/android_apk.yml'
-      - 'shared/protocol/**'
+      - 'protocol/**'
       - 'tests/android-protocol.test.mjs'
   pull_request:
     paths:
-      - 'apps/android/**'
+      - 'android/**'
       - 'tools/build_android_apk.sh'
       - '.github/workflows/android_apk.yml'
-      - 'shared/protocol/**'
+      - 'protocol/**'
       - 'tests/android-protocol.test.mjs'
   workflow_dispatch:
 
@@ -99,7 +99,7 @@ jobs:
       - name: Locate APK
         id: apk
         run: |
-          APK="$(find apps/android/app/build/outputs/apk -name '*.apk' -type f | head -n 1)"
+          APK="$(find android/app/build/outputs/apk -name '*.apk' -type f | head -n 1)"
           echo "path=$APK" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$APK")" >> "$GITHUB_OUTPUT"
           ls -l "$APK"
