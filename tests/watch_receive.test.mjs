@@ -225,6 +225,42 @@ const msgOnDisk = readSandbox('gt4reader/books/' +
 assert.deepEqual(Buffer.from(msgOnDisk),
   Buffer.from(msgBytes));
 
+// ---- E2. 文件通道 + CHAPTERS 分片：章节先于文件到达，乱序分片可重排 ----
+const chapterText = '第一章：分片目录\r\n第二章：文件通道\r\n'.repeat(40);
+const chapterBytes = enc.encode(chapterText);
+const chapterBookId = sha256(chapterBytes).slice(0, 16);
+const chapterMeta = {
+  v: 0, type: 'BOOK_META',
+  transferId: 'file-chapters-1',
+  bookId: chapterBookId, title: '分片目录书',
+  encoding: 'utf-8', bytes: chapterBytes.length,
+  sha256: sha256(chapterBytes),
+  chunks: 1, chunkBytes: 65536,
+  chapters: [], chapterChunks: 2
+};
+receiver.onMessage(JSON.stringify(chapterMeta));
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'CHAPTERS', transferId: 'file-chapters-1',
+  bookId: chapterBookId, index: 1, total: 2,
+  chapters: [{ title: '第二章', offset: 20,
+    length: chapterBytes.length - 20 }]
+}));
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'CHAPTERS', transferId: 'file-chapters-1',
+  bookId: chapterBookId, index: 0, total: 2,
+  chapters: [{ title: '第一章', offset: 0, length: 20 }]
+}));
+const chaptersUri = writeReceived(
+  'inbox/chapters.bin', chapterBytes);
+const chapterOutcome = await wait((cb) =>
+  receiver.receiveFileChannel(chaptersUri, null, cb));
+assert.equal(chapterOutcome.ok, true);
+const chapterEntry = await wait((cb) =>
+  LibraryIndex.getBook(chapterBookId, cb));
+assert.deepEqual(chapterEntry.chapters.map((c) => c.title),
+  ['第一章', '第二章'], 'CHAPTERS chunks must be assembled before addBook');
+await wait((cb) => LibraryIndex.removeBook(chapterBookId, cb));
+
 // ---- F. LibraryIndex 串行写（P1-12） ----
 await wait((cb) => LibraryIndex.removeBook(bookId, cb));
 await wait((cb) => LibraryIndex.removeBook(msgBookId, cb));

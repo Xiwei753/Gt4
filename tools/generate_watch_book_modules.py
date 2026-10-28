@@ -66,7 +66,7 @@ def write_bytes(path, data):
 
 
 def render_catalog(books):
-    """仅元数据的 JS 书单：bookId / 书名 / 字节数 / 资源文件名。"""
+    """仅元数据的 JS 书单：bookId / 书名 / 字节数 / 资源文件名 / 章节索引。"""
     lines = [
         '// SPDX-License-Identifier: GPL-3.0-only',
         '// 构建期生成的内置书单（**仅元数据，绝不含正文**）：issue #10。',
@@ -78,9 +78,11 @@ def render_catalog(books):
     ]
     for b in books:
         lines.append(
-            '  { bookId: %s, title: %s, bytes: %d, file: %s, sha256: %s },'
+            '  { bookId: %s, title: %s, bytes: %d, file: %s, sha256: %s, chapters: %s },'
             % (js_string(b['bookId']), js_string(b['title']), b['bytes'],
-               js_string(b['file']), js_string(b['sha256'])))
+               js_string(b['file']), js_string(b['sha256']),
+               json.dumps(b['chapters'], ensure_ascii=False,
+                          separators=(',', ':'))))
     lines.append('];')
     lines.append('')
     return '\n'.join(lines)
@@ -148,6 +150,7 @@ def main(argv):
             'bytes': len(data),
             'sha256': digest,
             'encoding': 'utf-8',
+            'chapters': prep.detect_chapters(data),
             'sourceName': name,
             'sourceEncoding': source,
             '_data': data,
@@ -170,6 +173,7 @@ def main(argv):
             'file': entry['file'],
             'bytes': entry['bytes'],
             'sha256': entry['sha256'],
+            'chapters': entry['chapters'],
             # 仅前 64 字节（base64），供构建产物校验，不泄漏成段正文。
             'probeB64': base64.b64encode(data[:PROBE_BYTES]).decode('ascii'),
         })
@@ -186,6 +190,7 @@ def main(argv):
             'bytes': e['bytes'],
             'sha256': e['sha256'],
             'encoding': e['encoding'],
+            'chapters': e['chapters'],
         } for e in entries],
     }
     write_text(os.path.join(args.resource_dir, 'manifest.json'),

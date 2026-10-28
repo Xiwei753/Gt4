@@ -13,6 +13,7 @@ import { BOOKS as CATALOG } from '../../books/BookCatalog.g.js';
 import { ensureDirs, bookPath,
   deleteBook } from '../../storage/BookStorage';
 import { listBooks, removeBook } from '../../storage/LibraryIndex';
+import { loadLastBook } from '../../storage/ProgressStore';
 import { beginReceive, stopReceive } from '../../wear/WearReceiver';
 import { isLowerHex } from '../../util/Validate';
 
@@ -22,16 +23,25 @@ export default {
     books: [],
     status: '书架就绪',
     transferStatus: '传书未配置',
-    confirmId: ''
+    confirmId: '',
+    // 从阅读页显式返回时传 resume=0，避免又自动打开同一本书。
+    resume: '1'
   },
   onInit() {
     // 1) 同步渲染内置书单：这一句之后书架已经可用。
     this.token = (this.token || 0) + 1;
     this.external = [];
+    this.resumeWanted = this.resume !== '0';
+    this.resumeLoaded = false;
+    this.resumeDone = false;
+    this.externalLoaded = false;
+    this.lastBookId = '';
     this.refreshShelf();
     // 2) 后台合入外部（手机传书）书目，绝不阻塞上面的书架。
     this.loadExternal();
-    // 3) 传书接收与书架彼此独立：初始化异常不能拖垮离线书架。
+    // 3) 上次阅读记录也异步读取；书架先显示，绝不永久等待。
+    this.loadResume();
+    // 4) 传书接收与书架彼此独立：初始化异常不能拖垮离线书架。
     try {
       beginReceive((message) => {
         this.handleReceiveStatus(message);
@@ -44,6 +54,7 @@ export default {
   // 从阅读页返回时刷新外部书目（内置书单固定）。
   onShow() {
     this.loadExternal();
+    this.tryAutoResume();
   },
   onDestroy() {
     stopReceive();
@@ -56,6 +67,7 @@ export default {
         bookId: CATALOG[i].bookId,
         title: CATALOG[i].title,
         bytes: CATALOG[i].bytes,
+        chapters: CATALOG[i].chapters || [],
         origin: 'builtin'
       });
     }
@@ -88,21 +100,65 @@ export default {
         if (!dirs.ok) {
           console.error('[suyue] E_EXTERNAL_DIRS ' +
             (dirs.stage || '') + ' code=' + (dirs.code || dirs.reason || '?'));
+          this.externalLoaded = true;
+          this.tryAutoResume();
           return;
         }
         try {
           listBooks((books) => {
             if (token !== this.token) return;
             this.external = books;
+            this.externalLoaded = true;
             this.refreshShelf();
+            this.tryAutoResume();
           });
         } catch (error) {
+          this.externalLoaded = true;
+          this.tryAutoResume();
           console.error('[suyue] E_EXTERNAL_THROW ' + error);
         }
       });
     } catch (error) {
+      this.externalLoaded = true;
+      this.tryAutoResume();
       console.error('[suyue] E_EXTERNAL_THROW ' + error);
     }
+  },
+  // 冷启动续读：只读一个轻量 bookId；书架已经先渲染，存储失败也不阻塞。
+  loadResume() {
+    try {
+      loadLastBook((state) => {
+        this.resumeLoaded = true;
+        if (state && state.ok && state.bookId) {
+          this.lastBookId = state.bookId;
+        }
+        this.tryAutoResume();
+      });
+    } catch (error) {
+      this.resumeLoaded = true;
+      this.tryAutoResume();
+    }
+  },
+  tryAutoResume() {
+    if (!this.resumeWanted || this.resumeDone || !this.resumeLoaded) return;
+    if (!this.lastBookId) {
+      if (this.externalLoaded) this.resumeDone = true;
+      return;
+    }
+    var available = null;
+    for (var i = 0; i < this.books.length; i++) {
+      if (this.books[i].bookId === this.lastBookId) {
+        available = this.books[i];
+        break;
+      }
+    }
+    if (!available) {
+      // 外部书要等异步书目；内置书找不到则立即留在书架。
+      if (this.externalLoaded) this.resumeDone = true;
+      return;
+    }
+    this.resumeDone = true;
+    this.openBook(this.lastBookId);
   },
   handleReceiveStatus(message) {
     if (typeof message !== 'string') return;
@@ -143,6 +199,7 @@ export default {
   openBook(bookId) {
     const book = this.findBook(bookId);
     if (!book) return;
+    this.resumeDone = true;
     this.status = '正在打开《' + book.title + '》';
     try {
       router.replace({

@@ -131,6 +131,53 @@ function utf8Bytes(text: string): Uint8Array {
   return new util.TextEncoder().encode(text);
 }
 
+const MAX_CHAPTER_TITLE_CHARS = 80;
+const CHAPTER_HEADING_PATTERNS: RegExp[] = [
+  /^第[0-9０-９零〇一二三四五六七八九十百千万两]+[章节回卷部篇](?=\s|$|[：:、.．\-—])/,
+  /^(?:序章|序言|楔子|引子|前言|尾声|后记|番外(?:篇)?|终章|大结局)(?=\s|$|[：:、.．\-—])/,
+  /^Chapter\s+(?:\d+|[IVXLCDM]+)\b/i,
+  /^(?:Prologue|Epilogue)\b/i
+];
+
+function isChapterHeading(line: string): boolean {
+  const title = line.trim();
+  if (title.length === 0 || title.length > MAX_CHAPTER_TITLE_CHARS) return false;
+  for (const pattern of CHAPTER_HEADING_PATTERNS) {
+    if (pattern.test(title)) return true;
+  }
+  return false;
+}
+
+// 在规范化 UTF-8 字节上找章节标题行首；不能把 JS 字符下标当字节偏移。
+export function detectTxtChapters(text: string, bytes: Uint8Array):
+  Array<{ title: string; offset: number; length: number }> {
+  const starts: Array<{ title: string; offset: number }> = [];
+  let byteOffset = 0;
+  let lineStart = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i < text.length && text.charCodeAt(i) !== 10) continue;
+    const line = text.slice(lineStart, i + 1);
+    if (isChapterHeading(line)) {
+      starts.push({ title: line.trim(), offset: byteOffset });
+    }
+    byteOffset += utf8Bytes(line).length;
+    lineStart = i + 1;
+  }
+  if (starts.length === 0) {
+    return [{ title: '正文', offset: 0, length: bytes.length }];
+  }
+  const chapters: Array<{ title: string; offset: number; length: number }> = [];
+  for (let i = 0; i < starts.length; i++) {
+    const end = i + 1 < starts.length ? starts[i + 1].offset : bytes.length;
+    if (end > starts[i].offset) {
+      chapters.push({ title: starts[i].title, offset: starts[i].offset,
+        length: end - starts[i].offset });
+    }
+  }
+  return chapters.length > 0 ? chapters :
+    [{ title: '正文', offset: 0, length: bytes.length }];
+}
+
 // 把 EPUB 章节合并为单一规范化 UTF-8 文件，并返回章节字节区间。
 function packChapters(chapters: EpubChapter[]):
   { bytes: Uint8Array; offsets: Array<{ title: string; offset: number; length: number }> } {
@@ -179,9 +226,7 @@ export async function importBook(context: common.UIAbilityContext,
           reason: '编码识别失败（GBK/GB18030 解码在当前系统不可用），未导入' };
       }
       normalized = utf8Bytes(decoded.text);
-      chapters = [{
-        title: '正文', offset: 0, length: normalized.length
-      }];
+      chapters = detectTxtChapters(decoded.text, normalized);
       title = displayFilename(uri).replace(/\.[^.]+$/, '');
     } else {
       const epub = importEpub(raw);

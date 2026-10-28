@@ -34,11 +34,14 @@
 1. `DocumentViewPicker` 获取 TXT/EPUB 的文件 URI（已实现选择）。
 2. TXT：`TextDecodeService` 识别编码（BOM/UTF-8 校验/GBK 候选），
    `BookImportService` 复制进沙箱并规范化 UTF-8；GBK 解码可用性**待真机验证**。
+   TXT 的正文章节标题（第…章/序章/番外/Chapter…）在规范化 UTF-8 字节上生成
+   `chapters: [{title, offset, length}]`，与 EPUB 章节使用同一传输元数据；识别不到时
+   整本作为单章「正文」（issue #17）。
 3. EPUB：`ZipReader`（纯 JS inflate，含穿越/bomb/CRC 防护）+
    `EpubImportService` 按 OPF/spine 顺序清洗章节；仅无 DRM。
 4. `BookRepository` 维护 `library.json` 索引，重启不丢书。
 5. 用 [Wear Engine Kit 手机侧 ArkTS API](https://developer.huawei.com/consumer/cn/doc/doccenter-references/api/wearengine_api) 做设备发现与授权：`getAuthClient` → `getAuthorization` 查询、`requestAuthorization` 由用户显式授权（最小权限 `Permission.DEVICE_IDENTIFIER`），再 `getConnectedDevices` 发现设备；授权与发现各自失败阶段/错误码结构化上报（阶段 5，源码完成，真机待验证）。授权入口在素阅应用内，**不依赖**运动健康的授权入口。
-6. 将书籍规范化、写入临时文件，调用手机侧 `P2pClient.transferFile`；也可使用 `sendMessage` 发送控制/ACK 消息。API 支持并不保证当前 GT 4 配对与签名权限已经打通。
+6. 将书籍规范化、写入临时文件，调用手机侧 `P2pClient.transferFile`；也可使用 `sendMessage` 发送控制/ACK 消息。BOOK_META 的章节目录超过 Wear Engine 单条 JSON 消息 4096 字节时，Harmony/Android 两侧都会改发 `chapterChunks` + 多条 `CHAPTERS`，手表组装完整后再接收正文；正文通道不变。API 支持并不保证当前 GT 4 配对与签名权限已经打通。
 7. 手表注册接收、校验大小/摘要，安全落盘并更新书架，成功后由手表回执，不能只凭手机侧回调就认定入库成功。
 
 手机端打包：`tools/build_phone_hap.sh` + `.github/workflows/phone_hap.yml`

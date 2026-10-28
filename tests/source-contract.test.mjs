@@ -97,7 +97,7 @@ for (const t of ['BOOK_META', 'CHUNK', 'ACK', 'FINISH', 'RESULT',
   assert.ok(protocolReadme.includes(t),
     'protocol spec must define ' + t);
 }
-for (const ex of ['hello', 'book-meta', 'chunk', 'ack', 'result',
+for (const ex of ['hello', 'book-meta', 'chapters', 'chunk', 'ack', 'result',
   'resume', 'error']) {
   assert.ok(existsSync('protocol/examples/' + ex + '.json'),
     'protocol example missing: ' + ex);
@@ -117,6 +117,7 @@ const watchFiles = [
   'util/Utf8.js',
   'util/Base64.js',
   'reader/PageLayout.js',
+  'reader/Chapters.js',
   'reader/ReaderSettings.js',
   'reader/CrownInput.js'
 ];
@@ -162,6 +163,30 @@ assert.ok(watchReader.includes('saveProgress('),
   'reader must persist progress through ProgressStore');
 assert.ok(watchReader.includes('crownProxy'),
   'reader must own the hidden slider ref used as crown proxy');
+assert.ok(watchReader.includes('normalizeChapters') &&
+  watchReader.includes('jumpChapter') &&
+  watchReader.includes('loadPage(chapter.offset'),
+  'reader must jump chapters through normalized byte offsets');
+assert.ok(watchReader.includes('saveLastBook'),
+  'reader must remember the last successfully opened book for cold resume');
+const readerSettingsHml = read(
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.hml');
+assert.ok(readerSettingsHml.includes('openChapters') &&
+  readerSettingsHml.includes('<list class="chapter-list"') &&
+  readerSettingsHml.includes('<list-item class="chapter-item"') &&
+  readerSettingsHml.includes('for="{{ chapterRows }}"') &&
+  readerSettingsHml.includes('chapterWindowNext') &&
+  readerSettingsHml.includes('previousChapter') &&
+  readerSettingsHml.includes('nextChapter'),
+  'settings must expose a bounded Lite list panel with window + chapter navigation');
+assert.ok(watchReader.includes('chapterWindow(this.chapters') &&
+  watchReader.includes('chapterWindowNext()'),
+  'chapter panel must keep an independent bounded browse window');
+const chapterCss = read(
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.css');
+assert.ok(/\.chapter-list\s*\{[^}]*height:/.test(chapterCss) &&
+  /\.chapter-item\s*\{[^}]*height:\s*(?!0\b)\d/.test(chapterCss),
+  'chapter list/list-item need explicit heights on Lite Wearable');
 const crownInput = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/CrownInput.js');
 assert.ok(crownInput.includes("'unverified'"),
   'crown input must not claim verified support without a device run');
@@ -182,8 +207,9 @@ assert.ok(shelfHml.includes('class="book-delete" onclick="askDelete({{$item.book
 // issue #10 第三次真机回归：点击无响应，且误用了 Lite 不支持的路由 API。
 assert.ok(watchIndex.includes('router.replace('),
   'shelf must open the reader with router.replace (Lite Wearable)');
-assert.ok(watchReader.includes("router.replace({ uri: 'pages/index/index' })"),
-  'reader must return to the shelf with router.replace');
+assert.ok(watchReader.includes("router.replace({ uri: 'pages/index/index',") &&
+  watchReader.includes("params: { resume: '0' }"),
+  'reader must return to the shelf with router.replace and suppress auto-resume');
 assert.ok(!/router\.(push|back|getParams)\s*\(/.test(watchIndex + watchReader),
   'watch JS must not use router.push/back/getParams on Lite Wearable');
 assert.ok(watchIndex.includes('E_BOOK_ID_INVALID') &&
@@ -224,6 +250,10 @@ assert.ok(!watchIndex.includes('importBundledBooks') &&
   'shelf must not run the old blocking bundled importer');
 assert.ok(watchIndex.includes('loadExternal'),
   'external books load in the background, built-in shelf does not wait');
+assert.ok(watchIndex.includes('loadLastBook') &&
+  watchIndex.includes('tryAutoResume') &&
+  watchIndex.includes('resumeLoaded'),
+  'shelf must auto-resume only after a bounded background last-book read');
 const bookSource = read(
   'watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/BundledBookSource.js');
 assert.ok(bookSource.includes('readBundledWindow') &&
@@ -252,6 +282,10 @@ const watchProgress = read(
 assert.ok(watchProgress.includes('setProgressTimeout') &&
   watchProgress.includes('timeout'),
   'KV progress store must fail clearly when storage does not callback');
+assert.ok(watchProgress.includes('loadLastBook') &&
+  watchProgress.includes('saveLastBook') &&
+  watchProgress.includes('suyue.last'),
+  'last-book id must be a tiny independent KV value');
 assert.ok(watchProgress.includes("from '@system.storage'") &&
   watchProgress.includes('suyue.pos.') &&
   !watchProgress.includes("from '@system.file'") &&
@@ -264,7 +298,9 @@ assert.ok(watchReader.indexOf('loadProgress(this.bookId') <
   watchReader.includes('阅读位置读取失败'),
   'reader must restore saved position before initial page, never overwrite bad state');
 const watchStorage = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/BookStorage.js');
-assert.ok(watchStorage.includes('setOperationTimeout'),
+assert.ok(watchStorage.includes('setOperationTimeout') &&
+  watchStorage.includes('settleOperation') &&
+  watchStorage.includes("reason: 'timeout'"),
   'storage file ops must have a no-callback timeout guard');
 const watchIndexStore = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/storage/LibraryIndex.js');
 assert.ok(watchIndexStore.includes('setQueueTimeout') &&
@@ -466,6 +502,30 @@ assert.ok(importService.includes('chunks,'),
   'import must populate chunks in the meta');
 assert.ok(importService.includes('chunkBytes:'),
   'import must populate chunkBytes in the meta');
+assert.ok(importService.includes('detectTxtChapters'),
+  'phone TXT import must carry source-side chapter byte ranges (issue #17)');
+assert.ok(read('android/app/src/main/java/com/xiwei/suyue/importer/TxtImportService.kt')
+  .includes('detectChapters'),
+  'Android TXT import must detect chapter byte ranges (issue #17)');
+// issue #17 review：Wear Engine 单条消息 4096 字节，长章节目录必须分片；
+// 两端发送方 + 手表接收方使用同一 CHAPTERS 协议。
+const watchTransferLogic = read(
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/TransferLogic.js');
+assert.ok(watchTransferLogic.includes('applyChapterChunk') &&
+  watchTransferLogic.includes('assembleChapters') &&
+  watchTransferLogic.includes('E_MISSING_CHAPTERS'),
+  'watch receiver must assemble CHAPTERS chunks before FINISH/file commit');
+assert.ok(read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/IncomingBookReceiver.js')
+  .includes("case 'CHAPTERS'"),
+  'watch receiver must handle CHAPTERS messages');
+assert.ok(read('harmony/entry/src/main/ets/services/BookTransferService.ts')
+  .includes('splitChapterChunks') &&
+  read('android/app/src/main/java/com/xiwei/suyue/wear/BookTransferService.kt')
+    .includes('ChapterChunks.split'),
+  'both phone senders must chunk long chapter catalogs');
+assert.ok(read('protocol/README.md').includes('chapterChunks') &&
+  read('protocol/README.md').includes('E_MISSING_CHAPTERS'),
+  'protocol must document 4096-byte chapter chunking');
 
 // P0-4：摘要必须对 normalized 字节计算，
 // 且写后复核。

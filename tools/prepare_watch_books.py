@@ -28,11 +28,27 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 
 DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 MANIFEST_NAME = 'manifest.json'
+MAX_CHAPTER_TITLE_CHARS = 80
+
+# 只认行首的常见章节标题；标题后的分隔符限定为空白/标点/行尾，
+# 避免把「第一章的小镇」这类正文误判成章节。所有偏移均为规范化
+# UTF-8 字节偏移，不能使用 Python/JS 字符下标。
+CHAPTER_HEADING_PATTERNS = (
+    re.compile(
+        r'^第[0-9０-９零〇一二三四五六七八九十百千万两]+[章节回卷部篇]'
+        r'(?=\s|$|[：:、.．\-—])'),
+    re.compile(
+        r'^(?:序章|序言|楔子|引子|前言|尾声|后记|番外(?:篇)?|终章|大结局)'
+        r'(?=\s|$|[：:、.．\-—])'),
+    re.compile(r'^Chapter\s+(?:\d+|[IVXLCDM]+)\b', re.IGNORECASE),
+    re.compile(r'^(?:Prologue|Epilogue)\b', re.IGNORECASE),
+)
 
 EXIT_USAGE = 2
 EXIT_NO_DIR = 3
@@ -98,6 +114,48 @@ def decode_book(path):
 
     # 与手机端一致：摘要对「去掉 BOM 后的规范化 UTF-8 字节」计算。
     return text.encode('utf-8'), source
+
+
+def is_chapter_heading(line):
+    """判断一个物理行是否是章节标题；防止把长正文段落误判。"""
+    title = line.strip(' \t\r\n\ufeff')
+    if not title or len(title) > MAX_CHAPTER_TITLE_CHARS:
+        return False
+    for pattern in CHAPTER_HEADING_PATTERNS:
+        if pattern.match(title):
+            return True
+    return False
+
+
+def detect_chapters(data):
+    """在规范化 UTF-8 字节上生成连续章节区间。
+
+    每个区间从标题行首字节开始，到下一个标题行首/文件尾结束；这样
+    章节跳转不会丢失标题或正文。识别不到可靠标题时整本作为「正文」，
+    保持旧书可读。绝不修改正文本身。
+    """
+    total = len(data)
+    text = data.decode('utf-8')
+    starts = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if is_chapter_heading(line):
+            starts.append((offset, line.strip(' \t\r\n\ufeff')))
+        offset += len(line.encode('utf-8'))
+    if not starts:
+        return [{'title': '正文', 'offset': 0, 'length': total}]
+    chapters = []
+    for index, (start, title) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else total
+        if end > start:
+            chapters.append({
+                'title': title,
+                'offset': start,
+                'length': end - start,
+            })
+    if not chapters:
+        return [{'title': '正文', 'offset': 0, 'length': total}]
+    return chapters
 
 
 def title_from_name(name):
@@ -187,6 +245,7 @@ def main(argv):
             'bytes': len(data),
             'sha256': digest,
             'encoding': 'utf-8',
+            'chapters': detect_chapters(data),
             'sourceName': name,
             'sourceEncoding': source,
             '_data': data,
@@ -218,6 +277,7 @@ def main(argv):
             'bytes': e['bytes'],
             'sha256': e['sha256'],
             'encoding': e['encoding'],
+            'chapters': e['chapters'],
         } for e in entries],
     }
     manifest_path = os.path.join(resource_dir, MANIFEST_NAME)

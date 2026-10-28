@@ -52,7 +52,8 @@ export type TransferErrorCode =
   | 'E_PEER_UNAVAILABLE'
   // 单本互斥：已有传输在途（第二轮 P0-2）。
   | 'E_BUSY'
-  | 'E_PROTOCOL';
+  | 'E_PROTOCOL'
+  | 'E_CHAPTER_TOO_LARGE';
 
 export function newTransferId(): string {
   // 16 字节随机十六进制；不依赖 crypto.getRandomValues

@@ -21,28 +21,70 @@
     <!-- 深色不透明整屏设置页：完全遮住 Canvas 正文；Canvas 仍保持挂载。 -->
   <div class="settings-area" if="{{ settingsOpen }}"
        style="background-color: #101114;">
-    <text class="settings-heading">阅读设置</text>
-    <text class="settings-book">{{ title }}</text>
-    <div class="settings-row">
-      <div class="settings-action" onclick="fontSmaller"><text class="settings-label">A−</text></div>
-      <text class="settings-value">{{ fontSize }}px</text>
-      <div class="settings-action" onclick="fontLarger"><text class="settings-label">A+</text></div>
+    <div class="settings-page" if="{{ !chapterOpen }}">
+      <text class="settings-heading">阅读设置</text>
+      <text class="settings-book">{{ title }}</text>
+      <div class="settings-row">
+        <div class="settings-action" onclick="fontSmaller"><text class="settings-label">A−</text></div>
+        <text class="settings-value">{{ fontSize }}px</text>
+        <div class="settings-action" onclick="fontLarger"><text class="settings-label">A+</text></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-action" onclick="spacingTighter"><text class="settings-label">行距−</text></div>
+        <text class="settings-value">{{ lineHeightRatio }}</text>
+        <div class="settings-action" onclick="spacingLooser"><text class="settings-label">行距+</text></div>
+      </div>
+      <div class="settings-wide-action" onclick="toggleTheme">
+        <text class="settings-label">{{ theme === 'day' ? '切换夜间模式' : '切换日间模式' }}</text>
+      </div>
+      <div class="settings-wide-action" onclick="openChapters" if="{{ hasChapters }}">
+        <text class="settings-label">章节 · {{ chapterLabel }}</text>
+      </div>
+      <div class="settings-wide-action" onclick="closeSettings">
+        <text class="settings-label">继续阅读</text>
+      </div>
+      <div class="settings-wide-action" onclick="backToLibrary">
+        <text class="settings-label">返回书架</text>
+      </div>
+      <text class="settings-hint">{{ pageHint }}</text>
     </div>
-    <div class="settings-row">
-      <div class="settings-action" onclick="spacingTighter"><text class="settings-label">行距−</text></div>
-      <text class="settings-value">{{ lineHeightRatio }}</text>
-      <div class="settings-action" onclick="spacingLooser"><text class="settings-label">行距+</text></div>
+
+    <div class="chapter-page" if="{{ chapterOpen }}">
+      <text class="settings-heading">章节</text>
+      <text class="settings-book">{{ chapterLabel }}</text>
+      <!-- issue #17 review：Lite 的动态 for 必须用真实 <list>/<list-item>，
+           普通 div 在 GT4 上可能只显示空容器。只渲染 5 行窗口。 -->
+      <list class="chapter-list">
+        <list-item class="chapter-item" for="{{ chapterRows }}" tid="index">
+          <div class="chapter-row"
+               onclick="jumpChapter({{ $item.index }})">
+            <text class="chapter-row-text">{{ $item.label }}</text>
+          </div>
+        </list-item>
+      </list>
+      <div class="chapter-window-nav">
+        <div class="settings-action" onclick="chapterWindowPrevious">
+          <text class="settings-label">上一组</text>
+        </div>
+        <div class="settings-action" onclick="chapterWindowNext">
+          <text class="settings-label">下一组</text>
+        </div>
+      </div>
+      <div class="chapter-nav">
+        <div class="settings-action" onclick="previousChapter">
+          <text class="settings-label">上一章</text>
+        </div>
+        <div class="settings-action" onclick="nextChapter">
+          <text class="settings-label">下一章</text>
+        </div>
+      </div>
+      <div class="settings-wide-action" onclick="closeChapters">
+        <text class="settings-label">返回设置</text>
+      </div>
+      <div class="settings-wide-action" onclick="backToLibrary">
+        <text class="settings-label">返回书架</text>
+      </div>
     </div>
-    <div class="settings-wide-action" onclick="toggleTheme">
-      <text class="settings-label">{{ theme === 'day' ? '切换夜间模式' : '切换日间模式' }}</text>
-    </div>
-    <div class="settings-wide-action" onclick="closeSettings">
-      <text class="settings-label">继续阅读</text>
-    </div>
-    <div class="settings-wide-action" onclick="backToLibrary">
-      <text class="settings-label">返回书架</text>
-    </div>
-    <text class="settings-hint">{{ pageHint }}</text>
     </div>
   </stack>
 </div>

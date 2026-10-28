@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // 手表侧书籍接收入口：按 protocol v0 处理
-// BOOK_META / CHUNK / FINISH / RESUME / ERROR，
+// BOOK_META / CHAPTERS / CHUNK / FINISH / RESUME / ERROR，
 // 以及 Wear Engine 文件通道（receiveFileChannel）。
 // 纯逻辑在 ./TransferLogic.js（Node 可测）；本文件
 // 只做 Lite JS I/O 包装。
@@ -14,8 +14,8 @@ import { ensureDirs, saveTempBook,
   commitVerifiedBook, copyFile, deleteFile,
   fileSize, readWindow, tempPath } from '../storage/BookStorage.js';
 import { addBook } from '../storage/LibraryIndex.js';
-import { beginTransfer, applyChunk,
-  assembleBytes, verifyDigest,
+import { beginTransfer, applyChunk, applyChapterChunk,
+  assembleChapters, assembleBytes, verifyDigest,
   createDigestVerifier } from './TransferLogic.js';
 
 // 文件通道流式校验窗口（字节）。
@@ -87,6 +87,20 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
         notify('接收《' + message.title + '》');
         break;
       }
+      case 'CHAPTERS': {
+        const state = transfers[message.transferId];
+        if (!state) {
+          return result(message.transferId, message.bookId,
+            false, 'E_PROTOCOL');
+        }
+        const applied = applyChapterChunk(state, message);
+        if (!applied.ok) {
+          cleanup(message.transferId);
+          return result(message.transferId, message.bookId,
+            false, applied.reason);
+        }
+        break;
+      }
       case 'CHUNK': {
         const state = transfers[message.transferId];
         if (!state) {
@@ -113,6 +127,12 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
         if (!state) {
           return result(message.transferId, message.bookId,
             false, 'E_PROTOCOL');
+        }
+        const chapters = assembleChapters(state);
+        if (!chapters.ok) {
+          cleanup(message.transferId);
+          return result(message.transferId, state.meta.bookId,
+            false, chapters.reason);
         }
         const assembled = assembleBytes(state);
         if (!assembled.ok) {
@@ -225,6 +245,11 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
       cb(ok ? { ok: true } :
         { ok: false, reason: reason });
     };
+    const chapters = assembleChapters(state);
+    if (!chapters.ok) {
+      cleanup(meta.transferId);
+      return finish(false, chapters.reason);
+    }
     ensureDirs((dirs) => {
       if (!dirs.ok) {
         cleanup(meta.transferId);

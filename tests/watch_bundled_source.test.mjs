@@ -90,6 +90,9 @@ try {
   assert.equal(bs.isBundled('zzzzzzzzzzzzzzzz'), false);
   assert.equal(bs.bundledEntry('zzzzzzzzzzzzzzzz'), null);
   assert.equal(bs.bundledEntry(expectedId).title, '跨块');
+  assert.deepEqual(bs.bundledEntry(expectedId).chapters,
+    [{ title: '正文', offset: 0, length: raw.length }],
+    'bundled metadata must carry the normalized byte chapter index');
 
   const read = (offset, size) => settle((done) =>
     bs.readBundledWindow(expectedId, offset, size, done));

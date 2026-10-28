@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // 手机侧书籍发送：按 protocol v0 序列
-// HELLO → BOOK_META → 文件通道 transferFile →
+// HELLO → BOOK_META →（长目录时 CHAPTERS 分片）→ 文件通道 transferFile →
 // 等待手表 RESULT。
 //
 // 关键约束（协议 + 施工单）：
@@ -29,6 +29,8 @@ import { TransferProgress, TransferState,
   newTransferId } from '../model/TransferModels';
 import { WearDeviceService } from './WearDeviceService';
 import { createWaiterRegistry } from './TransferWaiters';
+import { splitChapterChunks, MAX_MESSAGE_BYTES,
+  CHAPTER_TOO_LARGE } from '../model/ChapterChunks';
 
 const TAG = 'suyue/BookTransferService';
 
@@ -361,11 +363,11 @@ export class BookTransferService {
           }
         }, 'HELLO');
 
-        // BOOK_META
-        progress.state = TransferState.SENDING;
-        progress.message = '发送书籍元数据';
-        this.update(callbacks, progress);
-        await this.sendMessage(device, appParam, {
+        // BOOK_META：章节索引可能很长（100~500 章），单条消息超过
+        // Wear Engine 的 4096 字节上限会导致整本传书在正文前失败。
+        // 能放下时保持旧协议；放不下时 BOOK_META 只带 chapterChunks，
+        // 随后逐条发送 CHAPTERS，再进入正文文件通道。
+        const metaPayload = {
           v: 0, type: 'BOOK_META',
           transferId: transferId,
           bookId: book.bookId,
@@ -381,7 +383,53 @@ export class BookTransferService {
           chunks: book.chunks,
           chunkBytes: book.chunkBytes,
           chapters: book.chapters
-        }, 'BOOK_META');
+        };
+        const fullMetaBytes = this.encoder.encodeInto(
+          JSON.stringify(metaPayload)).length;
+        let chapterGroups: unknown[][] = [];
+        if (fullMetaBytes > MAX_MESSAGE_BYTES) {
+          try {
+            chapterGroups = splitChapterChunks(book.chapters,
+              (chunk: unknown[], index: number, totalHint: number) =>
+                this.encoder.encodeInto(JSON.stringify({
+                  v: 0, type: 'CHAPTERS', transferId: transferId,
+                  bookId: book.bookId, index: index, total: totalHint,
+                  chapters: chunk
+                })).length);
+          } catch (error) {
+            if (error instanceof Error &&
+                error.message === CHAPTER_TOO_LARGE) {
+              this.finishTransfer(transferId);
+              progress.state = TransferState.FAILED;
+              progress.error = CHAPTER_TOO_LARGE;
+              progress.message = '章节标题过长，无法发送';
+              this.update(callbacks, progress);
+              return false;
+            }
+            throw error;
+          }
+          metaPayload.chapters = [];
+          // 类型收窄：metaPayload 的 chapters 初始为 BookChapter[]，
+          // 分片模式下显式置空，接收端以 chapterChunks 为准。
+          (metaPayload as Record<string, Object>)['chapterChunks'] =
+            chapterGroups.length;
+        }
+        progress.state = TransferState.SENDING;
+        progress.message = '发送书籍元数据';
+        this.update(callbacks, progress);
+        await this.sendMessage(device, appParam, metaPayload, 'BOOK_META');
+
+        for (let i = 0; i < chapterGroups.length; i++) {
+          progress.message = '发送章节索引 ' + (i + 1) +
+            '/' + chapterGroups.length;
+          this.update(callbacks, progress);
+          await this.sendMessage(device, appParam, {
+            v: 0, type: 'CHAPTERS', transferId: transferId,
+            bookId: book.bookId, index: i,
+            total: chapterGroups.length,
+            chapters: chapterGroups[i]
+          }, 'CHAPTERS ' + (i + 1) + '/' + chapterGroups.length);
+        }
 
         // 文件通道：整本规范化文件。
         progress.message = '通过文件通道传输正文';

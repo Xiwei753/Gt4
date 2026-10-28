@@ -7,6 +7,7 @@ import { isSafeBookId, complete } from './BookStorage.js';
 
 var PROGRESS_TIMEOUT_MS = 2500;
 var PREFIX = 'suyue.pos.';
+var LAST_BOOK_KEY = 'suyue.last';
 var MAX_VALUE_BYTES = 127;  // Lite storage.set 限制严格小于 128 字节。
 
 export function setProgressTimeout(ms) {
@@ -71,6 +72,44 @@ export function loadProgress(bookId, cb) {
       },
       fail: function (data, code) {
         done({ ok: false, code: code === undefined ? 'get_failed' : code });
+      }
+    });
+  });
+}
+
+// 上次成功打开的书籍：只存 16 字节 bookId，不复制整份进度。
+export function loadLastBook(cb) {
+  settle(function (res) { complete(cb, res); }, function (done) {
+    storage.get({
+      key: LAST_BOOK_KEY,
+      default: '',
+      success: function (value) {
+        if (value === '') {
+          done({ ok: true, bookId: '', empty: true });
+        } else if (isSafeBookId(value)) {
+          done({ ok: true, bookId: value });
+        } else {
+          done({ ok: false, code: 'invalid_book_id' });
+        }
+      },
+      fail: function (data, code) {
+        done({ ok: false, code: code === undefined ? 'get_failed' : code });
+      }
+    });
+  });
+}
+
+export function saveLastBook(bookId, cb) {
+  if (!isSafeBookId(bookId)) {
+    return complete(cb, { ok: false, code: 'unsafe_book_id' });
+  }
+  settle(function (res) { complete(cb, res); }, function (done) {
+    storage.set({
+      key: LAST_BOOK_KEY,
+      value: bookId,
+      success: function () { done({ ok: true }); },
+      fail: function (info, code) {
+        done({ ok: false, code: code === undefined ? 'set_failed' : code });
       }
     });
   });

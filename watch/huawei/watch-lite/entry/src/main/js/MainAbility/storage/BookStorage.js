@@ -43,13 +43,34 @@ export function complete(cb, value) {
   if (typeof cb === 'function') cb(value);
 }
 
-// 目录操作后备超时（issue #8）：某个 access/mkdir 既不回调
-// success 也不回调 fail 时，必须给出后备返回，不能再无限等待。
+// 文件/目录操作后备超时（issue #8/#17）：某个 access/mkdir/read
+// 既不回调 success 也不回调 fail 时，必须给出有界返回，不能无限等待。
 // 默认 8s；测试可用 setOperationTimeout 缩短。
 export var OPERATION_TIMEOUT_MS = 8000;
 
 export function setOperationTimeout(ms) {
   if (typeof ms === 'number' && ms > 0) OPERATION_TIMEOUT_MS = ms;
+}
+
+// 单次文件操作也必须有上限：回调丢失时不能把阅读页永久锁在
+// isLoading=true。超时后迟到回调不再生效（settle-once）。
+function settleOperation(cb, task) {
+  let settled = false;
+  const finish = (value) => {
+    if (settled) return;
+    settled = true;
+    if (timer && typeof clearTimeout === 'function') clearTimeout(timer);
+    complete(cb, value);
+  };
+  const timer = typeof setTimeout === 'function' ?
+    setTimeout(() => finish({ ok: false, reason: 'timeout',
+      code: 'timeout' }), OPERATION_TIMEOUT_MS) : null;
+  try {
+    task(finish);
+  } catch (error) {
+    finish({ ok: false, reason: 'throw', code: 'exception',
+      error: String(error) });
+  }
 }
 
 function ensureDir(uri, cb) {
@@ -158,11 +179,13 @@ export function commitVerifiedBook(transferId, bookId, cb) {
 }
 
 export function openBook(bookId, cb) {
-  file.access({
-    uri: bookPath(bookId),
-    success: () => complete(cb, { ok: true }),
-    fail: (data, code) => complete(cb,
-      { ok: false, reason: 'not_found', code: code })
+  settleOperation(cb, (finish) => {
+    file.access({
+      uri: bookPath(bookId),
+      success: () => finish({ ok: true }),
+      fail: (data, code) => finish({
+        ok: false, reason: 'not_found', code: code })
+    });
   });
 }
 
@@ -170,22 +193,24 @@ export function openBook(bookId, cb) {
 export function readBytes(bookId, offset, size, cb) {
   const off = typeof offset === 'number' && isFinite(offset) &&
     offset > 0 ? Math.floor(offset) : 0;
-  file.readArrayBuffer({
-    uri: bookPath(bookId),
-    position: off,
-    length: size,
-    success: (data) => {
-      if (!data || !data.buffer ||
-          typeof data.buffer.byteLength !== 'number') {
-        return complete(cb, { ok: false, reason: 'invalid_buffer' });
-      }
-      complete(cb, {
-        ok: true, offset: off,
-        bytes: new Uint8Array(data.buffer)
-      });
-    },
-    fail: (data, code) => complete(cb,
-      { ok: false, reason: 'read_failed', code: code })
+  settleOperation(cb, (finish) => {
+    file.readArrayBuffer({
+      uri: bookPath(bookId),
+      position: off,
+      length: size,
+      success: (data) => {
+        if (!data || !data.buffer ||
+            typeof data.buffer.byteLength !== 'number') {
+          return finish({ ok: false, reason: 'invalid_buffer' });
+        }
+        finish({
+          ok: true, offset: off,
+          bytes: new Uint8Array(data.buffer)
+        });
+      },
+      fail: (data, code) => finish({
+        ok: false, reason: 'read_failed', code: code })
+    });
   });
 }
 
