@@ -7,6 +7,7 @@
 export var MAX_MESSAGE_BYTES = 4096;
 // 留出余量，避免不同 JSON 序列化器对字段顺序/转义的处理造成越界。
 export var TARGET_CHAPTER_BYTES = 3600;
+export var CHAPTER_TOO_LARGE = 'E_CHAPTER_TOO_LARGE';
 
 // measure(chunk, index, totalHint) 必须返回该 CHAPTERS 消息的 UTF-8 字节数。
 // totalHint 使用 999999：实际分片数不会更多，测出的长度只会偏大。
@@ -25,5 +26,12 @@ export function splitChapterChunks(chapters, measure) {
     }
   }
   if (current.length > 0) groups.push(current);
+  // 单章标题可能来自 EPUB 导航且没有 80 字上限。若它单独一条仍超过
+  // 真实消息上限，不能截断标题或发送超限消息，必须让调用方终止传书。
+  for (var g = 0; g < groups.length; g++) {
+    if (measure(groups[g], g, groups.length) > MAX_MESSAGE_BYTES) {
+      throw new Error(CHAPTER_TOO_LARGE);
+    }
+  }
   return groups;
 }

@@ -103,6 +103,7 @@ export default {
     this.chapterWindowStart = 0;
     this.chapterOpen = false;
     this.lastBookSaved = false;
+    this.lastBookSaving = false;
     // Lite 通过目标页 data 同名字段注入 bookId（不再用旧的取参接口）；
     // 切勿在这里重置 this.bookId，否则会把收到的参数清空。
     const bookId = this.bookId;
@@ -376,9 +377,16 @@ export default {
     this.refreshChapterView();
     // 前后台重绘不是新进度：不再把同一字节位置反复写回 KV。
     if (!pending.skipSave) this.scheduleSave();
-    if (!this.lastBookSaved) {
-      this.lastBookSaved = true;
-      saveLastBook(this.bookId, function () {});
+    // 只有真实翻页才重试上次书籍记录；onShow/设置重绘不写。
+    // 写入确认成功后才标记，失败留给下一次真实翻页，不做计时重试。
+    if (!this.lastBookSaved && !this.lastBookSaving &&
+        !pending.skipSave) {
+      const self = this;
+      this.lastBookSaving = true;
+      saveLastBook(this.bookId, function (result) {
+        self.lastBookSaving = false;
+        if (result && result.ok) self.lastBookSaved = true;
+      });
     }
     if (pending.done) pending.done(true);
   },

@@ -217,8 +217,59 @@ try {
     }
   }
 
+  // ---- 5. 上次书籍记录写失败：不重试风暴，下一次真实翻页再试 ----
+  {
+    const retryPage = Object.create(reader.default);
+    Object.assign(retryPage, reader.default.data);
+    const retryRef = canvasRef();
+    retryPage.$refs = { readerCanvas: retryRef };
+    retryPage.bookId = bookId;
+    retryPage.bundled = false;
+    retryPage.canvasReady = true;
+    retryPage.isBusy = false;
+    retryPage.isLoading = false;
+    retryPage.progressReady = true;
+    retryPage.lastBookSaved = false;
+    retryPage.lastBookSaving = false;
+    retryPage.offset = 0;
+    retryPage.nextOffset = 0;
+    retryPage.history = [];
+    retryPage.settingsOpen = false;
+    retryPage.readingError = false;
+    retryPage.chapters = [];
+    retryPage.setChapters({ bytes: 2 * 1024 * 1024, chapters: [] });
+    retryPage.scheduleSave = function () {};
+    delete storage.__values['suyue.last'];
+    const originalSet = storage.set;
+    let failLastBook = true;
+    storage.set = function (o) {
+      if (o.key === 'suyue.last' && failLastBook) {
+        failLastBook = false;
+        o.fail && o.fail({}, 300);
+        return;
+      }
+      originalSet.call(storage, o);
+    };
+    try {
+      retryPage.loadPage(0);
+      assert.equal(retryPage.lastBookSaved, false,
+        'failed KV write must not mark the last book as saved');
+      assert.equal(storage.__values['suyue.last'], undefined);
+      const before = retryPage.offset;
+      retryPage.nextPage();
+      assert.ok(retryPage.offset > before,
+        'next real page must render after the failed KV write');
+      assert.equal(storage.__values['suyue.last'], bookId,
+        'next real page flip must retry the last-book KV once');
+      assert.equal(retryPage.lastBookSaved, true);
+    } finally {
+      storage.set = originalSet;
+    }
+  }
+
   console.info('PASS: 连续 ' + pages + ' 次翻页/前台切换后资源有界，' +
-    '异步回调不积压，文件回调丢失会超时（issue #17；真机卡顿仍需实测）');
+    '异步回调不积压，文件回调丢失会超时，上次书籍写失败后下次翻页重试' +
+    '（issue #17；真机卡顿仍需实测）');
 } finally {
   rmSync(tmp, { recursive: true, force: true });
   rmSync(disk, { recursive: true, force: true });

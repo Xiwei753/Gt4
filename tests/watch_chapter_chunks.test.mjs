@@ -12,11 +12,16 @@ const modPath = join(tmp, 'ChapterChunks.mjs');
 writeFileSync(modPath, source);
 
 try {
-  const { splitChapterChunks, MAX_MESSAGE_BYTES, TARGET_CHAPTER_BYTES } =
-    await import(modPath);
+  const { splitChapterChunks, MAX_MESSAGE_BYTES, TARGET_CHAPTER_BYTES,
+    CHAPTER_TOO_LARGE } = await import(modPath);
   const encoder = new TextEncoder();
   const transferId = 't'.repeat(32);
   const bookId = 'a'.repeat(16);
+  const measure = (group, index, totalHint) =>
+    encoder.encode(JSON.stringify({
+      v: 0, type: 'CHAPTERS', transferId, bookId,
+      index, total: totalHint, chapters: group
+    })).length;
 
   function chapters(count) {
     let offset = 0;
@@ -72,8 +77,17 @@ try {
 
   check(100);
   check(500);
+  {
+    const huge = [{ title: '超'.repeat(1500), offset: 0, length: 100 }];
+    assert.ok(measure(huge, 0, 1) > MAX_MESSAGE_BYTES,
+      'fixture must exceed the message limit as a single chapter');
+    assert.throws(
+      () => splitChapterChunks(huge, measure),
+      (error) => error && error.message === CHAPTER_TOO_LARGE,
+      'oversized single chapter must fail explicitly, not be truncated');
+  }
   console.info('PASS: 100/500 chapter catalogs are split into <=4096-byte ' +
-    'CHAPTERS messages');
+    'CHAPTERS messages; oversized single chapter fails explicitly');
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

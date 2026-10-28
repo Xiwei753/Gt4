@@ -29,8 +29,8 @@ import { TransferProgress, TransferState,
   newTransferId } from '../model/TransferModels';
 import { WearDeviceService } from './WearDeviceService';
 import { createWaiterRegistry } from './TransferWaiters';
-import { splitChapterChunks, MAX_MESSAGE_BYTES }
-  from '../model/ChapterChunks';
+import { splitChapterChunks, MAX_MESSAGE_BYTES,
+  CHAPTER_TOO_LARGE } from '../model/ChapterChunks';
 
 const TAG = 'suyue/BookTransferService';
 
@@ -388,13 +388,26 @@ export class BookTransferService {
           JSON.stringify(metaPayload)).length;
         let chapterGroups: unknown[][] = [];
         if (fullMetaBytes > MAX_MESSAGE_BYTES) {
-          chapterGroups = splitChapterChunks(book.chapters,
-            (chunk: unknown[], index: number, totalHint: number) =>
-              this.encoder.encodeInto(JSON.stringify({
-                v: 0, type: 'CHAPTERS', transferId: transferId,
-                bookId: book.bookId, index: index, total: totalHint,
-                chapters: chunk
-              })).length);
+          try {
+            chapterGroups = splitChapterChunks(book.chapters,
+              (chunk: unknown[], index: number, totalHint: number) =>
+                this.encoder.encodeInto(JSON.stringify({
+                  v: 0, type: 'CHAPTERS', transferId: transferId,
+                  bookId: book.bookId, index: index, total: totalHint,
+                  chapters: chunk
+                })).length);
+          } catch (error) {
+            if (error instanceof Error &&
+                error.message === CHAPTER_TOO_LARGE) {
+              this.finishTransfer(transferId);
+              progress.state = TransferState.FAILED;
+              progress.error = CHAPTER_TOO_LARGE;
+              progress.message = '章节标题过长，无法发送';
+              this.update(callbacks, progress);
+              return false;
+            }
+            throw error;
+          }
           metaPayload.chapters = [];
           // 类型收窄：metaPayload 的 chapters 初始为 BookChapter[]，
           // 分片模式下显式置空，接收端以 chapterChunks 为准。

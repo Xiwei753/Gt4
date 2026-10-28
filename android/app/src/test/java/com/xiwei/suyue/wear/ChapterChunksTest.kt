@@ -39,6 +39,14 @@ class ChapterChunksTest {
         assertWithinLimit(500)
     }
 
+    @Test(expected = ChapterTooLargeException::class)
+    fun rejectsSingleChapterLargerThanMessageLimit() {
+        val title = "超".repeat(1500)
+        assertTrue(title.toByteArray(Charsets.UTF_8).size > ChapterChunks.MAX_MESSAGE_BYTES)
+        ChapterChunks.split("tid", "a".repeat(16),
+            listOf(BookChapter(title, 0, 100)))
+    }
+
     @Test
     fun escapesQuotesAndNewlinesInTitles() {
         val messages = ChapterChunks.split("tid", "a".repeat(16), listOf(

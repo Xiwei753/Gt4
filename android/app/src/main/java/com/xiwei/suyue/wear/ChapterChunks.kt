@@ -7,6 +7,8 @@ package com.xiwei.suyue.wear
 
 import com.xiwei.suyue.model.BookChapter
 
+class ChapterTooLargeException : IllegalArgumentException("E_CHAPTER_TOO_LARGE")
+
 object ChapterChunks {
     const val MAX_MESSAGE_BYTES = 4096
     // 留出余量，避免不同 JSON 序列化器对字段顺序/转义的处理造成越界。
@@ -30,10 +32,15 @@ object ChapterChunks {
             }
         }
         if (current.isNotEmpty()) groups.add(current)
-        return groups.mapIndexed { index, group ->
+        val messages = groups.mapIndexed { index, group ->
             payload(transferId, bookId, index, groups.size, group)
                 .toByteArray(Charsets.UTF_8)
         }
+        // EPUB 导航标题可能异常长；单条仍超限时明确失败，不截断章节。
+        if (messages.any { it.size > MAX_MESSAGE_BYTES }) {
+            throw ChapterTooLargeException()
+        }
+        return messages
     }
 
     private fun payload(transferId: String, bookId: String,

@@ -51,6 +51,7 @@ object TransferErrorCode {
     const val E_PEER_UNAVAILABLE = "E_PEER_UNAVAILABLE"
     const val E_BUSY = "E_BUSY"
     const val E_PROTOCOL = "E_PROTOCOL"
+    const val E_CHAPTER_TOO_LARGE = "E_CHAPTER_TOO_LARGE"
 }
 
 private val RANDOM = SecureRandom()

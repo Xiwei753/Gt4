@@ -195,7 +195,15 @@ class BookTransferService(private val gateway: WearEngineGateway) {
                 // 消息上限导致传书在正文前失败。
                 val fullMeta = bookMetaJson(transferId, book)
                 val chapterMessages = if (fullMeta.size > ChapterChunks.MAX_MESSAGE_BYTES) {
-                    ChapterChunks.split(transferId, book.bookId, book.chapters)
+                    try {
+                        ChapterChunks.split(transferId, book.bookId, book.chapters)
+                    } catch (e: ChapterTooLargeException) {
+                        finish(transferId)
+                        onProgress(failedProgress(book, transferId,
+                            TransferErrorCode.E_CHAPTER_TOO_LARGE,
+                            "章节标题过长，无法发送"))
+                        return false
+                    }
                 } else {
                     emptyList()
                 }
