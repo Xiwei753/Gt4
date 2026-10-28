@@ -21,8 +21,8 @@ import { ReadingProgressStore, ReadingSummary }
   from './ReadingProgressStore';
 import { WearDeviceService } from './WearDeviceService';
 import { emitReadingApply } from './ReadingSyncEvents';
-import { buildSummaryBatches, decideSyncAction,
-  isValidSummary } from '../model/ReadingSyncPolicy';
+import { buildSummaryBatches, decidePendingAction,
+  decideSyncAction, isValidSummary } from '../model/ReadingSyncPolicy';
 
 const TAG = 'suyue/ReadingSyncService';
 const MAX_MESSAGE_BYTES = 4096;
@@ -322,6 +322,29 @@ export class ReadingSyncService {
       if (remote.offset > book.bytes) continue;
       if (!this.isUtf8Boundary(book, remote.offset)) continue;
       const local = this.findSummary(localSummaries, remote.bookId);
+      if (local !== null && local.pendingOffset >= 0) {
+        const pending = decidePendingAction(local.offset, local.syncedOffset,
+          local.pendingOffset, remote.offset);
+        if (pending === 'confirmed') {
+          // 对端已经持久化到本地新位置，才可推进同步基线。
+          await this.progressStore.markSynced(local.bookId,
+            local.sha256, local.offset);
+          continue;
+        }
+        if (pending === 'resend') {
+          // 先记录待确认状态，再重发；发送失败时基线仍停在旧值，
+          // 下次交换不会把本地新进度误判为已同步。
+          await this.progressStore.markPending(local.bookId,
+            local.sha256, local.offset);
+          await this.sendApply(local.bookId, local.sha256,
+            local.offset, local.updatedAt);
+          continue;
+        }
+        if (pending === 'conflict') {
+          await this.resolveConflict(book, local, remote);
+          continue;
+        }
+      }
       const action = decideSyncAction(local, remote,
         local !== null ? local.syncedOffset : -1);
       if (action === 'apply_remote') {
@@ -331,7 +354,7 @@ export class ReadingSyncService {
         applied += 1;
       } else if (action === 'apply_local') {
         if (local !== null) {
-          await this.progressStore.markSynced(remote.bookId,
+          await this.progressStore.markPending(remote.bookId,
             remote.sha256, local.offset);
           await this.sendApply(local.bookId, local.sha256,
             local.offset, local.updatedAt);
@@ -394,7 +417,7 @@ export class ReadingSyncService {
         remote.offset, remote.updatedAt);
       this.status('进度同步：已采用手表进度', true);
     } else {
-      await this.progressStore.markSynced(remote.bookId,
+      await this.progressStore.markPending(remote.bookId,
         remote.sha256, local.offset);
       await this.sendApply(local.bookId, local.sha256,
         local.offset, local.updatedAt);

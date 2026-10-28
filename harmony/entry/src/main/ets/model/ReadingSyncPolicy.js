@@ -70,6 +70,25 @@ export function decideSyncAction(local, remote, baseline) {
   return 'conflict';
 }
 
+// 已发出 APPLY、但尚未确认对端持久化时的判定。
+// pendingOffset 只表示“手机想同步的新位置”，不是已同步基线。
+// confirmed: 对端已经等于本地新位置，可以推进基线；
+// resend: 对端仍在旧基线，重发 APPLY；
+// conflict: 对端有第三个位置，交给用户选择。
+export function decidePendingAction(localOffset, syncedOffset,
+  pendingOffset, remoteOffset) {
+  if (typeof pendingOffset !== 'number' || !isFinite(pendingOffset) ||
+      pendingOffset < 0) {
+    return 'not_pending';
+  }
+  if (remoteOffset === localOffset) return 'confirmed';
+  if (typeof syncedOffset === 'number' && syncedOffset >= 0 &&
+      remoteOffset === syncedOffset) {
+    return 'resend';
+  }
+  return 'conflict';
+}
+
 // 把摘要装进 <= maxBytes 的 STATE 分片。base 是除 books 外的公共字段。
 // 返回 [{ payload, batch, batches }]；单条摘要本身放不下时返回空数组。
 export function buildSummaryBatches(summaries, base, maxBytes) {

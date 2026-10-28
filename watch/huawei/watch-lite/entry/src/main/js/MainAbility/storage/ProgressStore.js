@@ -9,6 +9,8 @@ var PROGRESS_TIMEOUT_MS = 2500;
 var PREFIX = 'suyue.pos.';
 var SYNC_PREFIX = 'suyue.sync.';
 var LAST_BOOK_KEY = 'suyue.last';
+// 独立小键记录最近打开时间；旧键仍只存 bookId，兼容既有数据。
+var LAST_BOOK_AT_KEY = 'suyue.last.at';
 var MAX_VALUE_BYTES = 127;  // Lite storage.set 限制严格小于 128 字节。
 
 export function setProgressTimeout(ms) {
@@ -86,12 +88,26 @@ export function loadLastBook(cb) {
       default: '',
       success: function (value) {
         if (value === '') {
-          done({ ok: true, bookId: '', empty: true });
-        } else if (isSafeBookId(value)) {
-          done({ ok: true, bookId: value });
-        } else {
-          done({ ok: false, code: 'invalid_book_id' });
+          done({ ok: true, bookId: '', empty: true, updatedAt: 0 });
+          return;
         }
+        if (!isSafeBookId(value)) {
+          done({ ok: false, code: 'invalid_book_id' });
+          return;
+        }
+        // 时间戳独立小键；旧版本没有该键时按 0 处理，不阻塞续读。
+        storage.get({
+          key: LAST_BOOK_AT_KEY,
+          default: '',
+          success: function (rawAt) {
+            var at = Number(rawAt);
+            done({ ok: true, bookId: value,
+              updatedAt: isOffset(at) ? at : 0 });
+          },
+          fail: function () {
+            done({ ok: true, bookId: value, updatedAt: 0 });
+          }
+        });
       },
       fail: function (data, code) {
         done({ ok: false, code: code === undefined ? 'get_failed' : code });
@@ -104,11 +120,24 @@ export function saveLastBook(bookId, cb) {
   if (!isSafeBookId(bookId)) {
     return complete(cb, { ok: false, code: 'unsafe_book_id' });
   }
+  var at = Date.now();
   settle(function (res) { complete(cb, res); }, function (done) {
     storage.set({
       key: LAST_BOOK_KEY,
       value: bookId,
-      success: function () { done({ ok: true }); },
+      success: function () {
+        // 书 id 已写入；时间戳失败只影响“哪本更新”的比较，
+        // 不让续读入口整体失败。
+        storage.set({
+          key: LAST_BOOK_AT_KEY,
+          value: String(at),
+          success: function () { done({ ok: true, updatedAt: at }); },
+          fail: function (info, code) {
+            done({ ok: true, updatedAt: 0,
+              timeCode: code === undefined ? 'time_set_failed' : code });
+          }
+        });
+      },
       fail: function (info, code) {
         done({ ok: false, code: code === undefined ? 'set_failed' : code });
       }
@@ -238,8 +267,11 @@ export function clearProgress(bookId, cb) {
           }
           deleteKey(LAST_BOOK_KEY, function (c) {
             if (!c.ok && !firstError) firstError = c.code || 'delete_failed';
-            complete(cb, firstError ?
-              { ok: false, code: firstError } : { ok: true });
+            deleteKey(LAST_BOOK_AT_KEY, function (d) {
+              if (!d.ok && !firstError) firstError = d.code || 'delete_failed';
+              complete(cb, firstError ?
+                { ok: false, code: firstError } : { ok: true });
+            });
           });
         },
         fail: function (data, code) {

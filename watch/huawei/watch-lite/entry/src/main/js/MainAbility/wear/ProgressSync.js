@@ -15,7 +15,6 @@ var MAX_MESSAGE_BYTES = 4096;
 var applyHandler = null;
 var pendingApply = null;
 var activeBookId = '';
-var seenApply = {};
 
 function utf8Length(text) {
   var total = 0;
@@ -160,7 +159,7 @@ function sendState(sendToPhone, requestId) {
           source: 'watch',
           requestId: typeof requestId === 'string' ? requestId : '',
           lastBookId: last && last.ok ? (last.bookId || '') : '',
-          lastUpdatedAt: 0,
+          lastUpdatedAt: last && last.ok ? (last.updatedAt || 0) : 0,
           lastSha256: lastBook ? lastBook.sha256 : ''
         };
         if (summaries.length === 0) {
@@ -258,7 +257,17 @@ function handleRemoteState(message, sendToPhone) {
             (typeof message.lastSha256 !== 'string' ||
              !message.lastSha256 ||
              lastBook.sha256 === message.lastSha256)) {
-          saveLastBook(lastBook.bookId, function () {});
+          loadLastBook(function (localLast) {
+            var localAt = localLast && localLast.ok ?
+              (localLast.updatedAt || 0) : 0;
+            var remoteAt = typeof message.lastUpdatedAt === 'number' ?
+              message.lastUpdatedAt : 0;
+            // 只有对端明确更新时才改续读入口；不比较书名/offset，
+            // 也不强制跳书。
+            if (remoteAt > localAt) {
+              saveLastBook(lastBook.bookId, function () {});
+            }
+          });
         }
         return;
       }
@@ -314,17 +323,22 @@ function handleRemoteState(message, sendToPhone) {
 
 function handleApply(message, sendToPhone) {
   if (!isValidSummary(message)) return;
-  var key = message.bookId + ':' + message.sha256 + ':' +
-    message.offset;
-  if (seenApply[key]) return;
   loadBooks(function (books) {
     var book = findBook(books, message.bookId);
     if (!book || book.sha256 !== message.sha256 ||
         message.offset > book.bytes) return;
     // APPLY 是手机在用户选择后发出的显式指令；这里只做摘要、
     // 范围和 UTF-8 边界校验，不再用本地旧进度反推冲突。
-    applyOffset(book, message, sendToPhone, function (ok) {
-      if (ok) seenApply[key] = true;
+    // 以本地当前位置判断重复：同一偏移不重绘，但从更后面合法
+    // 回退到同一旧偏移必须生效，不能按 offset 永久去重。
+    loadProgress(book.bookId, function (local) {
+      if (local && local.ok && !local.empty &&
+          local.offset === message.offset) {
+        saveSyncBase(book.bookId, local.offset,
+          message.updatedAt || 0, function () {});
+        return;
+      }
+      applyOffset(book, message, sendToPhone, function () {});
     });
   });
 }

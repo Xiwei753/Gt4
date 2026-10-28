@@ -58,6 +58,9 @@ struct Index {
   private deviceService: WearDeviceService | null = null;
   private transferService: BookTransferService | null = null;
   private syncService: ReadingSyncService | null = null;
+  // 用户显式选择的设备身份：刷新设备列表时按 randomId 恢复，
+  // 不按列表下标或“第一台设备”猜测。
+  private selectedRandomId: string = '';
   // 设备发现/授权的进度序号：只允许最后一次异步结果落地，
   // 避免旧的 await 覆盖新状态（issue #5 P0-B）。
   private refreshSeq: number = 0;
@@ -188,7 +191,6 @@ struct Index {
   }
 
   private async runDeviceRefreshFlow(): Promise<void> {
-    this.receiverReady = false;
     let seq = 0;
     try {
       await runDeviceRefresh({
@@ -199,17 +201,51 @@ struct Index {
         },
         isCurrent: (current: number) => current === this.refreshSeq,
         listDevices: async () => {
-          const previous = this.devices[this.selectedDevice];
-          if (previous) {
-            await this.getDeviceService().unregisterMessageReceiver(previous);
-          }
+          // 刷新设备列表时保留当前已注册的接收器；只有设备真正
+          // 消失后才在 apply 里注销，避免从阅读页返回时丢选择。
           return await this.getDeviceService().listDevices();
         },
         apply: (result: WearDeviceListResult) => {
+          const previous = this.devices[this.selectedDevice];
+          const wanted = this.selectedRandomId;
           this.devices = result.ok ? result.devices : [];
           const notice = deviceNotice(result);
           this.deviceStatus = notice.text;
-          this.selectedDevice = -1;
+          let restored = -1;
+          if (result.ok && wanted) {
+            for (let i = 0; i < this.devices.length; i++) {
+              if (this.devices[i].randomId === wanted) {
+                restored = i;
+                break;
+              }
+            }
+          }
+          if (restored >= 0) {
+            // 同一台手表仍在：保留用户显式选择，不自动改选第一台。
+            this.selectedDevice = restored;
+            if (!this.receiverReady) {
+              const device = this.devices[restored];
+              this.registerReceiverFor(device).then((ok: boolean) => {
+                if (ok && this.syncService !== null) {
+                  this.syncService.syncAll(device, WATCH_PEER)
+                    .catch((error: Error) => {
+                      this.syncText =
+                        '重连同步失败（不影响阅读）：' + error.message;
+                    });
+                }
+              });
+            }
+          } else {
+            this.selectedDevice = -1;
+            this.selectedRandomId = '';
+            this.receiverReady = false;
+            if (previous) {
+              this.getDeviceService().unregisterMessageReceiver(previous)
+                .catch((error: Error) => {
+                  this.deviceStatus += '；注销旧接收器失败：' + error.message;
+                });
+            }
+          }
 
           // 只有可恢复的短暂错误才排定有退避上限的自动重试；
           // 1008509999（应用身份未配置）等确定性失败立即停下。
@@ -239,6 +275,30 @@ struct Index {
     }
   }
 
+  // 注册/恢复同一个手表 → 手机消息接收回调。进度消息优先，
+  // 未识别为进度的才交给传书状态机。
+  private async registerReceiverFor(device: TargetDevice): Promise<boolean> {
+    if (!isConfigured(WATCH_PEER) || this.transferService === null) {
+      return false;
+    }
+    try {
+      await this.getDeviceService().registerMessageReceiver(
+        device, WATCH_PEER.bundleName, WATCH_PEER.fingerprint,
+        (message: wearEngine.P2pMessage) => {
+          const handled = this.syncService !== null &&
+            this.syncService.onMessageFromWatch(message.content);
+          if (!handled && this.transferService !== null) {
+            this.transferService.onMessageFromWatch(message.content);
+          }
+        });
+      this.receiverReady = true;
+      return true;
+    } catch (error) {
+      this.deviceStatus += '；消息接收注册失败';
+      return false;
+    }
+  }
+
   private async selectDevice(e: number): Promise<void> {
     if (e < 0 || e >= this.devices.length) return;
     const previous = this.devices[this.selectedDevice];
@@ -248,37 +308,17 @@ struct Index {
     }
     this.receiverReady = false;
     this.selectedDevice = e;
+    this.selectedRandomId = device.randomId;
     this.deviceStatus = '已选择：' + device.name;
     if (!isConfigured(WATCH_PEER)) {
       this.deviceStatus += '；手表 Lite 公钥指纹未配置或格式错误，' +
         '发送将保持禁用';
     }
-    // 注册手表 → 手机的消息接收（RESULT 回执）。
-    // remoteApp 必须是对端（手表）身份
-    // （P0-2），不能用手机自己的包名。
-    if (isConfigured(WATCH_PEER) &&
-        this.transferService !== null) {
-      try {
-        await this.getDeviceService()
-          .registerMessageReceiver(
-            device, WATCH_PEER.bundleName,
-            WATCH_PEER.fingerprint,
-            (message: wearEngine.P2pMessage) => {
-              const handled = this.syncService !== null &&
-                this.syncService.onMessageFromWatch(message.content);
-              if (!handled && this.transferService !== null) {
-                this.transferService.onMessageFromWatch(message.content);
-              }
-            });
-        this.receiverReady = true;
-        if (this.syncService !== null) {
-          this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
-            this.syncText = '重连同步失败（不影响阅读）：' + error.message;
-          });
-        }
-      } catch (error) {
-        this.deviceStatus += '；消息接收注册失败';
-      }
+    const ok = await this.registerReceiverFor(device);
+    if (ok && this.syncService !== null) {
+      this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
+        this.syncText = '重连同步失败（不影响阅读）：' + error.message;
+      });
     }
   }
 

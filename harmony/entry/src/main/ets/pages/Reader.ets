@@ -3,45 +3,43 @@
 // 32 MiB 正文塞进状态；字体/主题/窗口宽度只影响显示，不改变进度。
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
-import { util } from '@kit.ArkTS';
 import { router } from '@kit.ArkUI';
 import { BookChapter, BookMeta } from '../model/BookModels';
 import { BookRepository } from '../services/BookRepository';
 import { ReadingProgressStore } from '../services/ReadingProgressStore';
 import { addReadingApplyListener,
   removeReadingApplyListener } from '../services/ReadingSyncEvents';
+import { chapterIndexAt } from '../model/TextWindow';
 import {
-  chapterIndexAt,
-  splitWindowChunks
-} from '../model/TextWindow';
+  loadedSegmentBytes,
+  segmentIndexForOffset,
+  splitWindowSegments
+} from '../model/ReaderSegments';
 
 const WINDOW_BYTES = 64 * 1024;
-const CHUNK_BYTES = 6 * 1024;
-const INITIAL_CHUNKS = 12;
-const APPEND_CHUNKS = 8;
-const MAX_LOADED_CHUNKS = 72;
+// 每段约 256 字节，进度精度远高于旧的 6 KiB 块，又不会让列表项过多。
+const SEGMENT_TARGET_BYTES = 256;
+const MAX_LOADED_SEGMENTS = 900;
+const MAX_LOADED_BYTES = 256 * 1024;
+// 程序化滚动后 List 会先发临时索引；等动画落定再接收 onScrollIndex。
+const SCROLL_GUARD_MS = 700;
 const CHAPTER_PAGE_SIZE = 100;
 
 interface ReaderParams {
   bookId?: string;
 }
 
-interface ReaderChunk {
+interface ReaderSegment {
   offset: number;
   length: number;
   text: string;
-}
-
-interface ByteRange {
-  offset: number;
-  length: number;
 }
 
 @Entry
 @Component
 struct Reader {
   @State private title: string = '';
-  @State private chunks: ReaderChunk[] = [];
+  @State private segments: ReaderSegment[] = [];
   @State private chapters: BookChapter[] = [];
   @State private fontSize: number = 20;
   @State private lineSpacing: number = 1.65;
@@ -61,9 +59,13 @@ struct Reader {
   private progressStore: ReadingProgressStore | null = null;
   private fd: number = -1;
   private scroller: Scroller = new Scroller();
-  private decoder: util.TextDecoder = util.TextDecoder.create('utf-8');
   private saveTimer: number = -1;
   private lastSavedOffset: number = -1;
+  // 跳章/同步/字号重排期间禁止 onScrollIndex 覆盖目标位置。
+  private scrollGuardActive: boolean = false;
+  private scrollGuardToken: number = 0;
+  private scrollGuardTimer: number = -1;
+  private scrollGuardTarget: number = -1;
   // 串行化进度写入，避免较早的异步写入晚于新位置落盘；
   // epoch 用于远端进度应用后作废尚未执行的本地写入。
   private saveChain: Promise<void> = Promise.resolve();
@@ -119,6 +121,7 @@ struct Reader {
 
   aboutToDisappear(): void {
     removeReadingApplyListener(this.remoteApply);
+    this.cancelScrollGuard();
     this.flushSave();
     this.closeFile();
   }
@@ -199,79 +202,131 @@ struct Reader {
     const base = this.snapFileOffset(startOffset);
     const length = Math.min(WINDOW_BYTES, book.bytes - base);
     if (length <= 0) {
-      this.chunks = [];
+      this.segments = [];
       this.loading = false;
       return;
     }
     const bytes = this.readBytes(base, length);
-    const ranges = splitWindowChunks(bytes, CHUNK_BYTES,
-      INITIAL_CHUNKS) as ByteRange[];
-    const next: ReaderChunk[] = [];
+    const ranges = splitWindowSegments(bytes, SEGMENT_TARGET_BYTES,
+      MAX_LOADED_SEGMENTS) as ReaderSegment[];
+    const next: ReaderSegment[] = [];
     for (let i = 0; i < ranges.length; i++) {
       const range = ranges[i];
       next.push({
         offset: base + range.offset,
         length: range.length,
-        text: this.decoder.decodeToString(
-          bytes.subarray(range.offset, range.offset + range.length))
+        text: range.text
       });
     }
-    this.chunks = next;
-    this.currentIndex = this.indexForOffset(anchorOffset);
-    this.currentOffset = next.length > 0 ?
-      next[this.currentIndex].offset : base;
+    // 先定位到包含 anchorOffset 的分段，再整体替换列表并滚到该段。
+    const target = this.indexIn(next, anchorOffset);
+    if (scroll) this.armScrollGuard(target, true);
+    this.segments = next;
+    this.currentIndex = target;
+    this.currentOffset = next.length > 0 ? next[target].offset : base;
     this.updateProgressLabel();
     this.status = '';
-    if (scroll) {
-      const target = this.currentIndex;
-      setTimeout(() => {
-        if (target >= 0 && target < this.chunks.length) {
-          this.scroller.scrollToIndex(target, true);
-        }
-      }, 0);
-    }
+  }
+
+  private indexIn(list: ReaderSegment[], offset: number): number {
+    if (list.length === 0) return 0;
+    return segmentIndexForOffset(list, offset);
   }
 
   private indexForOffset(offset: number): number {
-    if (this.chunks.length === 0) return 0;
-    let found = 0;
-    for (let i = 0; i < this.chunks.length; i++) {
-      const chunk = this.chunks[i];
-      if (chunk.offset <= offset) found = i;
-      else break;
+    return this.indexIn(this.segments, offset);
+  }
+
+  // 跳转后 List 可能先发出临时的 0 号索引；在滚动落定前忽略
+  // onScrollIndex，避免把刚同步/跳转到的位置又写回文件头。
+  private cancelScrollGuard(): void {
+    this.scrollGuardToken++;
+    this.scrollGuardActive = false;
+    this.scrollGuardTarget = -1;
+    if (this.scrollGuardTimer !== -1) {
+      clearTimeout(this.scrollGuardTimer);
+      this.scrollGuardTimer = -1;
     }
-    return found;
+  }
+
+  private armScrollGuard(index: number, animate: boolean): void {
+    this.scrollGuardToken++;
+    const token = this.scrollGuardToken;
+    this.scrollGuardActive = true;
+    // 跳章/同步允许目标段到顶后提前结束守卫；重排要等布局稳定。
+    this.scrollGuardTarget = animate ? index : -1;
+    if (this.scrollGuardTimer !== -1) {
+      clearTimeout(this.scrollGuardTimer);
+    }
+    this.scrollGuardTimer = setTimeout(() => {
+      if (token !== this.scrollGuardToken) return;
+      this.scrollGuardActive = false;
+      this.scrollGuardTarget = -1;
+      this.scrollGuardTimer = -1;
+      this.updateProgressLabel();
+      // 跳转目标可能靠近当前窗口末尾；落定后补一次有界加载。
+      if (this.currentIndex >= this.segments.length - 2) {
+        this.appendNext();
+      }
+    }, SCROLL_GUARD_MS);
+    // 字号/行距/宽度变化后先让本轮布局完成，再按段索引回锚。
+    setTimeout(() => {
+      if (token !== this.scrollGuardToken) return;
+      if (index >= 0 && index < this.segments.length) {
+        this.scroller.scrollToIndex(index, animate);
+      }
+    }, animate ? 0 : 50);
+  }
+
+  // 字号/行距/主题/窗口宽度变化后用当前字节位置重新定位，不回到 0。
+  private rescrollToCurrent(): void {
+    if (this.segments.length === 0) return;
+    const index = this.indexForOffset(this.currentOffset);
+    this.currentIndex = index;
+    this.armScrollGuard(index, false);
+  }
+
+  private loadedBytes(): number {
+    return loadedSegmentBytes(this.segments) as number;
   }
 
   private appendNext(): void {
     const book = this.book;
     if (book === null || this.fd < 0 || this.loadingMore ||
-        this.chunks.length === 0) return;
-    if (this.chunks.length >= MAX_LOADED_CHUNKS) {
+        this.segments.length === 0) return;
+    const loaded = this.loadedBytes();
+    if (this.segments.length >= MAX_LOADED_SEGMENTS ||
+        loaded >= MAX_LOADED_BYTES) {
       this.status = '已到当前窗口末尾，点“继续加载”继续阅读';
       return;
     }
-    const last = this.chunks[this.chunks.length - 1];
+    const last = this.segments[this.segments.length - 1];
     const start = last.offset + last.length;
     if (start >= book.bytes) return;
     this.loadingMore = true;
     const length = Math.min(WINDOW_BYTES, book.bytes - start);
     const bytes = this.readBytes(start, length);
-    const ranges = splitWindowChunks(bytes, CHUNK_BYTES,
-      APPEND_CHUNKS) as ByteRange[];
-    const appended: ReaderChunk[] = [];
+    const ranges = splitWindowSegments(bytes, SEGMENT_TARGET_BYTES,
+      MAX_LOADED_SEGMENTS) as ReaderSegment[];
+    const appended: ReaderSegment[] = [];
+    let used = loaded;
     for (let i = 0; i < ranges.length; i++) {
       const range = ranges[i];
+      if (this.segments.length + appended.length >= MAX_LOADED_SEGMENTS) break;
+      if (used + range.length > MAX_LOADED_BYTES) break;
       appended.push({
         offset: start + range.offset,
         length: range.length,
-        text: this.decoder.decodeToString(
-          bytes.subarray(range.offset, range.offset + range.length))
+        text: range.text
       });
+      used += range.length;
     }
     if (appended.length > 0) {
-      this.chunks = this.chunks.concat(appended);
+      this.segments = this.segments.concat(appended);
       this.status = '';
+    } else if (start < book.bytes) {
+      // 余量不足一段时不要静默卡住，仍给出“继续加载”入口。
+      this.status = '已到当前窗口末尾，点“继续加载”继续阅读';
     }
     this.loadingMore = false;
   }
@@ -282,13 +337,25 @@ struct Reader {
   }
 
   private onScrollIndex(start: number, end: number): void {
-    if (start < 0 || start >= this.chunks.length) return;
-    const chunk = this.chunks[start];
+    if (this.scrollGuardActive) {
+      // 目标段真正到达列表顶部后才恢复接收；中途的 0 号/过路索引一律忽略。
+      if (this.scrollGuardTarget < 0 || start !== this.scrollGuardTarget) {
+        return;
+      }
+      if (this.scrollGuardTimer !== -1) {
+        clearTimeout(this.scrollGuardTimer);
+        this.scrollGuardTimer = -1;
+      }
+      this.scrollGuardActive = false;
+      this.scrollGuardTarget = -1;
+    }
+    if (start < 0 || start >= this.segments.length) return;
+    const segment = this.segments[start];
     this.currentIndex = start;
-    this.currentOffset = chunk.offset;
+    this.currentOffset = segment.offset;
     this.updateProgressLabel();
-    this.scheduleSave(chunk.offset);
-    if (end >= this.chunks.length - 2) {
+    this.scheduleSave(segment.offset);
+    if (end >= this.segments.length - 2) {
       this.appendNext();
     }
   }
@@ -388,12 +455,23 @@ struct Reader {
   }
 
   private changeFont(delta: number): void {
-    this.fontSize = Math.max(16, Math.min(32, this.fontSize + delta));
+    const next = Math.max(16, Math.min(32, this.fontSize + delta));
+    if (next === this.fontSize) return;
+    this.fontSize = next;
+    this.rescrollToCurrent();
   }
 
   private changeSpacing(delta: number): void {
     const next = Math.round((this.lineSpacing + delta) * 10) / 10;
-    this.lineSpacing = Math.max(1.2, Math.min(2.4, next));
+    const value = Math.max(1.2, Math.min(2.4, next));
+    if (value === this.lineSpacing) return;
+    this.lineSpacing = value;
+    this.rescrollToCurrent();
+  }
+
+  private toggleTheme(): void {
+    this.darkTheme = !this.darkTheme;
+    this.rescrollToCurrent();
   }
 
   private openChapterPanel(): void {
@@ -520,7 +598,7 @@ struct Reader {
         .backgroundColor(this.panelColor())
         .fontColor(this.textColor())
         .margin({ left: 6 })
-        .onClick(() => { this.darkTheme = !this.darkTheme; })
+        .onClick(() => { this.toggleTheme(); })
       Text(this.fontSize + ' / ' + this.lineSpacing.toFixed(1))
         .fontSize(12).fontColor(this.mutedColor())
         .margin({ left: 8 })
@@ -621,7 +699,7 @@ struct Reader {
             }
             .layoutWeight(1).width('100%')
             .justifyContent(FlexAlign.Center)
-          } else if (this.chunks.length === 0) {
+          } else if (this.segments.length === 0) {
             Column({ space: 10 }) {
               Text(this.status).fontSize(15).fontColor(this.mutedColor())
               Button('返回书架').onClick(() => { this.backToShelf(); })
@@ -630,9 +708,9 @@ struct Reader {
             .justifyContent(FlexAlign.Center)
           } else {
             List({ space: 0, scroller: this.scroller }) {
-              ForEach(this.chunks, (chunk: ReaderChunk) => {
+              ForEach(this.segments, (segment: ReaderSegment) => {
                 ListItem() {
-                  Text(chunk.text)
+                  Text(segment.text)
                     .fontSize(this.fontSize)
                     .lineHeight(this.fontSize * this.lineSpacing)
                     .fontColor(this.textColor())
@@ -641,7 +719,7 @@ struct Reader {
                       top: 6, bottom: 6 })
                     .textAlign(TextAlign.Start)
                 }
-              }, (chunk: ReaderChunk) => chunk.offset.toString())
+              }, (segment: ReaderSegment) => segment.offset.toString())
             }
             .layoutWeight(1)
             .width('100%')
@@ -654,7 +732,7 @@ struct Reader {
           if (this.showSettings) {
             this.settingsBar()
           }
-          if (this.status.length > 0 && this.chunks.length > 0) {
+          if (this.status.length > 0 && this.segments.length > 0) {
             Row() {
               Text(this.status).fontSize(12).fontColor(this.mutedColor())
                 .layoutWeight(1).maxLines(2)
@@ -689,7 +767,12 @@ struct Reader {
     .onAreaChange((oldValue: Area, newValue: Area) => {
       const width = parseFloat(newValue.width.toString());
       if (isFinite(width)) {
-        this.pagePadding = width >= 720 ? 36 : 16;
+        const nextPadding = width >= 720 ? 36 : 16;
+        if (nextPadding !== this.pagePadding) {
+          this.pagePadding = nextPadding;
+          // 宽度跨档会改变行宽，重新锚定当前字节位置。
+          this.rescrollToCurrent();
+        }
       }
     })
   }

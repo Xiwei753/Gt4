@@ -2,7 +2,7 @@
 // 手机端进度同步纯逻辑：UTF-8 消息上限、摘要分批、冲突判定。
 import assert from 'node:assert/strict';
 import {
-  utf8ByteLength, isValidSummary, decideSyncAction,
+  utf8ByteLength, isValidSummary, decideSyncAction, decidePendingAction,
   buildSummaryBatches, mergeStateBatches, MAX_SYNC_MESSAGE_BYTES
 } from '../harmony/entry/src/main/ets/model/ReadingSyncPolicy.js';
 
@@ -29,6 +29,15 @@ assert.equal(decideSyncAction({ offset: 20 }, { offset: 30 }, 10),
 // 未知基线不能按大小覆盖，必须冲突。
 assert.equal(decideSyncAction({ offset: 20 }, { offset: 10 }, -1),
   'conflict');
+
+// 待确认 APPLY：只有对端回到本地新位置才算确认；仍停在旧基线
+// 时必须重发；第三种位置说明双方都变过，必须让用户选择。
+assert.equal(decidePendingAction(20, 10, -1, 10), 'not_pending');
+assert.equal(decidePendingAction(20, 10, 20, 20), 'confirmed');
+assert.equal(decidePendingAction(20, 10, 20, 10), 'resend');
+assert.equal(decidePendingAction(20, 10, 20, 30), 'conflict');
+assert.equal(decidePendingAction(20, -1, 20, 20), 'confirmed');
+assert.equal(decidePendingAction(20, -1, 20, 10), 'conflict');
 
 const summaries = [];
 for (let i = 0; i < 300; i++) {

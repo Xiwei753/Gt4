@@ -22,6 +22,7 @@ export interface ReadingRecord {
   offset: number;
   updatedAt: number;
   syncedOffset: number;
+  pendingOffset: number;
 }
 
 export interface ReadingSummary {
@@ -30,6 +31,7 @@ export interface ReadingSummary {
   offset: number;
   updatedAt: number;
   syncedOffset: number;
+  pendingOffset: number;
 }
 
 export interface ReadingLast {
@@ -42,6 +44,7 @@ interface StoredRecord {
   offset: number;
   updatedAt: number;
   syncedOffset?: number;
+  pendingOffset?: number;
 }
 
 interface StoredLast {
@@ -81,11 +84,15 @@ export class ReadingProgressStore {
       const syncedOffset = typeof value.syncedOffset === 'number' &&
         Number.isInteger(value.syncedOffset) && value.syncedOffset >= 0 ?
         value.syncedOffset : UNKNOWN_BASELINE;
+      const pendingOffset = typeof value.pendingOffset === 'number' &&
+        Number.isInteger(value.pendingOffset) && value.pendingOffset >= 0 ?
+        value.pendingOffset : -1;
       return {
         sha256: value.sha256,
         offset: value.offset,
         updatedAt: updatedAt,
-        syncedOffset: syncedOffset
+        syncedOffset: syncedOffset,
+        pendingOffset: pendingOffset
       };
     } catch (error) {
       return null;
@@ -119,7 +126,9 @@ export class ReadingProgressStore {
       offset: parsed.offset,
       updatedAt: parsed.updatedAt,
       syncedOffset: parsed.syncedOffset !== undefined ?
-        parsed.syncedOffset : UNKNOWN_BASELINE
+        parsed.syncedOffset : UNKNOWN_BASELINE,
+      pendingOffset: parsed.pendingOffset !== undefined ?
+        parsed.pendingOffset : -1
     };
   }
 
@@ -131,21 +140,29 @@ export class ReadingProgressStore {
       return;
     }
     let syncedOffset = UNKNOWN_BASELINE;
+    let pendingOffset = -1;
+    const existing = await this.readRecord(bookId);
+    if (existing !== null && existing.sha256 === sha256) {
+      if (existing.syncedOffset !== undefined) {
+        syncedOffset = existing.syncedOffset;
+      }
+      if (existing.pendingOffset !== undefined &&
+          existing.pendingOffset >= 0) {
+        // 本地又往前读了：旧的待确认位置已被新位置取代。
+        pendingOffset = offset;
+      }
+    }
     if (typeof baseline === 'number' && Number.isInteger(baseline) &&
         baseline >= 0) {
       syncedOffset = baseline;
-    } else {
-      const existing = await this.readRecord(bookId);
-      if (existing !== null && existing.sha256 === sha256 &&
-          existing.syncedOffset !== undefined) {
-        syncedOffset = existing.syncedOffset;
-      }
+      pendingOffset = -1;
     }
     await this.writeRecord(bookId, {
       sha256: sha256,
       offset: offset,
       updatedAt: Date.now(),
-      syncedOffset: syncedOffset
+      syncedOffset: syncedOffset,
+      pendingOffset: pendingOffset
     });
   }
 
@@ -160,7 +177,8 @@ export class ReadingProgressStore {
       offset: offset,
       updatedAt: typeof updatedAt === 'number' && updatedAt > 0 ?
         updatedAt : Date.now(),
-      syncedOffset: offset
+      syncedOffset: offset,
+      pendingOffset: -1
     });
   }
 
@@ -172,7 +190,27 @@ export class ReadingProgressStore {
       sha256: existing.sha256,
       offset: existing.offset,
       updatedAt: existing.updatedAt,
-      syncedOffset: offset
+      syncedOffset: offset,
+      pendingOffset: -1
+    });
+  }
+
+  // 本地进度等待对端确认：只记录待确认位置，不推进同步基线。
+  // 对端下次回报相同 offset 时才 markSynced；发送失败则保留 pending。
+  async markPending(bookId: string, sha256: string,
+    offset: number): Promise<void> {
+    if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
+      return;
+    }
+    const existing = await this.readRecord(bookId);
+    if (existing === null || existing.sha256 !== sha256) return;
+    await this.writeRecord(bookId, {
+      sha256: existing.sha256,
+      offset: existing.offset,
+      updatedAt: existing.updatedAt,
+      syncedOffset: existing.syncedOffset !== undefined ?
+        existing.syncedOffset : UNKNOWN_BASELINE,
+      pendingOffset: offset
     });
   }
 
@@ -229,7 +267,9 @@ export class ReadingProgressStore {
         offset: parsed.offset,
         updatedAt: parsed.updatedAt,
         syncedOffset: parsed.syncedOffset !== undefined ?
-          parsed.syncedOffset : UNKNOWN_BASELINE
+          parsed.syncedOffset : UNKNOWN_BASELINE,
+        pendingOffset: parsed.pendingOffset !== undefined ?
+          parsed.pendingOffset : -1
       });
     }
     return out;

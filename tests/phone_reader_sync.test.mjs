@@ -22,8 +22,11 @@ assert.ok(!reader.includes('filePath:') &&
   'Reader must not accept a raw file URI');
 assert.ok(reader.includes('fileIo.readSync') &&
   reader.includes('WINDOW_BYTES') &&
-  reader.includes('splitWindowChunks'),
-  'Reader must use bounded byte windows, not hold the whole book');
+  reader.includes('splitWindowSegments') &&
+  reader.includes('ReaderSegments'),
+  'Reader must use bounded byte windows and fine-grained segments');
+assert.ok(!reader.includes('CHUNK_BYTES = 6 * 1024'),
+  'Reader must not fall back to coarse 6 KiB reading-position chunks');
 assert.ok(reader.includes('onPageHide') &&
   reader.includes('aboutToDisappear') &&
   reader.includes('flushSave'),

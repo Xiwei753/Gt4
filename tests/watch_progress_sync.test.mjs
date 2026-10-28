@@ -143,11 +143,27 @@ ProgressSync.handleMessage(JSON.stringify({
 await wait();
 assert.equal((await get()).offset, 3);
 
+// 合法回退：手表读到 6 后，用户明确选择回到 3，必须再次应用。
+await save(6, [3]);
+ProgressSync.handleMessage(JSON.stringify({
+  v: 0, type: 'READ_PROGRESS_APPLY', source: 'phone',
+  bookId, sha256, offset: 3, updatedAt: 42
+}), send);
+await wait();
+assert.equal((await get()).offset, 3);
+
+// last book 时间戳：独立键持久化，供双端比较最近阅读。
+await call((cb) => ProgressStore.saveLastBook(bookId, cb));
+const last = await call((cb) => ProgressStore.loadLastBook(cb));
+assert.equal(last.bookId, bookId);
+assert.ok(last.updatedAt > 0);
+
 // 删除清理：进度、同步基线、last 一并移除。
 await call((cb) => ProgressStore.saveLastBook(bookId, cb));
 await call((cb) => ProgressStore.clearProgress(bookId, cb));
 assert.equal(storage.__values['suyue.pos.' + bookId], undefined);
 assert.equal(storage.__values['suyue.sync.' + bookId], undefined);
 assert.equal(storage.__values['suyue.last'], undefined);
+assert.equal(storage.__values['suyue.last.at'], undefined);
 
 console.log('PASS: watch progress sync route/summary/apply/conflict/delete');
