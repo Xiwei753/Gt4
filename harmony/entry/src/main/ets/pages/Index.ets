@@ -7,7 +7,7 @@
 // 入库；未选择目标设备时发送保持禁用。
 import { common } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
-import { promptAction } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
 import { wearEngine } from '@kit.WearEngine';
 import { BookMeta, BookStatus } from '../model/BookModels';
 import { TargetDevice, TransferProgress,
@@ -17,8 +17,10 @@ import { WATCH_PEER, PHONE_SELF,
 import { loadPeerIdentities } from '../services/PeerIdentityLoader';
 import { importBook } from '../services/BookImportService';
 import { BookRepository } from '../services/BookRepository';
+import { ReadingProgressStore } from '../services/ReadingProgressStore';
 import { WearDeviceService, WearDeviceListResult } from '../services/WearDeviceService';
 import { BookTransferService } from '../services/BookTransferService';
+import { ReadingSyncService } from '../services/ReadingSyncService';
 import { deviceNotice, planRetry, MAX_AUTO_RETRIES,
   runDeviceRefresh } from '../services/WearAuthPolicy';
 
@@ -49,9 +51,13 @@ struct Index {
   @State private identityStatus: string = '';
   // 当前在途 transferId（取消时用，P1-7）。
   @State private activeTransferId: string = '';
+  @State private readingBookIds: string[] = [];
+  @State private syncText: string = '进度同步未开始';
   private repository: BookRepository | null = null;
+  private progressStore: ReadingProgressStore | null = null;
   private deviceService: WearDeviceService | null = null;
   private transferService: BookTransferService | null = null;
+  private syncService: ReadingSyncService | null = null;
   // 设备发现/授权的进度序号：只允许最后一次异步结果落地，
   // 避免旧的 await 覆盖新状态（issue #5 P0-B）。
   private refreshSeq: number = 0;
@@ -69,12 +75,26 @@ struct Index {
     return this.repository;
   }
 
+  private getProgressStore(): ReadingProgressStore {
+    if (this.progressStore === null) {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      this.progressStore = new ReadingProgressStore(context);
+    }
+    return this.progressStore;
+  }
+
   private getDeviceService(): WearDeviceService {
     if (this.deviceService === null) {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       this.deviceService = new WearDeviceService(context);
       this.transferService = new BookTransferService(
         context, this.deviceService);
+      this.syncService = new ReadingSyncService(
+        context, this.deviceService, this.getProgressStore(),
+        this.getRepository());
+      this.syncService.setStatusListener((text: string, ok: boolean) => {
+        this.syncText = text;
+      });
     }
     return this.deviceService;
   }
@@ -90,6 +110,10 @@ struct Index {
       console.error('suyue peer identity: ' + this.identityStatus);
     }
     this.refresh();
+    this.refreshProgress();
+    if (this.syncService !== null) {
+      this.syncService.setActiveBook('');
+    }
     this.refreshDevices();
   }
 
@@ -114,6 +138,42 @@ struct Index {
 
   private refresh(): void {
     this.books = this.getRepository().list();
+  }
+
+  private async refreshProgress(): Promise<void> {
+    try {
+      const summaries = await this.getProgressStore().list(this.books);
+      const ids: string[] = [];
+      for (let i = 0; i < summaries.length; i++) {
+        ids.push(summaries[i].bookId);
+      }
+      this.readingBookIds = ids;
+    } catch (error) {
+      this.readingBookIds = [];
+    }
+  }
+
+  private isReading(bookId: string): boolean {
+    return this.readingBookIds.indexOf(bookId) >= 0;
+  }
+
+  private openReader(book: BookMeta): void {
+    if (this.syncService !== null) {
+      this.syncService.setActiveBook(book.bookId);
+    }
+    const device = this.devices[this.selectedDevice];
+    if (this.syncService !== null && device !== undefined &&
+        this.receiverReady && isConfigured(WATCH_PEER)) {
+      this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
+        this.syncText = '打开前同步失败（不影响阅读）：' + error.message;
+      });
+    }
+    router.pushUrl({
+      url: 'pages/Reader',
+      params: { bookId: book.bookId }
+    }).catch((error: Error) => {
+      this.pickStatus = '打开阅读页失败：' + error.message;
+    });
   }
 
   // 设备发现（issue #5 第二轮 + issue #6 P0-B）：传书只需「设备基础信息」
@@ -204,10 +264,18 @@ struct Index {
             device, WATCH_PEER.bundleName,
             WATCH_PEER.fingerprint,
             (message: wearEngine.P2pMessage) => {
-              this.transferService!.onMessageFromWatch(
-                message.content);
+              const handled = this.syncService !== null &&
+                this.syncService.onMessageFromWatch(message.content);
+              if (!handled && this.transferService !== null) {
+                this.transferService.onMessageFromWatch(message.content);
+              }
             });
         this.receiverReady = true;
+        if (this.syncService !== null) {
+          this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
+            this.syncText = '重连同步失败（不影响阅读）：' + error.message;
+          });
+        }
       } catch (error) {
         this.deviceStatus += '；消息接收注册失败';
       }
@@ -249,20 +317,21 @@ struct Index {
 
   private async removeBook(book: BookMeta): Promise<void> {
     try {
-      await promptAction.showDialog({
+      const result = await promptAction.showDialog({
         title: '删除书籍',
         message: '确定删除《' + book.title + '》？此操作不可恢复。',
         buttons: [
           { text: '取消', color: '#9ca3af' },
           { text: '删除', color: '#f87171' }
         ]
-      }).then((result) => {
-        if (result.index === 1) {
-          this.getRepository().remove(book.bookId);
-          this.refresh();
-          this.pickStatus = '已删除《' + book.title + '》';
-        }
       });
+      if (result.index === 1) {
+        this.getRepository().remove(book.bookId);
+        await this.getProgressStore().remove(book.bookId);
+        this.refresh();
+        this.refreshProgress();
+        this.pickStatus = '已删除《' + book.title + '》';
+      }
     } catch (error) {
       console.error('suyue remove error: ' + JSON.stringify(error));
     }
@@ -341,6 +410,16 @@ struct Index {
     this.transferText = '已请求取消，等待手表确认清理';
   }
 
+  private async syncReadingProgress(): Promise<void> {
+    const device = this.devices[this.selectedDevice];
+    if (this.syncService === null || device === undefined ||
+        !this.receiverReady || !isConfigured(WATCH_PEER)) {
+      this.syncText = '同步不可用：请先选择设备并成功注册消息接收';
+      return;
+    }
+    await this.syncService.syncAll(device, WATCH_PEER);
+  }
+
   @Builder
   bookItem(book: BookMeta) {
     Row() {
@@ -363,12 +442,19 @@ struct Index {
         .fontColor(book.status === BookStatus.READY ?
           '#4ade80' : '#f87171')
 
+      Button(this.isReading(book.bookId) ? '继续阅读' : '阅读')
+        .fontSize(12)
+        .height(28)
+        .backgroundColor('#344259')
+        .margin({ left: 8 })
+        .onClick(() => { this.openReader(book); })
+
       Button('发送')
         .fontSize(12)
         .height(28)
         .enabled(this.canSend() &&
           this.canTransferBook(book))
-        .margin({ left: 12 })
+        .margin({ left: 8 })
         .onClick(() => { this.sendBook(book); })
 
       Text('删除')
@@ -460,6 +546,12 @@ struct Index {
           .height(28)
           .enabled(!this.deviceBusy)
           .onClick(() => { this.refreshDevices(); })
+        Button('同步阅读进度')
+          .fontSize(13)
+          .height(28)
+          .enabled(this.selectedDevice >= 0 && this.receiverReady &&
+            isConfigured(WATCH_PEER))
+          .onClick(() => { this.syncReadingProgress(); })
         if (this.sending) {
           Button('取消发送')
             .fontSize(13)
@@ -469,6 +561,8 @@ struct Index {
         }
         Text(this.transferText).fontSize(14)
           .fontColor(this.sending ? '#facc15' : '#a7abb4')
+        Text(this.syncText).fontSize(13)
+          .fontColor('#93c5fd')
       }
       .alignItems(HorizontalAlign.Start)
       .padding(20)

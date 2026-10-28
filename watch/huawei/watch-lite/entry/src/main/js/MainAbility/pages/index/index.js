@@ -13,7 +13,7 @@ import { BOOKS as CATALOG } from '../../books/BookCatalog.g.js';
 import { ensureDirs, bookPath,
   deleteBook } from '../../storage/BookStorage';
 import { listBooks, removeBook } from '../../storage/LibraryIndex';
-import { loadLastBook } from '../../storage/ProgressStore';
+import { loadLastBook, clearProgress } from '../../storage/ProgressStore';
 import { beginReceive, stopReceive } from '../../wear/WearReceiver';
 import { isLowerHex } from '../../util/Validate';
 
@@ -239,9 +239,11 @@ export default {
     this.confirmId = '';
     deleteBook(book.bookId, (state) => {
       if (state.ok) {
-        removeBook(book.bookId, () => {
-          this.status = '已删除《' + book.title + '》';
-          this.loadExternal();
+        clearProgress(book.bookId, () => {
+          removeBook(book.bookId, () => {
+            this.status = '已删除《' + book.title + '》';
+            this.loadExternal();
+          });
         });
       } else {
         this.status = '删除失败：' + state.reason;

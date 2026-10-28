@@ -229,6 +229,69 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 - 块序号越界、`offset` 不连续、`length` 与 `payloadB64` 解码长度
   不符：`E_PROTOCOL`。
 
+## 阅读进度同步（独立于传书）
+
+阅读进度同步复用 Wear Engine 的消息通道，但**不属于传书状态机**：
+不带 `transferId`，不等待/发送 `RESULT`，不影响传书、签名或单本互斥。
+每条 JSON 必须严格小于 **4096 字节**；只传摘要，不传正文、完整目录或书架。
+所有偏移都是规范化 UTF-8 正文文件内的**字节偏移**，不是字符/页号。
+
+### READ_PROGRESS_GET
+
+```json
+{"v":0,"type":"READ_PROGRESS_GET","source":"phone","requestId":"p...","ts":0}
+```
+
+请求对端发送当前已有书籍的进度摘要。收到后回 `READ_PROGRESS_STATE`。
+
+### READ_PROGRESS_STATE
+
+```json
+{"v":0,"type":"READ_PROGRESS_STATE","source":"watch","requestId":"p...",
+ "books":[{"bookId":"0123456789abcdef","sha256":"...64 hex...",
+           "offset":4096,"updatedAt":0}],
+ "lastBookId":"0123456789abcdef","lastUpdatedAt":0,
+ "lastSha256":"...64 hex...",
+ "batch":0,"batches":2}
+```
+
+- `books` 只包含本机真实存在、摘要完整且**已有进度**的书籍；
+- 长列表按 `batch`/`batches` 分片，每片仍 <4096 字节；重复分片幂等；
+- `lastBookId` 只用于更新“续读入口”，不强制跳书；`lastSha256`
+  用于确认手表/手机上的同名书内容一致，缺失时按无摘要处理；
+- 接收方必须先按 `bookId` + `sha256` 找到本地书籍；找不到或摘要不符
+  时忽略，绝不因远端有书而创建空书。
+
+### READ_PROGRESS_APPLY
+
+```json
+{"v":0,"type":"READ_PROGRESS_APPLY","source":"phone",
+ "bookId":"0123456789abcdef","sha256":"...64 hex...",
+ "offset":8192,"updatedAt":0}
+```
+
+请求把某本书的进度设为指定字节位置。接收方必须校验：
+
+1. 本地存在该书且 `sha256` 完全一致；
+2. `0 <= offset <= book.bytes`；
+3. `offset` 落在 UTF-8 字符边界（不能是续字节 `10xxxxxx`）。
+
+通过后清空不适用于新位置的上页历史，再用现有分页器重绘（若阅读页打开）。
+应用远端进度**不得**再作为本地新阅读回发；重复消息按
+`(bookId, sha256, offset)` 幂等忽略。
+
+### 冲突与循环
+
+- 每本书记录上次双方确认的 `syncedOffset`；不能只比较 offset 大小，
+  回到上一章也是合法进度；
+- 一边为空：采用另一边；一边仍等于基线：采用另一边的新进度；
+- 两边都改过且不同：**不得静默覆盖**。手机端弹窗让用户选择保留手机
+  或手表，再发 `READ_PROGRESS_APPLY`；手表端不覆盖，回传自己的摘要；
+- 远端应用后不回发新进度；只在退出/切后台/重连/手动同步/真实位置变化时
+  合并发送，避免每页一条消息；
+- 同步失败只记录可诊断状态，不阻断本地阅读或传书；不承诺唤醒被系统
+  杀掉的 Lite 应用，下次连接再交换。
+
 ## 对接前要验证
 
 - GT 4 Lite Wearable 的设备配对、Wear Engine 收/发能力、签名和权限；

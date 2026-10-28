@@ -15,6 +15,11 @@
 
 - [yingwang/WatchReader](https://github.com/yingwang/WatchReader)，MIT，Copyright (c) 2026 Ying Wang。参考圆形屏幕的安全正文区域、分页/进度、手机解析 TXT/EPUB 的思路；**其 Wear OS/Kotlin 代码不能直接装 GT4**，此处未复制。
 
+## 仅研究、未复制代码
+
+- [zengchen666/qingdu-reader](https://github.com/zengchen666/qingdu-reader)（Apache-2.0）：研究其 `ChapterTitleMatcher` / `TxtChapterSplitter` 的三阶段章节识别、密集目录去重和章节号 LIS 对齐思路；本项目用独立实现重写为 Harmony/Android/Python 三端同规则，**未复制其源码**。
+- 华为 [Reader Kit](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/reader-introduction)：确认它提供本地 TXT/EPUB 解析与目录能力，但属于 HarmonyOS NEXT 系统 Kit、有设备/地区/沙箱文件限制，且不能作为手表 Lite 与 Android 的跨端章节索引。本项目**未引入该 Kit 作为依赖**，也未声称华为阅读器使用与本项目相同的算法。
+
 ## 许可证处理
 
 本仓库原创代码采用 GPL-3.0-only。以上 MIT 项目的原版权声明和许可证全文分别保存在 `third_party/NOTICE.md` 和 `third_party/licenses/Explore-In-HMOS-Wearable-MIT.txt`。后续若复制其他第三方具体文件，需按对应文件许可证单独处理，不默认所有文件都采用 MIT。

@@ -28,6 +28,11 @@ for (const f of files) {
   assert.equal(typeof msg.v, 'number', f + ': v required');
   assert.equal(msg.v, 0, f + ': only protocol v0 is defined');
   assert.equal(typeof msg.type, 'string', f + ': type required');
+  if (msg.type.indexOf('READ_PROGRESS_') === 0) {
+    // 阅读进度是独立于传书的协议；字段由 tests/watch_progress_sync
+    // 与 tests/phone_reader_sync 校验，不要求 transferId。
+    continue;
+  }
   if (msg.type !== 'HELLO') {
     assert.equal(typeof msg.transferId, 'string',
       f + ': transferId required for non-HELLO');

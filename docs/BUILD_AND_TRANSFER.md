@@ -378,6 +378,14 @@ watch: entry-default-debug-signed.hap size=419960
 重试和传输协议仍未改变；真机 UI 与传书结果仍未确认，不能把
 “构建/安装成功”当成“传书打通”。
 
+### issue #18 本机编译证据（阅读器 + 进度同步，未真机验收）
+
+- 手机 debug HAP：`harmony/entry/build/default/outputs/default/entry-default-debug-signed.hap`，563,287 字节，`COMPILED_STRING_OK entry=ets/modules.abc count=1`、`HAP_OK ... single_bin=0 signed=yes`，SHA-256 `62c445fcd588158135d375e66bc3e1ec4d0a69d3bd9eab2d313f4e7265163aa7`。新增 `pages/Reader`、`ReadingProgressStore`、`ReadingSyncService` 均进入 ArkTS 编译。
+- 手表 Lite debug 单 BIN HAP：`watch/huawei/watch-lite/entry/build/default/outputs/default/entry-default-debug-signed.hap`，567,653 字节，`LITE_BIN_SIGNED_OK`、`BIN_SHA256_MATCH`（内部 BIN `3fad6e1a...`）、`WATCH_PAGE_JS page=index/index` / `reader/reader` 均生成；`ProgressSync.js` 出现在阅读页 source map 的 sources 列表中。Lite `verify-app` 仍为 `VERIFY_UNSUPPORTED_FOR_LITE_BIN`（0xBE 单 BIN 工具限制），**不是验签通过**。
+- 章节识别：`node tests/chapter_detection.test.mjs`（18 组夹具 + 10k 章）、`node tests/prepare_watch_books.test.mjs`、`./gradlew :app:compileDebugKotlin --offline --no-daemon` 通过；跨端夹具覆盖紧排/全角/中文数字/装饰/站点前缀/前导目录/正文误判/CRLF/emoji/空文本。
+- 同步与阅读器：`tests/watch_progress_sync.test.mjs`、`tests/reading_sync_policy.test.mjs`、`tests/phone_reader_sync.test.mjs`、`tests/text_window.test.mjs` 通过；全部既有 `tests/*.test.mjs` 通过。
+- **未做**：Pocket 2 真机阅读、GT 4 真机安装/阅读、双端 Wear Engine 进度同步、锁屏/后台/断连场景。**不得据此标记 issue #18 完成。**
+
 ## 现有源码不能直接认定兼容的地方
 
 - `watch/huawei/watch-lite/build-profile.json5` 暂时采用轻智能手表示例的 `6.1.1(24)` 模板数值，但**没有确认为 GT 4 开发安装实际可用的版本**。
