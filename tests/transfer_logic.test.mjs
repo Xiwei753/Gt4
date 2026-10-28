@@ -47,6 +47,7 @@ const load = async (rel) => {
 };
 
 const { validateBookMeta, beginTransfer, applyChunk,
+  applyChapterChunk, assembleChapters,
   missingIndices, assembleBytes, verifyDigest } =
   await load('wear/TransferLogic.js');
 
@@ -206,5 +207,61 @@ for (const broken of [
     'flipped byte must fail digest');
 }
 
+// ---------- 长章节目录 CHAPTERS 分片 ----------
+{
+  const chunkedMeta = Object.assign({}, makeMeta(), {
+    chapters: [],
+    chapterChunks: 2
+  });
+  assert.equal(validateBookMeta(chunkedMeta).ok, true);
+  const state = beginTransfer(chunkedMeta).state;
+  assert.equal(state.expectedChapterChunks, 2);
+  const part1 = [
+    { title: '第一章', offset: 0, length: 20 },
+    { title: '第二章', offset: 20, length: 30 }
+  ];
+  const part2 = [
+    { title: '第三章', offset: 50, length: bookBytes.length - 50 }
+  ];
+  assert.equal(applyChapterChunk(state, {
+    transferId: chunkedMeta.transferId, bookId: chunkedMeta.bookId,
+    index: 1, total: 2, chapters: part2
+  }).ok, true, 'out-of-order chunk 1 is accepted');
+  assert.equal(applyChapterChunk(state, {
+    transferId: chunkedMeta.transferId, bookId: chunkedMeta.bookId,
+    index: 0, total: 2, chapters: part1
+  }).ok, true, 'chunk 0 completes the catalog');
+  assert.equal(applyChapterChunk(state, {
+    transferId: chunkedMeta.transferId, bookId: chunkedMeta.bookId,
+    index: 0, total: 2, chapters: part1
+  }).duplicate, true, 'duplicate chapter chunk is idempotent');
+  const assembledChapters = assembleChapters(state);
+  assert.equal(assembledChapters.ok, true);
+  assert.deepEqual(assembledChapters.chapters.map((c) => c.title),
+    ['第一章', '第二章', '第三章']);
+  assert.equal(state.meta.chapters.length, 3);
+}
+{
+  const chunkedMeta = Object.assign({}, makeMeta(), {
+    chapters: [], chapterChunks: 2
+  });
+  const state = beginTransfer(chunkedMeta).state;
+  applyChapterChunk(state, {
+    transferId: chunkedMeta.transferId, bookId: chunkedMeta.bookId,
+    index: 0, total: 2,
+    chapters: [{ title: '第一章', offset: 0, length: 10 }]
+  });
+  assert.equal(assembleChapters(state).reason, 'E_MISSING_CHAPTERS');
+  assert.equal(applyChapterChunk(state, {
+    transferId: chunkedMeta.transferId, bookId: chunkedMeta.bookId,
+    index: 2, total: 2,
+    chapters: [{ title: '越界', offset: 0, length: 1 }]
+  }).reason, 'E_PROTOCOL');
+  assert.equal(validateBookMeta(Object.assign({}, chunkedMeta, {
+    chapters: [{ title: '正文', offset: 0, length: 1 }]
+  })).ok, false,
+  'chunked BOOK_META must not also carry a full chapter array');
+}
+
 console.info('PASS: watch transfer logic (meta validation, ' +
-  'ordering, idempotency, missing/digest failures)');
+  'ordering, idempotency, missing/digest failures, chapter chunks)');

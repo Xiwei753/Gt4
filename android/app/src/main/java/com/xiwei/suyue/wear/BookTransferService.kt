@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // 手机侧书籍发送：按 protocol v0 序列
-//   HELLO → BOOK_META → 文件通道 → 等待手表 RESULT。
+//   HELLO → BOOK_META →（必要时 CHAPTERS 分片）→ 文件通道 → 等待手表 RESULT。
 // 约束（协议 + 施工单）：
 //   - 成功以手表回 RESULT ok=true 为准，不以发送回调成功为准；
 //   - 目标设备由用户选择，不默认第一台；
@@ -190,12 +190,34 @@ class BookTransferService(private val gateway: WearEngineGateway) {
                 }
 
                 // BOOK_META：章节偏移基于 UTF-8 字节。
+                // 完整目录超过 4096 字节时，BOOK_META 只带 chapterChunks，
+                // 章节索引改由后续 CHAPTERS 消息分片发送，避免 P2P 单条
+                // 消息上限导致传书在正文前失败。
+                val fullMeta = bookMetaJson(transferId, book)
+                val chapterMessages = if (fullMeta.size > ChapterChunks.MAX_MESSAGE_BYTES) {
+                    ChapterChunks.split(transferId, book.bookId, book.chapters)
+                } else {
+                    emptyList()
+                }
                 progress = progress.copy(state = TransferState.SENDING, message = "发送书籍元数据")
                 onProgress(progress)
                 withTimeout(MESSAGE_TIMEOUT_MS) {
                     gateway.sendMessage(
-                        watch.device, peerBundle, peerFingerprint, bookMetaJson(transferId, book)
+                        watch.device, peerBundle, peerFingerprint,
+                        if (chapterMessages.isEmpty()) fullMeta
+                        else bookMetaJson(transferId, book, chapterMessages.size)
                     )
+                }
+                chapterMessages.forEachIndexed { index, message ->
+                    progress = progress.copy(
+                        message = "发送章节索引 ${index + 1}/${chapterMessages.size}"
+                    )
+                    onProgress(progress)
+                    withTimeout(MESSAGE_TIMEOUT_MS) {
+                        gateway.sendMessage(
+                            watch.device, peerBundle, peerFingerprint, message
+                        )
+                    }
                 }
 
                 // 文件通道传输整本规范化正文（上传阶段独立超时）。
@@ -303,11 +325,17 @@ class BookTransferService(private val gateway: WearEngineGateway) {
         return msg.toString().toByteArray(Charsets.UTF_8)
     }
 
-    private fun bookMetaJson(transferId: String, book: BookMeta): ByteArray {
+    private fun bookMetaJson(transferId: String, book: BookMeta,
+                             chapterChunks: Int = 0): ByteArray {
         val msg = book.toBookMetaPayload()
         msg.put("v", 0)
         msg.put("type", "BOOK_META")
         msg.put("transferId", transferId)
+        if (chapterChunks > 0) {
+            // 分片模式：完整目录由后续 CHAPTERS 消息补齐。
+            msg.put("chapters", JSONArray())
+            msg.put("chapterChunks", chapterChunks)
+        }
         return msg.toString().toByteArray(Charsets.UTF_8)
     }
 

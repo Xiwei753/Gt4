@@ -33,6 +33,14 @@ const chunkExample = JSON.parse(
 assert.equal(b64decode(chunkExample.payloadB64).length,
   chunkExample.length, 'chunk example payload must match length');
 assert.ok(chunkExample.total >= chunkExample.index + 1);
+// CHAPTERS 示例：分片必须自洽，且每片不超过 P2P 4096 字节。
+const chaptersExample = JSON.parse(
+  readFileSync(new URL('chapters.json', EXAMPLES), 'utf8'));
+assert.equal(chaptersExample.type, 'CHAPTERS');
+assert.ok(chaptersExample.index >= 0);
+assert.ok(chaptersExample.total > chaptersExample.index);
+assert.ok(chaptersExample.chapters.length > 0);
+assert.ok(Buffer.byteLength(JSON.stringify(chaptersExample), 'utf8') <= 4096);
 // BOOK_META 示例：chapters 区间必须覆盖 bytes。
 const metaExample = JSON.parse(
   readFileSync(new URL('book-meta.json', EXAMPLES), 'utf8'));

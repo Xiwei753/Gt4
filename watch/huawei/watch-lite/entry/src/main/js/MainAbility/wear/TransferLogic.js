@@ -40,7 +40,33 @@ export function validateBookMeta(meta) {
   if (!Array.isArray(meta.chapters)) {
     return { ok: false, reason: 'E_PROTOCOL' };
   }
+  if (meta.chapterChunks !== undefined) {
+    if (typeof meta.chapterChunks !== 'number' ||
+        !isFinite(meta.chapterChunks) ||
+        Math.floor(meta.chapterChunks) !== meta.chapterChunks ||
+        meta.chapterChunks < 0) {
+      return { ok: false, reason: 'E_PROTOCOL' };
+    }
+    if (meta.chapterChunks > 0 && meta.chapters.length !== 0) {
+      return { ok: false, reason: 'E_PROTOCOL' };
+    }
+  }
   return { ok: true };
+}
+
+function validChapter(chapter, totalBytes) {
+  if (!chapter || typeof chapter !== 'object') return false;
+  if (typeof chapter.title !== 'string') return false;
+  if (typeof chapter.offset !== 'number' ||
+      !isFinite(chapter.offset) ||
+      Math.floor(chapter.offset) !== chapter.offset ||
+      chapter.offset < 0) return false;
+  if (typeof chapter.length !== 'number' ||
+      !isFinite(chapter.length) ||
+      Math.floor(chapter.length) !== chapter.length ||
+      chapter.length < 0) return false;
+  if (chapter.offset + chapter.length > totalBytes) return false;
+  return true;
 }
 
 // 单本在途约束（第二轮 P0-2）：同一时刻只允许
@@ -54,15 +80,89 @@ export function beginTransfer(meta, activeTransferId) {
       activeTransferId !== meta.transferId) {
     return { ok: false, reason: 'E_BUSY' };
   }
+  const expectedChapterChunks =
+    (typeof meta.chapterChunks === 'number') ? meta.chapterChunks : 0;
   return {
     ok: true,
     state: {
       meta: meta,
       chunks: {},        // index → Uint8Array
       receivedCount: 0,
-      totalBytes: 0
+      totalBytes: 0,
+      // 长章节目录：BOOK_META 只给分片数，CHAPTERS 逐片补齐。
+      chapterChunks: {}, // index → [{title,offset,length}]
+      chapterChunksReceived: 0,
+      expectedChapterChunks: expectedChapterChunks
     }
   };
+}
+
+// 收集 CHAPTERS 分片。分片必须来自同一 transfer/book，索引和总数
+// 与 BOOK_META 一致；重复索引按幂等处理，不重复计数。
+export function applyChapterChunk(state, message) {
+  if (!state || !message) return { ok: false, reason: 'E_PROTOCOL' };
+  if (message.transferId !== state.meta.transferId ||
+      message.bookId !== state.meta.bookId) {
+    return { ok: false, reason: 'E_PROTOCOL' };
+  }
+  const total = state.expectedChapterChunks;
+  if (total <= 0 || message.total !== total) {
+    return { ok: false, reason: 'E_PROTOCOL' };
+  }
+  if (typeof message.index !== 'number' ||
+      Math.floor(message.index) !== message.index ||
+      message.index < 0 || message.index >= total) {
+    return { ok: false, reason: 'E_PROTOCOL' };
+  }
+  if (!Array.isArray(message.chapters) || message.chapters.length === 0) {
+    return { ok: false, reason: 'E_PROTOCOL' };
+  }
+  if (state.chapterChunks[message.index]) {
+    return { ok: true, duplicate: true };
+  }
+  for (let i = 0; i < message.chapters.length; i++) {
+    if (!validChapter(message.chapters[i], state.meta.bytes)) {
+      return { ok: false, reason: 'E_PROTOCOL' };
+    }
+  }
+  state.chapterChunks[message.index] =
+    message.chapters.slice(0, message.chapters.length);
+  state.chapterChunksReceived += 1;
+  return { ok: true };
+}
+
+// 所有分片到齐后，按 index 拼接并做一次全目录连续性校验。
+export function assembleChapters(state) {
+  if (!state) return { ok: false, reason: 'E_PROTOCOL' };
+  if (state.expectedChapterChunks === 0) {
+    return { ok: true, chapters: state.meta.chapters };
+  }
+  if (state.chapterChunksReceived !== state.expectedChapterChunks) {
+    return { ok: false, reason: 'E_MISSING_CHAPTERS' };
+  }
+  const out = [];
+  let previousEnd = -1;
+  for (let i = 0; i < state.expectedChapterChunks; i++) {
+    const part = state.chapterChunks[i];
+    if (!part) return { ok: false, reason: 'E_MISSING_CHAPTERS' };
+    for (let j = 0; j < part.length; j++) {
+      const chapter = part[j];
+      if (!validChapter(chapter, state.meta.bytes)) {
+        return { ok: false, reason: 'E_PROTOCOL' };
+      }
+      if (chapter.offset < previousEnd) {
+        return { ok: false, reason: 'E_PROTOCOL' };
+      }
+      previousEnd = chapter.offset + chapter.length;
+      out.push({
+        title: chapter.title,
+        offset: chapter.offset,
+        length: chapter.length
+      });
+    }
+  }
+  state.meta.chapters = out;
+  return { ok: true, chapters: out };
 }
 
 // 幂等：重复 index 不覆盖、不重复计数。

@@ -23,7 +23,7 @@ import { loadProgress,
   saveProgress, saveLastBook } from '../../storage/ProgressStore';
 import { takeCanvasPage } from '../../reader/PageLayout';
 import { normalizeChapters, chapterIndexAt,
-  chapterRows, chapterLabel } from '../../reader/Chapters';
+  chapterWindow, chapterLabel } from '../../reader/Chapters';
 import { drawPage } from '../../reader/CanvasTextRenderer';
 import { loadReaderPreferences, saveReaderPreferences }
   from '../../storage/ReaderPreferences.js';
@@ -36,6 +36,8 @@ import { isLowerHex } from '../../util/Validate';
 var CANVAS_SIZE = 452;
 // 圆屏安全内边距：留出边缘，避免贴边裁切。
 var EDGE_PADDING = 10;
+// 章节浏览窗口：只渲染 5 行，翻组不跳转、不把全量标题塞进 UI。
+var CHAPTER_PAGE_SIZE = 5;
 
 export default {
   data: {
@@ -67,6 +69,9 @@ export default {
     chapterOpen: false,
     chapterLabel: '',
     chapterRows: [],
+    chapterWindowStart: 0,
+    chapterWindowPrevEnabled: false,
+    chapterWindowNextEnabled: false,
     chapterPrevEnabled: false,
     chapterNextEnabled: false
   },
@@ -95,6 +100,7 @@ export default {
     this.canvasReady = false;
     this.chapters = [];
     this.chapterIndex = -1;
+    this.chapterWindowStart = 0;
     this.chapterOpen = false;
     this.lastBookSaved = false;
     // Lite 通过目标页 data 同名字段注入 bookId（不再用旧的取参接口）；
@@ -141,12 +147,23 @@ export default {
     this.refreshChapterView();
   },
   refreshChapterView() {
+    if (!Array.isArray(this.chapters)) this.chapters = [];
     this.chapterIndex = chapterIndexAt(this.chapters, this.offset);
     this.chapterLabel = chapterLabel(this.chapters, this.chapterIndex);
-    this.chapterRows = chapterRows(this.chapters, this.chapterIndex, 2);
+    var count = this.chapters.length;
+    var maxStart = Math.max(0, count - CHAPTER_PAGE_SIZE);
+    var start = typeof this.chapterWindowStart === 'number' ?
+      this.chapterWindowStart : 0;
+    if (start < 0) start = 0;
+    if (start > maxStart) start = maxStart;
+    this.chapterWindowStart = start;
+    this.chapterRows = chapterWindow(this.chapters, start,
+      CHAPTER_PAGE_SIZE, this.chapterIndex);
+    this.chapterWindowPrevEnabled = start > 0;
+    this.chapterWindowNextEnabled = start < maxStart;
     this.chapterPrevEnabled = this.chapterIndex > 0;
     this.chapterNextEnabled = this.chapterIndex >= 0 &&
-      this.chapterIndex < this.chapters.length - 1;
+      this.chapterIndex < count - 1;
   },
   // 初次打开的书没有 per-book 阅读设置。原链路把位置与两次
   // 设置 KV 读取串在一起：只要“缺省设置”调用不及时返回，
@@ -445,10 +462,24 @@ export default {
     if (!this.hasChapters) return;
     this.settingsOpen = true;
     this.chapterOpen = true;
+    // 每次打开从当前章节居中；之后翻组不改变阅读位置。
+    this.chapterWindowStart = Math.max(0,
+      this.chapterIndex - Math.floor(CHAPTER_PAGE_SIZE / 2));
     this.refreshChapterView();
   },
   closeChapters() {
     this.chapterOpen = false;
+    this.refreshChapterView();
+  },
+  // 章节面板浏览：只移动 5 行窗口，不跳转、不产生阅读进度。
+  chapterWindowPrevious() {
+    if (!this.chapterOpen) return;
+    this.chapterWindowStart -= CHAPTER_PAGE_SIZE;
+    this.refreshChapterView();
+  },
+  chapterWindowNext() {
+    if (!this.chapterOpen) return;
+    this.chapterWindowStart += CHAPTER_PAGE_SIZE;
     this.refreshChapterView();
   },
   // Canvas 始终挂载，返回阅读后只绘制一次当前页。

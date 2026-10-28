@@ -29,6 +29,9 @@
   文件读取 API 的默认 4096 字节与 Wear Engine 发送上限不是一回事。
 - 未协商或协商失败时，发送方必须停止并报 `E_PROTOCOL`，
   不得擅自假定块大小。
+- 但 **P2P 单条 JSON 控制消息有 4096 字节上限**。BOOK_META 携带
+  100~500 章目录时会超限，此时必须改用下面的
+  `chapterChunks` + `CHAPTERS` 分片；正文仍走文件通道，不能截断章节。
 
 ### SDK 映射（以华为 Wear Engine 示例为准，待真机验证）
 
@@ -100,7 +103,25 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 | sha256 | string | 是 | 规范化后正文的 SHA-256（hex 小写，64 字符） |
 | chunks | number | 是 | 块总数（≥1） |
 | chunkBytes | number | 是 | 本传输使用的块字节大小 |
-| chapters | array | 是 | `[{title, offset, length}]`，字节区间，按序 |
+| chapters | array | 是 | `[{title, offset, length}]`，字节区间，按序。分片模式下为空数组 |
+| chapterChunks | number | 否 | 长目录分片数；缺省/0 表示 `chapters` 已完整 |
+
+### CHAPTERS（手机 → 表，可选）
+
+`BOOK_META.chapterChunks > 0` 时，手机在 BOOK_META 之后、正文文件/CHUNK
+之前按 `index` 发送全部章节分片。每片的完整 JSON（UTF-8）必须 ≤4096 字节；
+发送方按实际序列化字节数分片，不得按固定章节数猜测。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| bookId / transferId | string | 是 | 必须与 BOOK_META 一致 |
+| index | number | 是 | 0-based 分片序号 |
+| total | number | 是 | 分片总数，须等于 BOOK_META.chapterChunks |
+| chapters | array | 是 | 本片 `[{title, offset, length}]`，非空 |
+
+接收方按 index 收集（重复片幂等），全部到齐后按序拼成完整章节目录；
+缺片时 FINISH/文件通道返回 `E_MISSING_CHAPTERS`，不得把半份目录入库。
+旧手机不发 CHAPTERS、旧手表忽略 `chapterChunks` 时，正文仍可正常传输。
 
 ### CHUNK（手机 → 表）
 
@@ -165,6 +186,7 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 | E_TIMEOUT | 块超时未达 |
 | E_DIGEST_MISMATCH | 整本或块摘要不符 |
 | E_MISSING_CHUNKS | FINISH 时仍有缺块 |
+| E_MISSING_CHAPTERS | 长章节目录分片未到齐 |
 | E_DUPLICATE_TRANSFER | 同一 transferId 重复开始且状态不一致 |
 | E_CANCELLED | 发送方取消 |
 | E_PEER_UNAVAILABLE | 对端未配对/离线/不支持 |
@@ -189,6 +211,7 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 手机 → 表  HELLO（capabilities，含 chunkBytes/fileChannel）
 表 → 手机 HELLO（capabilities 回应）
 手机 → 表  BOOK_META
+手机 → 表  CHAPTERS × N     （长目录时；每片 ≤4096 字节）
 手机 → 表  CHUNK × N        （每块到达后）
 表 → 手机 ACK {index, ok}
 手机 → 表  FINISH

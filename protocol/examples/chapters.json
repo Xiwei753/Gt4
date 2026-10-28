@@ -1,0 +1,12 @@
+{
+  "v": 0,
+  "type": "CHAPTERS",
+  "transferId": "0123456789abcdef0123456789abcdef",
+  "bookId": "0123456789abcdef",
+  "index": 0,
+  "total": 2,
+  "chapters": [
+    { "title": "第一章 起点", "offset": 0, "length": 4096 },
+    { "title": "第二章 继续", "offset": 4096, "length": 4096 }
+  ]
+}

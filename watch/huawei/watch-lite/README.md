@@ -203,9 +203,16 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
   Harmony `BookImportService.ts` / Android `TxtImportService.kt` 做同一规则。每条只有
   标题和规范化 **UTF-8 字节**起点/长度，绝不用字符下标或页码；识别不到可靠标题时整本
   保持单章「正文」，不截断、不丢字。EPUB 仍沿用原有章节打包。
-- **手表章节面板**：阅读设置里新增「章节 · 当前标题」；面板只渲染当前章节附近最多 5 行，
-  另有上一章/下一章。跳转直接复用原有 `loadPage(byteOffset)`，渲染完成后按原进度规则保存。
-  旧书/无索引书没有章节入口，但正文、字号、主题和翻页完全不变。
+- **手表章节面板**：阅读设置里新增「章节 · 当前标题」；面板用 Lite 已验证的
+  `<list>/<list-item>`（显式高度）只渲染 5 行窗口，另有「上一组/下一组」独立翻页和
+  「上一章/下一章」直接跳转。翻组只移动窗口、不跳页；点击具体章节才复用原有
+  `loadPage(byteOffset)`，渲染完成后按原进度规则保存。旧书/无索引书没有章节入口，
+  但正文、字号、主题和翻页完全不变。
+- **长章节目录不能撑爆 4096 字节消息**：Wear Engine P2P 单条 JSON 控制消息上限 4096 字节。
+  `BOOK_META` 能装下完整 `chapters` 时保持旧格式；装不下时改为空 `chapters` +
+  `chapterChunks`，随后逐条发送 `CHAPTERS`（每条按真实 UTF-8 字节分片，≤4096），再传正文。
+  手机 Harmony/Android 两侧发送、手表按 index 幂等收集，缺片报 `E_MISSING_CHAPTERS`；
+  旧手机/旧手表只带完整目录时仍按原协议工作，不会截断章节或改走第二套正文通道。
 - **冷启动续读**：`ProgressStore` 另存一个 16 字符 `suyue.last` 键；每本书的真实位置仍是
   `suyue.pos.<bookId>`，不复制进度。书架先同步渲染，再异步读取上次书籍：书还存在且可打开
   才自动进入阅读页；被删除、索引不可用或读取超时则留在书架。显式返回书架会带
@@ -213,11 +220,13 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 - **长时间翻页**：外部文件 `openBook/readBytes` 现在也有 settle-once 超时；单次读取
   不回调时阅读页会显示错误并解锁，而不是永久停在 `isLoading`。迟到的底层回调被丢弃。
   压力回归 `tests/watch_reader_stress.test.mjs` 连续翻页 4000 次并穿插前后台切换，
-  验证 `pending/isLoading` 归零、历史仍限制在 60 条。**这只证明代码路径有界，
-  真机长时间卡顿仍需实机复现与确认。**
+  另有一组真实异步延迟文件回调的交错读取，验证 `pending/isLoading` 归零、历史仍限制在
+  60 条、前后台切换不叠加第二次读取。**这只证明代码路径有界，真机长时间卡顿仍需实机复现与确认。**
 - 回归：`tests/watch_chapters.test.mjs`、`tests/watch_reader_chapters.test.mjs`、
-  `tests/prepare_watch_books.test.mjs`、`tests/watch_book_modules.test.mjs`、
-  `tests/watch_shelf_startup.test.mjs`、`tests/watch_reader_stress.test.mjs`。
+  `tests/watch_chapter_chunks.test.mjs`、`tests/transfer_logic.test.mjs`、
+  `tests/watch_receive.test.mjs`、`tests/prepare_watch_books.test.mjs`、
+  `tests/watch_book_modules.test.mjs`、`tests/watch_shelf_startup.test.mjs`、
+  `tests/watch_reader_stress.test.mjs`。
 
 ## 未完成
 

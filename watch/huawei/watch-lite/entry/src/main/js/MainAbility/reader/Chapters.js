@@ -84,6 +84,28 @@ export function chapterRows(chapters, index, radius) {
   return rows;
 }
 
+// 独立浏览窗口：start 是窗口首行，不由当前阅读位置强制居中。
+// 章节面板分页时只移动这个窗口，点击具体行才跳转。
+export function chapterWindow(chapters, start, count, current) {
+  if (!Array.isArray(chapters) || chapters.length === 0) return [];
+  var size = (typeof count === 'number' && count > 0) ?
+    Math.floor(count) : 5;
+  var maxStart = Math.max(0, chapters.length - size);
+  var first = (typeof start === 'number' && isFinite(start)) ?
+    Math.floor(start) : 0;
+  if (first < 0) first = 0;
+  if (first > maxStart) first = maxStart;
+  var currentIndex = (typeof current === 'number') ? current : -1;
+  var end = Math.min(chapters.length - 1, first + size - 1);
+  var rows = [];
+  for (var i = first; i <= end; i++) {
+    rows.push({ index: i, title: chapters[i].title,
+      current: i === currentIndex,
+      label: (i === currentIndex ? '▶ ' : '') + chapters[i].title });
+  }
+  return rows;
+}
+
 export function chapterLabel(chapters, index) {
   if (!Array.isArray(chapters) || chapters.length === 0) return '';
   var i = (typeof index === 'number' && index >= 0) ? index : 0;

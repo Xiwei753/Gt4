@@ -97,7 +97,7 @@ for (const t of ['BOOK_META', 'CHUNK', 'ACK', 'FINISH', 'RESULT',
   assert.ok(protocolReadme.includes(t),
     'protocol spec must define ' + t);
 }
-for (const ex of ['hello', 'book-meta', 'chunk', 'ack', 'result',
+for (const ex of ['hello', 'book-meta', 'chapters', 'chunk', 'ack', 'result',
   'resume', 'error']) {
   assert.ok(existsSync('protocol/examples/' + ex + '.json'),
     'protocol example missing: ' + ex);
@@ -172,10 +172,21 @@ assert.ok(watchReader.includes('saveLastBook'),
 const readerSettingsHml = read(
   'watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.hml');
 assert.ok(readerSettingsHml.includes('openChapters') &&
+  readerSettingsHml.includes('<list class="chapter-list"') &&
+  readerSettingsHml.includes('<list-item class="chapter-item"') &&
   readerSettingsHml.includes('for="{{ chapterRows }}"') &&
+  readerSettingsHml.includes('chapterWindowNext') &&
   readerSettingsHml.includes('previousChapter') &&
   readerSettingsHml.includes('nextChapter'),
-  'settings must expose a bounded chapter panel with prev/next navigation');
+  'settings must expose a bounded Lite list panel with window + chapter navigation');
+assert.ok(watchReader.includes('chapterWindow(this.chapters') &&
+  watchReader.includes('chapterWindowNext()'),
+  'chapter panel must keep an independent bounded browse window');
+const chapterCss = read(
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.css');
+assert.ok(/\.chapter-list\s*\{[^}]*height:/.test(chapterCss) &&
+  /\.chapter-item\s*\{[^}]*height:\s*(?!0\b)\d/.test(chapterCss),
+  'chapter list/list-item need explicit heights on Lite Wearable');
 const crownInput = read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/reader/CrownInput.js');
 assert.ok(crownInput.includes("'unverified'"),
   'crown input must not claim verified support without a device run');
@@ -496,6 +507,25 @@ assert.ok(importService.includes('detectTxtChapters'),
 assert.ok(read('android/app/src/main/java/com/xiwei/suyue/importer/TxtImportService.kt')
   .includes('detectChapters'),
   'Android TXT import must detect chapter byte ranges (issue #17)');
+// issue #17 review：Wear Engine 单条消息 4096 字节，长章节目录必须分片；
+// 两端发送方 + 手表接收方使用同一 CHAPTERS 协议。
+const watchTransferLogic = read(
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/TransferLogic.js');
+assert.ok(watchTransferLogic.includes('applyChapterChunk') &&
+  watchTransferLogic.includes('assembleChapters') &&
+  watchTransferLogic.includes('E_MISSING_CHAPTERS'),
+  'watch receiver must assemble CHAPTERS chunks before FINISH/file commit');
+assert.ok(read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/IncomingBookReceiver.js')
+  .includes("case 'CHAPTERS'"),
+  'watch receiver must handle CHAPTERS messages');
+assert.ok(read('harmony/entry/src/main/ets/services/BookTransferService.ts')
+  .includes('splitChapterChunks') &&
+  read('android/app/src/main/java/com/xiwei/suyue/wear/BookTransferService.kt')
+    .includes('ChapterChunks.split'),
+  'both phone senders must chunk long chapter catalogs');
+assert.ok(read('protocol/README.md').includes('chapterChunks') &&
+  read('protocol/README.md').includes('E_MISSING_CHAPTERS'),
+  'protocol must document 4096-byte chapter chunking');
 
 // P0-4：摘要必须对 normalized 字节计算，
 // 且写后复核。
