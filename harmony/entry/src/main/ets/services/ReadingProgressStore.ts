@@ -10,7 +10,8 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { BookMeta } from '../model/BookModels';
-import { enqueueBookWrite } from '../model/ProgressWriteQueue';
+import { bumpWriteGeneration, captureWriteGeneration,
+  enqueueBookWrite } from '../model/ProgressWriteQueue';
 
 const PREF_NAME = 'suyue_reading_progress';
 const KEY_PREFIX = 'p.';
@@ -136,10 +137,12 @@ export class ReadingProgressStore {
   // 本地阅读保存：默认保留上一次同步基线，不能把“本地新读”误当成
   // “已同步”。同步服务在确认采用某一边后可显式传入 baseline。
   async save(bookId: string, sha256: string, offset: number,
-    baseline?: number): Promise<void> {
+    baseline?: number, generation?: number): Promise<void> {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
       return;
     }
+    const writeGeneration = generation !== undefined ?
+      generation : captureWriteGeneration(bookId);
     await enqueueBookWrite(bookId, async () => {
       let syncedOffset = UNKNOWN_BASELINE;
       let pendingOffset = -1;
@@ -166,7 +169,7 @@ export class ReadingProgressStore {
         syncedOffset: syncedOffset,
         pendingOffset: pendingOffset
       });
-    });
+    }, writeGeneration);
   }
 
   // 采用远端进度：保留远端 updatedAt，基线直接设为该偏移。
@@ -175,6 +178,7 @@ export class ReadingProgressStore {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
       return;
     }
+    const writeGeneration = bumpWriteGeneration(bookId);
     await enqueueBookWrite(bookId, async () => {
       await this.writeRecord(bookId, {
         sha256: sha256,
@@ -184,12 +188,13 @@ export class ReadingProgressStore {
         syncedOffset: offset,
         pendingOffset: -1
       });
-    });
+    }, writeGeneration);
   }
 
   // 本地进度胜出：只把基线推进到当前本地 offset，不制造“新阅读”。
   async markSynced(bookId: string, sha256: string, offset: number): Promise<void> {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) return;
+    const writeGeneration = bumpWriteGeneration(bookId);
     await enqueueBookWrite(bookId, async () => {
       const existing = await this.readRecord(bookId);
       if (existing === null || existing.sha256 !== sha256) return;
@@ -200,7 +205,7 @@ export class ReadingProgressStore {
         syncedOffset: offset,
         pendingOffset: -1
       });
-    });
+    }, writeGeneration);
   }
 
   // 本地进度等待对端确认：只记录待确认位置，不推进同步基线。
@@ -210,6 +215,7 @@ export class ReadingProgressStore {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
       return;
     }
+    const writeGeneration = bumpWriteGeneration(bookId);
     await enqueueBookWrite(bookId, async () => {
       const existing = await this.readRecord(bookId);
       if (existing === null || existing.sha256 !== sha256) return;
@@ -221,7 +227,7 @@ export class ReadingProgressStore {
           existing.syncedOffset : UNKNOWN_BASELINE,
         pendingOffset: offset
       });
-    });
+    }, writeGeneration);
   }
 
   async saveLastBook(bookId: string): Promise<void> {

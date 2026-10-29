@@ -27,3 +27,32 @@ export function emitReadingApply(bookId: string, offset: number): void {
     }
   }
 }
+
+// 远端写入前通知活动 Reader：先取消本地 debounce 并作废旧写入代次，
+// 再让同步服务把远端位置写入 Preferences。这样旧定时器不会在远端
+// 写入之后又把旧位置排进队列。
+export type ReadingPrepareListener = (bookId: string) => void;
+const prepareListeners: ReadingPrepareListener[] = [];
+
+export function addReadingPrepareListener(
+  listener: ReadingPrepareListener): void {
+  if (prepareListeners.indexOf(listener) < 0) {
+    prepareListeners.push(listener);
+  }
+}
+
+export function removeReadingPrepareListener(
+  listener: ReadingPrepareListener): void {
+  const index = prepareListeners.indexOf(listener);
+  if (index >= 0) prepareListeners.splice(index, 1);
+}
+
+export function emitReadingPrepare(bookId: string): void {
+  for (let i = 0; i < prepareListeners.length; i++) {
+    try {
+      prepareListeners[i](bookId);
+    } catch (error) {
+      // 页面已销毁时忽略。
+    }
+  }
+}

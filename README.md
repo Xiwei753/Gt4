@@ -38,7 +38,7 @@
 - 手表 Lite Wearable 与手机 Stage 必须分开编译、分开签名，不要混用构建工具链。
 - 手表打包：`tools/build_watch_lite.sh` + `.github/workflows/watch_lite_hap.yml`（自托管 DevEco runner）。**本机已真实编译并签名成功**（release，215,323 字节，`signed=yes`）；签名材料按用途分放在 gitignore 掉的 `signing/shared|phone|watch/`，来源、包名（含 `con` 的来历）与包名预检见 [signing/README.md](signing/README.md)。CI 的那个 job 因没有自托管 runner 仍只会排队，排队不是绿灯。安装与待验证清单见 [docs/WATCH_INSTALL.md](docs/WATCH_INSTALL.md)。
 - 手表端有一条必须知道的运行时限制：Lite 的 JerryScript **没有 RegExp**，正则字面量会让页面 `.bc` 快照静默生成失败（构建仍报成功、手表上却打不开）。实测范围与两道守门见 [watch/huawei/watch-lite/README.md](watch/huawei/watch-lite/README.md#lite-运行时限制本机实测issue-2)。
-- 手机打包：`tools/build_phone_hap.sh` + `.github/workflows/phone_hap.yml`（自托管 DevEco runner；签名材料经 Secrets 注入）。**本机已真实编译并签名成功**（issue #18 debug HAP `entry-default-debug-signed.hap`，598,896 字节，SHA-256 `27a10a18bd058c074afd224531eaeb525ea8f682e661c9fa895b437b945380d1`，`COMPILED_STRING_OK` / `HAP_OK`，`single_bin=0`；旧 release 包 153,467 字节），并已通过 hdc 无线调试**装进 Pocket 2（LEM-AL00）实机启动**，界面正常渲染。**但双端传书与阅读进度同步本身仍未验证**（见下）。
+- 手机打包：`tools/build_phone_hap.sh` + `.github/workflows/phone_hap.yml`（自托管 DevEco runner；签名材料经 Secrets 注入）。**本机已真实编译并签名成功**（issue #18 debug HAP `entry-default-debug-signed.hap`，603,380 字节，SHA-256 `c6b64f33322736f5d935ddcb2552550fe57a807447ecc4592f7046e76e983af5`，`COMPILED_STRING_OK` / `HAP_OK`，`single_bin=0`；旧 release 包 153,467 字节），并已通过 hdc 无线调试**装进 Pocket 2（LEM-AL00）实机启动**，界面正常渲染。**但双端传书与阅读进度同步本身仍未验证**（见下）。
 - 首先验证 GT 4 46mm 支持哪组 Lite SDK/IDE + 签名 + DevEco Assistant 安装流程，才配置真正能产生 signed HAP 的 CI。
 - 手机端可借鉴已有鸿蒙 NEXT CLI 构建流程，**但需要独立应用证书和本项目构建配置**；素笺的打包脚本不能原封不动使用。
 - 详细状态、环境差异和验收清单见 [开发与安装路线](docs/BUILD_AND_TRANSFER.md)。

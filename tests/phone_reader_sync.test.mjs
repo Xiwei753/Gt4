@@ -190,5 +190,21 @@ assert.ok(index.includes('PROGRESS_SYNC_THROTTLE_MS') &&
 assert.ok(store.includes('LAST_BOOK_AT_KEY') &&
   store.includes('clearProgress'),
   'watch last-read timestamp and delete cleanup must be present');
+assert.ok(sync.includes('emitReadingPrepare') &&
+  sync.split('emitReadingPrepare').length - 1 >= 3,
+  'sync must emit prepare before every remote apply');
+assert.ok(reader.includes('remotePrepare') &&
+  reader.includes('bumpWriteGeneration') &&
+  reader.includes('captureWriteGeneration') &&
+  reader.includes('saveOffset(offset, generation)'),
+  'Reader must cancel stale debounce and pass write generation');
+assert.ok(progress.includes('captureWriteGeneration') &&
+  progress.includes('bumpWriteGeneration'),
+  'progress store must enforce write generations');
+const writeQueue = read(
+  'harmony/entry/src/main/ets/model/ProgressWriteQueue.js');
+assert.ok(writeQueue.includes('bumpWriteGeneration') &&
+  writeQueue.includes('captureWriteGeneration'),
+  'write queue must expose generation invalidation');
 
 console.log('PASS: phone reader/sync static contracts');

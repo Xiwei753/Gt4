@@ -20,7 +20,7 @@ import { BookRepository } from './BookRepository';
 import { ReadingProgressStore, ReadingSummary }
   from './ReadingProgressStore';
 import { WearDeviceService } from './WearDeviceService';
-import { emitReadingApply } from './ReadingSyncEvents';
+import { emitReadingApply, emitReadingPrepare } from './ReadingSyncEvents';
 import { buildSummaryBatches, decidePendingAction,
   decideSyncAction, isValidSummary } from '../model/ReadingSyncPolicy';
 
@@ -348,6 +348,7 @@ export class ReadingSyncService {
       const action = decideSyncAction(local, remote,
         local !== null ? local.syncedOffset : -1);
       if (action === 'apply_remote') {
+        emitReadingPrepare(remote.bookId);
         await this.progressStore.applyRemote(remote.bookId,
           remote.sha256, remote.offset, remote.updatedAt);
         this.notifyApply(remote.bookId, remote.offset);
@@ -411,6 +412,7 @@ export class ReadingSyncService {
         return;
       }
       if (choice === 1) {
+        emitReadingPrepare(remote.bookId);
         await this.progressStore.applyRemote(remote.bookId,
           remote.sha256, remote.offset, remote.updatedAt);
         this.notifyApply(remote.bookId, remote.offset);
@@ -447,6 +449,7 @@ export class ReadingSyncService {
     // 避免延迟消息把手机刚读到的新位置静默回滚。
     const local = await this.progressStore.load(book.bookId, book.sha256);
     if (local === null) {
+      emitReadingPrepare(book.bookId);
       await this.progressStore.applyRemote(book.bookId, book.sha256,
         offset, typeof message.updatedAt === 'number' ?
           message.updatedAt : 0);
@@ -486,6 +489,7 @@ export class ReadingSyncService {
     }
     const action = decideSyncAction(local, remote, local.syncedOffset);
     if (action === 'apply_remote') {
+      emitReadingPrepare(book.bookId);
       await this.progressStore.applyRemote(book.bookId, book.sha256,
         offset, remote.updatedAt);
       this.notifyApply(book.bookId, offset);

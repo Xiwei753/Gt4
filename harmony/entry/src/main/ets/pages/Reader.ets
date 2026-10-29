@@ -7,8 +7,9 @@ import { router } from '@kit.ArkUI';
 import { BookChapter, BookMeta } from '../model/BookModels';
 import { BookRepository } from '../services/BookRepository';
 import { ReadingProgressStore } from '../services/ReadingProgressStore';
-import { addReadingApplyListener,
-  removeReadingApplyListener } from '../services/ReadingSyncEvents';
+import { addReadingApplyListener, addReadingPrepareListener,
+  removeReadingApplyListener,
+  removeReadingPrepareListener } from '../services/ReadingSyncEvents';
 import { chapterIndexAt } from '../model/TextWindow';
 import {
   loadedSegmentBytes,
@@ -16,6 +17,8 @@ import {
   segmentIndexForOffset,
   splitWindowSegments
 } from '../model/ReaderSegments';
+import { bumpWriteGeneration, captureWriteGeneration }
+  from '../model/ProgressWriteQueue';
 
 const WINDOW_BYTES = 64 * 1024;
 // 每段约 256 字节，进度精度远高于旧的 6 KiB 块，又不会让列表项过多。
@@ -73,6 +76,19 @@ struct Reader {
   private saveEpoch: number = 0;
   private loadingMore: boolean = false;
   private opened: boolean = false;
+  private remotePrepare = (bookId: string): void => {
+    const book = this.book;
+    if (book === null || book.bookId !== bookId) return;
+    // 远端写入 Preferences 之前先取消旧 debounce 并作废旧代次，
+    // 防止旧定时器在远端写入之后又把旧位置排进队列。
+    this.saveEpoch++;
+    if (this.saveTimer !== -1) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = -1;
+    }
+    bumpWriteGeneration(bookId);
+  };
+
   private remoteApply = (bookId: string, offset: number): void => {
     const book = this.book;
     if (book === null || book.bookId !== bookId) return;
@@ -110,6 +126,7 @@ struct Reader {
 
   aboutToAppear(): void {
     addReadingApplyListener(this.remoteApply);
+    addReadingPrepareListener(this.remotePrepare);
     if (!this.opened) {
       this.opened = true;
       this.openBook();
@@ -122,6 +139,7 @@ struct Reader {
 
   aboutToDisappear(): void {
     removeReadingApplyListener(this.remoteApply);
+    removeReadingPrepareListener(this.remotePrepare);
     this.cancelScrollGuard();
     this.flushSave();
     this.closeFile();
@@ -404,28 +422,35 @@ struct Reader {
 
   private scheduleSave(offset: number): void {
     if (offset === this.lastSavedOffset) return;
+    const book = this.book;
+    if (book === null) return;
+    const generation: number =
+      captureWriteGeneration(book.bookId) as number;
     if (this.saveTimer !== -1) {
       clearTimeout(this.saveTimer);
     }
     this.saveTimer = setTimeout(() => {
       this.saveTimer = -1;
-      this.saveOffset(offset);
+      this.saveOffset(offset, generation);
     }, 700);
   }
 
-  private saveOffset(offset: number): Promise<void> {
+  private saveOffset(offset: number, generation?: number): Promise<void> {
     const book = this.book;
     if (book === null || !Number.isInteger(offset) || offset < 0) {
       return this.saveChain;
     }
     if (offset === this.lastSavedOffset) return this.saveChain;
     const epoch = this.saveEpoch;
+    const writeGeneration: number = generation !== undefined ? generation :
+      captureWriteGeneration(book.bookId) as number;
     this.saveChain = this.saveChain.then(async () => {
       // 远端进度已应用，旧的本地位置不能再覆盖它。
       if (epoch !== this.saveEpoch) return;
       if (offset === this.lastSavedOffset) return;
       try {
-        await this.getProgressStore().save(book.bookId, book.sha256, offset);
+        await this.getProgressStore().save(book.bookId, book.sha256,
+          offset, undefined, writeGeneration);
         if (epoch === this.saveEpoch) {
           this.lastSavedOffset = offset;
         }
@@ -441,7 +466,10 @@ struct Reader {
       clearTimeout(this.saveTimer);
       this.saveTimer = -1;
     }
-    this.saveOffset(this.currentOffset);
+    const book = this.book;
+    const generation: number = book !== null ?
+      captureWriteGeneration(book.bookId) as number : 0;
+    this.saveOffset(this.currentOffset, generation);
   }
 
   private closeFile(): void {

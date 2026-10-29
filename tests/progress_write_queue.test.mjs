@@ -2,7 +2,8 @@
 // Regression for the Reader/Index progress write race: a local save that is
 // already in flight must not finish after a remote apply and overwrite it.
 import assert from 'node:assert/strict';
-import { enqueueBookWrite } from
+import { enqueueBookWrite, captureWriteGeneration,
+  bumpWriteGeneration } from
   '../harmony/entry/src/main/ets/model/ProgressWriteQueue.js';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,5 +63,30 @@ await Promise.all([
   enqueueBookWrite('book-d', async () => { bDone = true; })
 ]);
 assert.equal(aDone && bDone, true, 'different books must still complete');
+
+// 5. 反向交错：远端 apply 已排队时，先前捕获代次的旧本地 save 即使排在
+//    远端之后，也必须在真正执行时被判为过期而跳过。否则会把 300 写回 100。
+state = { offset: 100, syncedOffset: 100, pendingOffset: -1 };
+const staleGeneration = captureWriteGeneration('book-e');
+const remoteGeneration = bumpWriteGeneration('book-e');
+const remoteFirst = enqueueBookWrite('book-e',
+  task({ offset: 300, syncedOffset: 300, pendingOffset: -1 }, 20),
+  remoteGeneration);
+const staleSave = enqueueBookWrite('book-e',
+  task({ offset: 100, syncedOffset: 100, pendingOffset: -1 }, 0),
+  staleGeneration);
+await Promise.all([remoteFirst, staleSave]);
+assert.deepEqual(state, {
+  offset: 300, syncedOffset: 300, pendingOffset: -1
+}, 'stale save must not resurrect old position after remote apply');
+
+// 6. 远端应用之后，真正的新滚动捕获新代次，仍应正常保存。
+const laterGeneration = captureWriteGeneration('book-e');
+await enqueueBookWrite('book-e',
+  task({ offset: 320, syncedOffset: 300, pendingOffset: -1 }, 0),
+  laterGeneration);
+assert.deepEqual(state, {
+  offset: 320, syncedOffset: 300, pendingOffset: -1
+}, 'a genuinely later save with current generation must still persist');
 
 console.log('PASS: per-book progress write queue ordering and recovery');
