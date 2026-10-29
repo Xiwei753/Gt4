@@ -21,6 +21,11 @@ assert.equal(watchConfig.module.abilities[0].icon, '$media:icon');
 assert.ok(existsSync('watch/huawei/watch-lite/entry/src/main/resources/base/media/icon.png'));
 assert.ok(existsSync('watch/huawei/watch-lite/entry/src/main/resources/base/media/icon_small.png'));
 assert.ok(phoneManifest.includes('stageMode') === false, 'module is a Stage manifest, not a lite JS manifest');
+const phonePages = JSON.parse(read(
+  'harmony/entry/src/main/resources/base/profile/main_pages.json'));
+assert.ok(phonePages.src.includes('pages/Index') &&
+  phonePages.src.includes('pages/Reader'),
+  'phone reader page must be registered in main_pages.json');
 // issue #6 P0-A：Wear Engine 读取设备前先从 module.metadata 取应用级
 // client_id；缺失会在设备发现时报 1008509999（应用身份未配置）。
 // 真实 Client ID 是该应用的唯一身份、随 HAP 分发，不入库：仓库里只保留
@@ -56,7 +61,8 @@ assert.ok(phoneAppJson.app.icon === '$media:app_icon', 'phone app icon must exis
 assert.ok(existsSync('harmony/AppScope/resources/base/media/app_icon.png'));
 for (const svc of ['BookImportService', 'TextDecodeService',
   'EpubImportService', 'BookRepository', 'ZipReader',
-  'WearDeviceService', 'BookTransferService']) {
+  'WearDeviceService', 'BookTransferService',
+  'ReadingProgressStore', 'ReadingSyncService']) {
   assert.ok(existsSync('harmony/entry/src/main/ets/services/' + svc + '.ts'),
     'phone service missing (pure logic layer lives in .ts): ' + svc);
 }
@@ -93,12 +99,14 @@ assert.ok(buildDoc.includes('暂不可关闭'),
   'build docs must not claim real-device transfer is complete');
 const protocolReadme = read('protocol/README.md');
 for (const t of ['BOOK_META', 'CHUNK', 'ACK', 'FINISH', 'RESULT',
-  'RESUME', 'ERROR', 'E_MISSING_CHUNKS', 'E_DIGEST_MISMATCH']) {
+  'RESUME', 'ERROR', 'E_MISSING_CHUNKS', 'E_DIGEST_MISMATCH',
+  'READ_PROGRESS_GET', 'READ_PROGRESS_STATE', 'READ_PROGRESS_APPLY']) {
   assert.ok(protocolReadme.includes(t),
     'protocol spec must define ' + t);
 }
 for (const ex of ['hello', 'book-meta', 'chapters', 'chunk', 'ack', 'result',
-  'resume', 'error']) {
+  'resume', 'error', 'read-progress-get', 'read-progress-state',
+  'read-progress-apply']) {
   assert.ok(existsSync('protocol/examples/' + ex + '.json'),
     'protocol example missing: ' + ex);
 }
@@ -113,6 +121,7 @@ const watchFiles = [
   'wear/IncomingBookReceiver.js',
   'wear/TransferLogic.js',
   'wear/WearReceiver.js',
+  'wear/ProgressSync.js',
   'util/Sha256.js',
   'util/Utf8.js',
   'util/Base64.js',

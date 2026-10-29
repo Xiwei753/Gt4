@@ -131,6 +131,10 @@ const stub = {
     values[o.key] = o.value;
     o.success && o.success();
   },
+  delete(o) {
+    delete values[o.key];
+    o.success && o.success();
+  },
   __values: values
 };
 export default stub;

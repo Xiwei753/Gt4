@@ -23,6 +23,10 @@ for (const f of files) {
   const msg = JSON.parse(readFileSync(new URL(f, EXAMPLES), 'utf8'));
   assert.equal(typeof msg.v, 'number', f + ': v required');
   assert.equal(typeof msg.type, 'string', f + ': type required');
+  if (msg.type.indexOf('READ_PROGRESS_') === 0) {
+    // 阅读进度独立协议，不要求 transferId；详见 phone/watch 同步测试。
+    continue;
+  }
   if (msg.type !== 'HELLO') {
     assert.equal(typeof msg.transferId, 'string', f + ': transferId required');
   }

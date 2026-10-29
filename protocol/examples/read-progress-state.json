@@ -1,0 +1,1 @@
+{"v":0,"type":"READ_PROGRESS_STATE","source":"watch","requestId":"p1","books":[{"bookId":"0123456789abcdef","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","offset":4096,"updatedAt":0}],"lastBookId":"0123456789abcdef","lastUpdatedAt":0,"lastSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","batch":0,"batches":1}

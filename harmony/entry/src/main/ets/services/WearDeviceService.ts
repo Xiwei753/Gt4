@@ -21,6 +21,7 @@
 //   - 分类/文案逻辑见 WearAuthPolicy.js（纯逻辑，Node 可测）。
 import { wearEngine } from '@kit.WearEngine';
 import { common } from '@kit.AbilityKit';
+import { util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError, Callback } from '@kit.BasicServicesKit';
 import { TargetDevice } from '../model/TransferModels';
@@ -329,6 +330,37 @@ export class WearDeviceService {
     } catch (error) {
       hilog.warn(0x0000, TAG, 'unregister failed: code=' +
         codeOf(error as BusinessError));
+    }
+  }
+
+  // 阅读进度同步：复用同一个 P2pClient 发送小消息。
+  // 不重新 getP2pClient、不重新注册消息接收；每条 JSON 必须严格
+  // 小于 Wear Engine 的 4096 字节上限。
+  async sendP2pMessage(device: TargetDevice,
+    peer: { bundleName: string; fingerprint: string },
+    payload: object): Promise<void> {
+    const client = this.ensureP2pClient();
+    if (client === null) {
+      const info = this.p2pClientError;
+      throw new Error('P2P 客户端初始化失败' +
+        (info !== null ? '（' + info.stage + ' code=' +
+          info.code + '）' : ''));
+    }
+    const text = JSON.stringify(payload);
+    const content = new util.TextEncoder().encodeInto(text);
+    if (content.length === 0 || content.length >= 4096) {
+      throw new Error('progress message too large: ' + content.length);
+    }
+    const appInfo: wearEngine.AppInfo = {
+      bundleName: peer.bundleName,
+      fingerprint: peer.fingerprint
+    };
+    const appParam: wearEngine.P2pAppParam = { remoteApp: appInfo };
+    const result = await client.sendMessage(device.randomId,
+      appParam, { content: content });
+    if (result && result.code !== undefined &&
+        result.code !== wearEngine.P2pResultCode.COMMUNICATION_SUCCESS) {
+      throw new Error('sendMessage code ' + result.code);
     }
   }
 }

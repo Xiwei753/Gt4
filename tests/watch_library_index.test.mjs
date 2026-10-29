@@ -22,15 +22,16 @@ import { readFileSync, writeFileSync, mkdirSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeSystemFileStub } from './helpers/system_file_stub.mjs';
-import { createWatchLoader, writeWearEngineStub, wait }
-  from './helpers/watch_module_loader.mjs';
+import { createWatchLoader, writeWearEngineStub, wait,
+  writeStorageStub } from './helpers/watch_module_loader.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-idx-'));
 const sandbox = mkdtempSync(join(tmpdir(), 'suyue-idxfs-'));
 const stubPath = writeSystemFileStub(tmp, sandbox);
 const wearengineStubPath = writeWearEngineStub(tmp);
+const storageStubPath = writeStorageStub(tmp);
 const load = createWatchLoader({ tmpDir: tmp, stubPath,
-  wearengineStubPath });
+  wearengineStubPath, storageStubPath });
 
 const BookStorage = await load('storage/BookStorage.js');
 const LibraryIndex = await load('storage/LibraryIndex.js');

@@ -7,7 +7,7 @@
 // 入库；未选择目标设备时发送保持禁用。
 import { common } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
-import { promptAction } from '@kit.ArkUI';
+import { promptAction, router } from '@kit.ArkUI';
 import { wearEngine } from '@kit.WearEngine';
 import { BookMeta, BookStatus } from '../model/BookModels';
 import { TargetDevice, TransferProgress,
@@ -17,10 +17,15 @@ import { WATCH_PEER, PHONE_SELF,
 import { loadPeerIdentities } from '../services/PeerIdentityLoader';
 import { importBook } from '../services/BookImportService';
 import { BookRepository } from '../services/BookRepository';
+import { ReadingProgressStore } from '../services/ReadingProgressStore';
 import { WearDeviceService, WearDeviceListResult } from '../services/WearDeviceService';
 import { BookTransferService } from '../services/BookTransferService';
+import { ReadingSyncService } from '../services/ReadingSyncService';
 import { deviceNotice, planRetry, MAX_AUTO_RETRIES,
   runDeviceRefresh } from '../services/WearAuthPolicy';
+
+// 返回书架时只做一次节流同步，不在滚动/每次刷新里发消息。
+const PROGRESS_SYNC_THROTTLE_MS = 2000;
 
 // 双端身份严格分离（issue #13）：
 //   WATCH_PEER：对端 GT 4 Lite 身份，手机发送/注册回执时
@@ -49,9 +54,16 @@ struct Index {
   @State private identityStatus: string = '';
   // 当前在途 transferId（取消时用，P1-7）。
   @State private activeTransferId: string = '';
+  @State private readingBookIds: string[] = [];
+  @State private syncText: string = '进度同步未开始';
   private repository: BookRepository | null = null;
+  private progressStore: ReadingProgressStore | null = null;
   private deviceService: WearDeviceService | null = null;
   private transferService: BookTransferService | null = null;
+  private syncService: ReadingSyncService | null = null;
+  // 用户显式选择的设备身份：刷新设备列表时按 randomId 恢复，
+  // 不按列表下标或“第一台设备”猜测。
+  private selectedRandomId: string = '';
   // 设备发现/授权的进度序号：只允许最后一次异步结果落地，
   // 避免旧的 await 覆盖新状态（issue #5 P0-B）。
   private refreshSeq: number = 0;
@@ -60,6 +72,7 @@ struct Index {
   // 时一并清理，绝不做亚秒级连续请求。
   private retryTimer: number = -1;
   private autoRetryCount: number = 0;
+  private lastProgressSyncAt: number = 0;
 
   private getRepository(): BookRepository {
     if (this.repository === null) {
@@ -69,12 +82,26 @@ struct Index {
     return this.repository;
   }
 
+  private getProgressStore(): ReadingProgressStore {
+    if (this.progressStore === null) {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      this.progressStore = new ReadingProgressStore(context);
+    }
+    return this.progressStore;
+  }
+
   private getDeviceService(): WearDeviceService {
     if (this.deviceService === null) {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       this.deviceService = new WearDeviceService(context);
       this.transferService = new BookTransferService(
         context, this.deviceService);
+      this.syncService = new ReadingSyncService(
+        context, this.deviceService, this.getProgressStore(),
+        this.getRepository());
+      this.syncService.setStatusListener((text: string, ok: boolean) => {
+        this.syncText = text;
+      });
     }
     return this.deviceService;
   }
@@ -90,6 +117,10 @@ struct Index {
       console.error('suyue peer identity: ' + this.identityStatus);
     }
     this.refresh();
+    this.refreshProgress();
+    if (this.syncService !== null) {
+      this.syncService.setActiveBook('');
+    }
     this.refreshDevices();
   }
 
@@ -116,6 +147,42 @@ struct Index {
     this.books = this.getRepository().list();
   }
 
+  private async refreshProgress(): Promise<void> {
+    try {
+      const summaries = await this.getProgressStore().list(this.books);
+      const ids: string[] = [];
+      for (let i = 0; i < summaries.length; i++) {
+        ids.push(summaries[i].bookId);
+      }
+      this.readingBookIds = ids;
+    } catch (error) {
+      this.readingBookIds = [];
+    }
+  }
+
+  private isReading(bookId: string): boolean {
+    return this.readingBookIds.indexOf(bookId) >= 0;
+  }
+
+  private openReader(book: BookMeta): void {
+    if (this.syncService !== null) {
+      this.syncService.setActiveBook(book.bookId);
+    }
+    const device = this.devices[this.selectedDevice];
+    if (this.syncService !== null && device !== undefined &&
+        this.receiverReady && isConfigured(WATCH_PEER)) {
+      this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
+        this.syncText = '打开前同步失败（不影响阅读）：' + error.message;
+      });
+    }
+    router.pushUrl({
+      url: 'pages/Reader',
+      params: { bookId: book.bookId }
+    }).catch((error: Error) => {
+      this.pickStatus = '打开阅读页失败：' + error.message;
+    });
+  }
+
   // 设备发现（issue #5 第二轮 + issue #6 P0-B）：传书只需「设备基础信息」
   // 服务审批，无需运行时用户权限，因此不再查询/申请授权。
   // 同一时间最多 1 个在途请求，只有最新一轮结果落地；短暂错误按上限退避
@@ -128,7 +195,6 @@ struct Index {
   }
 
   private async runDeviceRefreshFlow(): Promise<void> {
-    this.receiverReady = false;
     let seq = 0;
     try {
       await runDeviceRefresh({
@@ -139,17 +205,47 @@ struct Index {
         },
         isCurrent: (current: number) => current === this.refreshSeq,
         listDevices: async () => {
-          const previous = this.devices[this.selectedDevice];
-          if (previous) {
-            await this.getDeviceService().unregisterMessageReceiver(previous);
-          }
+          // 刷新设备列表时保留当前已注册的接收器；只有设备真正
+          // 消失后才在 apply 里注销，避免从阅读页返回时丢选择。
           return await this.getDeviceService().listDevices();
         },
         apply: (result: WearDeviceListResult) => {
+          const previous = this.devices[this.selectedDevice];
+          const wanted = this.selectedRandomId;
           this.devices = result.ok ? result.devices : [];
           const notice = deviceNotice(result);
           this.deviceStatus = notice.text;
-          this.selectedDevice = -1;
+          let restored = -1;
+          if (result.ok && wanted) {
+            for (let i = 0; i < this.devices.length; i++) {
+              if (this.devices[i].randomId === wanted) {
+                restored = i;
+                break;
+              }
+            }
+          }
+          if (restored >= 0) {
+            // 同一台手表仍在：保留用户显式选择，不自动改选第一台。
+            this.selectedDevice = restored;
+            const device = this.devices[restored];
+            if (!this.receiverReady) {
+              this.registerReceiverFor(device).then((ok: boolean) => {
+                if (ok) this.requestProgressSync(device);
+              });
+            } else {
+              this.requestProgressSync(device);
+            }
+          } else {
+            this.selectedDevice = -1;
+            this.selectedRandomId = '';
+            this.receiverReady = false;
+            if (previous) {
+              this.getDeviceService().unregisterMessageReceiver(previous)
+                .catch((error: Error) => {
+                  this.deviceStatus += '；注销旧接收器失败：' + error.message;
+                });
+            }
+          }
 
           // 只有可恢复的短暂错误才排定有退避上限的自动重试；
           // 1008509999（应用身份未配置）等确定性失败立即停下。
@@ -179,6 +275,41 @@ struct Index {
     }
   }
 
+  // 回到书架/恢复同一台设备时触发一次节流交换；不重注册、不按滚动发送。
+  private requestProgressSync(device: TargetDevice): void {
+    if (this.syncService === null || !this.receiverReady) return;
+    const now = Date.now();
+    if (now - this.lastProgressSyncAt < PROGRESS_SYNC_THROTTLE_MS) return;
+    this.lastProgressSyncAt = now;
+    this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
+      this.syncText = '同步失败（不影响阅读）：' + error.message;
+    });
+  }
+
+  // 注册/恢复同一个手表 → 手机消息接收回调。进度消息优先，
+  // 未识别为进度的才交给传书状态机。
+  private async registerReceiverFor(device: TargetDevice): Promise<boolean> {
+    if (!isConfigured(WATCH_PEER) || this.transferService === null) {
+      return false;
+    }
+    try {
+      await this.getDeviceService().registerMessageReceiver(
+        device, WATCH_PEER.bundleName, WATCH_PEER.fingerprint,
+        (message: wearEngine.P2pMessage) => {
+          const handled = this.syncService !== null &&
+            this.syncService.onMessageFromWatch(message.content);
+          if (!handled && this.transferService !== null) {
+            this.transferService.onMessageFromWatch(message.content);
+          }
+        });
+      this.receiverReady = true;
+      return true;
+    } catch (error) {
+      this.deviceStatus += '；消息接收注册失败';
+      return false;
+    }
+  }
+
   private async selectDevice(e: number): Promise<void> {
     if (e < 0 || e >= this.devices.length) return;
     const previous = this.devices[this.selectedDevice];
@@ -188,29 +319,17 @@ struct Index {
     }
     this.receiverReady = false;
     this.selectedDevice = e;
+    this.selectedRandomId = device.randomId;
     this.deviceStatus = '已选择：' + device.name;
     if (!isConfigured(WATCH_PEER)) {
       this.deviceStatus += '；手表 Lite 公钥指纹未配置或格式错误，' +
         '发送将保持禁用';
     }
-    // 注册手表 → 手机的消息接收（RESULT 回执）。
-    // remoteApp 必须是对端（手表）身份
-    // （P0-2），不能用手机自己的包名。
-    if (isConfigured(WATCH_PEER) &&
-        this.transferService !== null) {
-      try {
-        await this.getDeviceService()
-          .registerMessageReceiver(
-            device, WATCH_PEER.bundleName,
-            WATCH_PEER.fingerprint,
-            (message: wearEngine.P2pMessage) => {
-              this.transferService!.onMessageFromWatch(
-                message.content);
-            });
-        this.receiverReady = true;
-      } catch (error) {
-        this.deviceStatus += '；消息接收注册失败';
-      }
+    const ok = await this.registerReceiverFor(device);
+    if (ok && this.syncService !== null) {
+      this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
+        this.syncText = '重连同步失败（不影响阅读）：' + error.message;
+      });
     }
   }
 
@@ -249,20 +368,21 @@ struct Index {
 
   private async removeBook(book: BookMeta): Promise<void> {
     try {
-      await promptAction.showDialog({
+      const result = await promptAction.showDialog({
         title: '删除书籍',
         message: '确定删除《' + book.title + '》？此操作不可恢复。',
         buttons: [
           { text: '取消', color: '#9ca3af' },
           { text: '删除', color: '#f87171' }
         ]
-      }).then((result) => {
-        if (result.index === 1) {
-          this.getRepository().remove(book.bookId);
-          this.refresh();
-          this.pickStatus = '已删除《' + book.title + '》';
-        }
       });
+      if (result.index === 1) {
+        this.getRepository().remove(book.bookId);
+        await this.getProgressStore().remove(book.bookId);
+        this.refresh();
+        this.refreshProgress();
+        this.pickStatus = '已删除《' + book.title + '》';
+      }
     } catch (error) {
       console.error('suyue remove error: ' + JSON.stringify(error));
     }
@@ -341,6 +461,16 @@ struct Index {
     this.transferText = '已请求取消，等待手表确认清理';
   }
 
+  private async syncReadingProgress(): Promise<void> {
+    const device = this.devices[this.selectedDevice];
+    if (this.syncService === null || device === undefined ||
+        !this.receiverReady || !isConfigured(WATCH_PEER)) {
+      this.syncText = '同步不可用：请先选择设备并成功注册消息接收';
+      return;
+    }
+    await this.syncService.syncAll(device, WATCH_PEER);
+  }
+
   @Builder
   bookItem(book: BookMeta) {
     Row() {
@@ -363,12 +493,19 @@ struct Index {
         .fontColor(book.status === BookStatus.READY ?
           '#4ade80' : '#f87171')
 
+      Button(this.isReading(book.bookId) ? '继续阅读' : '阅读')
+        .fontSize(12)
+        .height(28)
+        .backgroundColor('#344259')
+        .margin({ left: 8 })
+        .onClick(() => { this.openReader(book); })
+
       Button('发送')
         .fontSize(12)
         .height(28)
         .enabled(this.canSend() &&
           this.canTransferBook(book))
-        .margin({ left: 12 })
+        .margin({ left: 8 })
         .onClick(() => { this.sendBook(book); })
 
       Text('删除')
@@ -460,6 +597,12 @@ struct Index {
           .height(28)
           .enabled(!this.deviceBusy)
           .onClick(() => { this.refreshDevices(); })
+        Button('同步阅读进度')
+          .fontSize(13)
+          .height(28)
+          .enabled(this.selectedDevice >= 0 && this.receiverReady &&
+            isConfigured(WATCH_PEER))
+          .onClick(() => { this.syncReadingProgress(); })
         if (this.sending) {
           Button('取消发送')
             .fontSize(13)
@@ -469,6 +612,8 @@ struct Index {
         }
         Text(this.transferText).fontSize(14)
           .fontColor(this.sending ? '#facc15' : '#a7abb4')
+        Text(this.syncText).fontSize(13)
+          .fontColor('#93c5fd')
       }
       .alignItems(HorizontalAlign.Start)
       .padding(20)

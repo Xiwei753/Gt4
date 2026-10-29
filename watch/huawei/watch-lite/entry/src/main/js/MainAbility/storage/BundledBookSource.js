@@ -36,6 +36,7 @@ for (i = 0; i < BOOKS.length; i++) {
     bookId: b.bookId,
     title: b.title,
     bytes: b.bytes,
+    sha256: b.sha256,
     chapters: b.chapters || [],
     origin: 'builtin'
   });
@@ -54,6 +55,7 @@ export function bundledEntry(bookId) {
     bookId: b.bookId,
     title: b.title,
     bytes: b.bytes,
+    sha256: b.sha256,
     chapters: b.chapters || [],
     origin: 'builtin'
   };

@@ -31,6 +31,9 @@ import { normalizeSettings } from '../../reader/ReaderSettings';
 import { createCrownTracker,
   crownStatus } from '../../reader/CrownInput';
 import { isLowerHex } from '../../util/Validate';
+import { setApplyHandler, clearApplyHandler,
+  takePendingApply, setActiveBook,
+  clearActiveBook } from '../../wear/ProgressSync';
 
 // 画布初始尺寸（HML width/height 绑定）；真实值以运行时画布为准。
 var CANVAS_SIZE = 452;
@@ -96,6 +99,7 @@ export default {
     // 待绘制的页（数据先到、画布后到时先存这里）。
     this.pending = null;
     this.ctx = null;
+    this.pendingRemoteOffset = null;
     // onShow 才允许取得 Canvas context；数据提前到达只保留 pending。
     this.canvasReady = false;
     this.chapters = [];
@@ -118,6 +122,12 @@ export default {
     // 内置书（issue #10）：正文来自 rawfile 资源，按需窗口读取；
     // 外部书仍走原有文件通路。两者都**先出正文**再看进度。
     this.bundled = isBundled(bookId);
+    setActiveBook(bookId);
+    const self = this;
+    this.applyHandler = function (payload) {
+      self.applyRemoteProgress(payload);
+    };
+    setApplyHandler(this.applyHandler);
     if (this.bundled) {
       const entry = bundledEntry(bookId);
       this.title = entry ? entry.title : '内置书籍';
@@ -390,6 +400,20 @@ export default {
     }
     if (pending.done) pending.done(true);
   },
+  // 同步服务已校验书籍摘要/范围/UTF-8 边界并写入进度；
+  // 这里只负责清空不适用的历史页并重绘。skipSave 防止把
+  // 远端进度再当成“本地新阅读”回写/回传。
+  applyRemoteProgress(payload) {
+    if (!payload || payload.bookId !== this.bookId ||
+        !this.progressReady || this.isLoading) return;
+    if (typeof payload.offset !== 'number' ||
+        payload.offset < 0 || !this.chapters) return;
+    this.history = [];
+    this.userMoved = true;
+    this.settingsOpen = false;
+    this.chapterOpen = false;
+    this.loadPage(payload.offset, undefined, undefined, true);
+  },
   // 重绘当前页（设置返回 / 画布重建 / 主题变化后调用）。
   redraw() {
     if (!this.bookId) return;
@@ -585,6 +609,15 @@ export default {
   onShow() {
     this.canvasReady = true;
     this.ctx = null;
+    var pendingOffset = takePendingApply(this.bookId);
+    if (pendingOffset !== null) this.pendingRemoteOffset = pendingOffset;
+    if (this.pendingRemoteOffset !== null && this.progressReady &&
+        !this.isLoading) {
+      var remoteOffset = this.pendingRemoteOffset;
+      this.pendingRemoteOffset = null;
+      this.applyRemoteProgress({ bookId: this.bookId,
+        offset: remoteOffset });
+    }
     this.focusCrown(true);
     const ctx = this.acquireContext();
     if (!ctx) {
@@ -604,6 +637,11 @@ export default {
     this.canvasReady = false;
     this.ctx = null;
     this.pending = null;
+    if (this.applyHandler) {
+      clearApplyHandler(this.applyHandler);
+      this.applyHandler = null;
+    }
+    clearActiveBook();
     this.focusCrown(false);
   },
   focusCrown(focus) {

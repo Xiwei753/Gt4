@@ -9,6 +9,7 @@
 import wearengine from '@system.wearengine';
 import { PHONE_BUNDLE_NAME, PHONE_APP_ID } from './PeerConfig';
 import { IncomingBookReceiver } from './IncomingBookReceiver';
+import { handleMessage as handleProgressMessage } from './ProgressSync';
 
 let subscribed = false;
 let receiver = null;
@@ -153,13 +154,16 @@ export function beginReceive(onStatus) {
 }
 
 function routeMessage(messageText) {
-  if (!receiver) return;
   // 记录对端消息是否真正到达手表；类型解析失败也不阻断协议。
   var type = 'unknown';
   try {
     type = JSON.parse(messageText).type || 'unknown';
   } catch (e) {}
   console.info('Wear message received type=' + type);
+  // 阅读进度是独立小消息，不进入传书状态机；仍复用同一次
+  // subscribeMsg 和同一个 sendToPhone 通道。
+  if (handleProgressMessage(messageText, sendToPhoneImpl)) return;
+  if (!receiver) return;
   // ACK/RESUME/RESULT 全部由接收器内部
   // 经统一响应通道（sendToPhone）回发。
   receiver.onMessage(messageText);
