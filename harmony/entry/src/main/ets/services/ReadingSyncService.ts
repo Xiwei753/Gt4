@@ -392,36 +392,41 @@ export class ReadingSyncService {
     const key = book.bookId + ':' + local.offset + ':' + remote.offset;
     if (this.conflictKeys.has(key)) return;
     this.conflictKeys.add(key);
-    let choice = 0;
     try {
-      const result = await promptAction.showDialog({
-        title: '阅读进度冲突',
-        message: '《' + book.title + '》在手机和手表上都有新进度。\n' +
-          '手机：字节 ' + local.offset + '\n' +
-          '手表：字节 ' + remote.offset + '\n请选择保留哪一边。',
-        buttons: [
-          { text: '保留手机', color: '#60a5fa' },
-          { text: '采用手表', color: '#fbbf24' }
-        ]
-      });
-      choice = result.index;
-    } catch (error) {
-      this.status('进度冲突：无法弹出选择，暂保留手机进度', false);
-      return;
-    }
-    if (choice === 1) {
-      await this.progressStore.applyRemote(remote.bookId,
-        remote.sha256, remote.offset, remote.updatedAt);
-      this.notifyApply(remote.bookId, remote.offset);
-      await this.sendApply(remote.bookId, remote.sha256,
-        remote.offset, remote.updatedAt);
-      this.status('进度同步：已采用手表进度', true);
-    } else {
-      await this.progressStore.markPending(remote.bookId,
-        remote.sha256, local.offset);
-      await this.sendApply(local.bookId, local.sha256,
-        local.offset, local.updatedAt);
-      this.status('进度同步：已保留手机进度', true);
+      let choice = 0;
+      try {
+        const result = await promptAction.showDialog({
+          title: '阅读进度冲突',
+          message: '《' + book.title + '》在手机和手表上都有新进度。\n' +
+            '手机：字节 ' + local.offset + '\n' +
+            '手表：字节 ' + remote.offset + '\n请选择保留哪一边。',
+          buttons: [
+            { text: '保留手机', color: '#60a5fa' },
+            { text: '采用手表', color: '#fbbf24' }
+          ]
+        });
+        choice = result.index;
+      } catch (error) {
+        this.status('进度冲突：无法弹出选择，暂保留手机进度', false);
+        return;
+      }
+      if (choice === 1) {
+        await this.progressStore.applyRemote(remote.bookId,
+          remote.sha256, remote.offset, remote.updatedAt);
+        this.notifyApply(remote.bookId, remote.offset);
+        await this.sendApply(remote.bookId, remote.sha256,
+          remote.offset, remote.updatedAt);
+        this.status('进度同步：已采用手表进度', true);
+      } else {
+        await this.progressStore.markPending(remote.bookId,
+          remote.sha256, local.offset);
+        await this.sendApply(local.bookId, local.sha256,
+          local.offset, local.updatedAt);
+        this.status('进度同步：已保留手机进度', true);
+      }
+    } finally {
+      // 只防止同一冲突弹窗并发；发送失败/取消后必须允许再次处理。
+      this.conflictKeys.delete(key);
     }
   }
 
@@ -437,12 +442,64 @@ export class ReadingSyncService {
       return;
     }
     if (!this.isUtf8Boundary(book, offset)) return;
-    // APPLY 是用户选择后的显式指令；只校验摘要/范围，不再用
-    // 本地旧 offset 反推冲突。冲突在收到 STATE 时已处理。
-    await this.progressStore.applyRemote(book.bookId, book.sha256,
-      offset, typeof message.updatedAt === 'number' ?
-        message.updatedAt : 0);
-    this.notifyApply(book.bookId, offset);
+    // 手表也会主动上报自己的新进度，APPLY 不一定代表手机用户
+    // 刚在冲突弹窗里做了选择。先读当前手机状态重新做三方判断，
+    // 避免延迟消息把手机刚读到的新位置静默回滚。
+    const local = await this.progressStore.load(book.bookId, book.sha256);
+    if (local === null) {
+      await this.progressStore.applyRemote(book.bookId, book.sha256,
+        offset, typeof message.updatedAt === 'number' ?
+          message.updatedAt : 0);
+      this.notifyApply(book.bookId, offset);
+      return;
+    }
+    if (local.offset === offset) {
+      await this.progressStore.markSynced(book.bookId, book.sha256, offset);
+      return;
+    }
+    const remote: SyncBook = {
+      bookId: book.bookId,
+      sha256: book.sha256,
+      offset: offset,
+      updatedAt: typeof message.updatedAt === 'number' ?
+        message.updatedAt : 0
+    };
+    if (local.pendingOffset >= 0) {
+      const pending = decidePendingAction(local.offset, local.syncedOffset,
+        local.pendingOffset, offset);
+      if (pending === 'confirmed') {
+        await this.progressStore.markSynced(book.bookId,
+          book.sha256, local.offset);
+        return;
+      }
+      if (pending === 'resend') {
+        await this.progressStore.markPending(book.bookId,
+          book.sha256, local.offset);
+        await this.sendApply(local.bookId, local.sha256,
+          local.offset, local.updatedAt);
+        return;
+      }
+      if (pending === 'conflict') {
+        await this.resolveConflict(book, local, remote);
+        return;
+      }
+    }
+    const action = decideSyncAction(local, remote, local.syncedOffset);
+    if (action === 'apply_remote') {
+      await this.progressStore.applyRemote(book.bookId, book.sha256,
+        offset, remote.updatedAt);
+      this.notifyApply(book.bookId, offset);
+    } else if (action === 'apply_local') {
+      await this.progressStore.markPending(book.bookId,
+        book.sha256, local.offset);
+      await this.sendApply(local.bookId, local.sha256,
+        local.offset, local.updatedAt);
+    } else if (action === 'none') {
+      await this.progressStore.markSynced(book.bookId,
+        book.sha256, local.offset);
+    } else if (action === 'conflict') {
+      await this.resolveConflict(book, local, remote);
+    }
   }
 
   private async sendApply(bookId: string, sha256: string,

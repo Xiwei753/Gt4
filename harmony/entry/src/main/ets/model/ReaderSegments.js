@@ -184,3 +184,21 @@ export function loadedSegmentBytes(segments) {
   var last = segments[segments.length - 1];
   return Number(last.offset) + Number(last.length) - Number(first.offset);
 }
+
+// 文件窗口末尾可能落在 UTF-8 字符中间。返回可安全解码的前缀长度：
+// 丢弃末尾不完整字符；若窗口后面还有数据，也把末尾单独的 CR 留给下一窗口，
+// 避免把 CRLF 拆开。调用方必须从 base+safeWindowLength 继续读，不能跳过这些字节。
+export function safeWindowLength(bytes, hasMore) {
+  if (!bytes || typeof bytes.length !== 'number' || bytes.length === 0) {
+    return 0;
+  }
+  var end = bytes.length;
+  var pos = end;
+  while (pos > 0 && isContinuationByte(bytes[pos - 1])) pos--;
+  if (pos === 0) return 0;
+  var lead = bytes[pos - 1];
+  var width = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+  if (pos - 1 + width > end) end = pos - 1;
+  if (hasMore && end > 0 && bytes[end - 1] === 0x0D) end--;
+  return end;
+}

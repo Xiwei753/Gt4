@@ -380,11 +380,11 @@ watch: entry-default-debug-signed.hap size=419960
 
 ### issue #18 本机编译证据（阅读器 + 进度同步，未真机验收）
 
-- 手机 debug HAP：`harmony/entry/build/default/outputs/default/entry-default-debug-signed.hap`，594,413 字节，`COMPILED_STRING_OK entry=ets/modules.abc count=1`、`HAP_OK ... single_bin=0 signed=yes`，SHA-256 `7ca278318a293161575087c159a12d6dad742809df209ea72e3845693dd55ae5`。新增 `pages/Reader`、`ReadingProgressStore`、`ReadingSyncService`、`ReaderSegments` 均进入 ArkTS 编译。
-- 手表 Lite debug 单 BIN HAP：`watch/huawei/watch-lite/entry/build/default/outputs/default/entry-default-debug-signed.hap`，573,853 字节，SHA-256 `6ff8718f40c5fb73d4df9a9e9be7096ddb8235928f70ae53a4d683bf1ab25281`；`LITE_BIN_SIGNED_OK`、`BIN_SHA256_MATCH`（内部 BIN 573,703 字节，SHA-256 `6674a4c95ad18c2f80f7d2ea4f3185ae4289c7337274020f5ac8abed90166f0b`）、`WATCH_PAGE_JS page=index/index size=116777` / `reader/reader size=117091` 均生成；`ProgressSync.js` 出现在阅读页 source map 的 sources 列表中。Lite `verify-app` 仍为 `VERIFY_UNSUPPORTED_FOR_LITE_BIN`（0xBE 单 BIN 工具限制），**不是验签通过**。
+- 手机 debug HAP：`harmony/entry/build/default/outputs/default/entry-default-debug-signed.hap`，601,702 字节，`COMPILED_STRING_OK entry=ets/modules.abc count=1`、`HAP_OK ... single_bin=0 signed=yes`，SHA-256 `2fd771d6641703ecbeb714163430c78e2dc2e552e48169c53e00eab279fc9ac1`。新增 `pages/Reader`、`ReadingProgressStore`、`ReadingSyncService`、`ReaderSegments` 均进入 ArkTS 编译。
+- 手表 Lite debug 单 BIN HAP：`watch/huawei/watch-lite/entry/build/default/outputs/default/entry-default-debug-signed.hap`，573,853 字节，SHA-256 `98acac51e4b17fa13b39befdda0071a65213b8e6e63c3c7e4a9c64a15f9bd370`；`LITE_BIN_SIGNED_OK`、`BIN_SHA256_MATCH`（内部 BIN 573,703 字节，SHA-256 `9520e8023fff52018384588e1867c0c4f55f940fe23c7d0da48646f383e33cd7`）、`WATCH_PAGE_JS page=index/index size=116777` / `reader/reader size=117091` 均生成；`ProgressSync.js` 出现在阅读页 source map 的 sources 列表中。Lite `verify-app` 仍为 `VERIFY_UNSUPPORTED_FOR_LITE_BIN`（0xBE 单 BIN 工具限制），**不是验签通过**。
 - 章节识别：`node tests/chapter_detection.test.mjs`（18 组夹具 + 10k 章）、`node tests/prepare_watch_books.test.mjs`、`./gradlew :app:compileDebugKotlin --offline --no-daemon` 通过；跨端夹具覆盖紧排/全角/中文数字/装饰/站点前缀/前导目录/正文误判/CRLF/emoji/空文本。
 - 同步与阅读器：`tests/watch_progress_sync.test.mjs`、`tests/reading_sync_policy.test.mjs`、`tests/phone_reader_sync.test.mjs`、`tests/text_window.test.mjs`、`tests/reader_segments.test.mjs` 通过；全部 `tests/*.test.mjs` **38/38** 通过。
-- 评审修正：阅读位置改为约 256 字节可见段落粒度并保存/恢复段首字节；待确认 APPLY 只在手表侧确认后推进基线，断连不会回滚手机新进度；刷新设备列表保留用户选择；手表 APPLY 允许合法回退；last-read 时间戳独立存 `suyue.last.at`。未改协议、章节引擎或数据库。剩余风险是设备端列表滚动/重排时序，真机验收仍未完成。
+- 评审修正：阅读位置改为约 256 字节可见段落粒度并保存/恢复段首字节；64 KiB 读取窗口按 UTF-8 边界截断，窗口切换不产生替换字符；待确认 APPLY 只在手表侧确认后推进基线，断连不会回滚手机新进度；延迟 APPLY 会先重读手机本地进度并做三方判定，不静默覆盖新进度；返回书架时同一设备触发一次节流同步；刷新设备列表保留用户选择；手表 APPLY 允许合法回退；冲突键在提示结束后 `finally` 释放；last-read 时间戳独立存 `suyue.last.at`。未改协议、章节引擎或数据库。剩余风险是设备端列表滚动/重排时序，真机验收仍未完成。
 - **未做**：Pocket 2 真机阅读、GT 4 真机安装/阅读、双端 Wear Engine 进度同步、锁屏/后台/断连场景。**不得据此标记 issue #18 完成。**
 
 ## 现有源码不能直接认定兼容的地方

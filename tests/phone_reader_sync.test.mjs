@@ -171,4 +171,24 @@ assert.ok(protocol.includes('独立于传书') &&
   protocol.includes('4096'),
   'progress sync must be separate and bounded');
 
+const segmentsModel = read(
+  'harmony/entry/src/main/ets/model/ReaderSegments.js');
+assert.ok(segmentsModel.includes('safeWindowLength'),
+  'reader segments must expose UTF-8 window boundary helper');
+assert.ok(reader.includes('safeWindowLength') &&
+  reader.includes('raw.subarray(0, usable)'),
+  'Reader must clamp each file window to a UTF-8 boundary');
+assert.ok(sync.includes('acceptApply') &&
+  sync.includes('await this.progressStore.load(') &&
+  sync.includes('decidePendingAction') &&
+  sync.includes('conflictKeys.delete(key)'),
+  'delayed APPLY must re-check local state and release conflict keys');
+assert.ok(index.includes('PROGRESS_SYNC_THROTTLE_MS') &&
+  index.includes('requestProgressSync') &&
+  index.includes('lastProgressSyncAt'),
+  'returning to shelf must trigger one throttled progress sync');
+assert.ok(store.includes('LAST_BOOK_AT_KEY') &&
+  store.includes('clearProgress'),
+  'watch last-read timestamp and delete cleanup must be present');
+
 console.log('PASS: phone reader/sync static contracts');

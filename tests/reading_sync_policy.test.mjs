@@ -38,6 +38,12 @@ assert.equal(decidePendingAction(20, 10, 20, 10), 'resend');
 assert.equal(decidePendingAction(20, 10, 20, 30), 'conflict');
 assert.equal(decidePendingAction(20, -1, 20, 20), 'confirmed');
 assert.equal(decidePendingAction(20, -1, 20, 10), 'conflict');
+// 延迟 APPLY：手机已有更新的本地进度时，旧手表位置不能直接覆盖。
+assert.equal(decidePendingAction(200, 100, 200, 50), 'conflict');
+assert.equal(decideSyncAction(
+  { offset: 200, syncedOffset: 100 }, { offset: 50 }, 100), 'conflict');
+assert.equal(decideSyncAction(
+  { offset: 100, syncedOffset: 100 }, { offset: 50 }, 100), 'apply_remote');
 
 const summaries = [];
 for (let i = 0; i < 300; i++) {

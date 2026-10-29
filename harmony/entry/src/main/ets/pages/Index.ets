@@ -24,6 +24,9 @@ import { ReadingSyncService } from '../services/ReadingSyncService';
 import { deviceNotice, planRetry, MAX_AUTO_RETRIES,
   runDeviceRefresh } from '../services/WearAuthPolicy';
 
+// 返回书架时只做一次节流同步，不在滚动/每次刷新里发消息。
+const PROGRESS_SYNC_THROTTLE_MS = 2000;
+
 // 双端身份严格分离（issue #13）：
 //   WATCH_PEER：对端 GT 4 Lite 身份，手机发送/注册回执时
 //     使用 con.xiwei.suyue.gt4_Base64(原始 EC 公钥点)；
@@ -69,6 +72,7 @@ struct Index {
   // 时一并清理，绝不做亚秒级连续请求。
   private retryTimer: number = -1;
   private autoRetryCount: number = 0;
+  private lastProgressSyncAt: number = 0;
 
   private getRepository(): BookRepository {
     if (this.repository === null) {
@@ -223,17 +227,13 @@ struct Index {
           if (restored >= 0) {
             // 同一台手表仍在：保留用户显式选择，不自动改选第一台。
             this.selectedDevice = restored;
+            const device = this.devices[restored];
             if (!this.receiverReady) {
-              const device = this.devices[restored];
               this.registerReceiverFor(device).then((ok: boolean) => {
-                if (ok && this.syncService !== null) {
-                  this.syncService.syncAll(device, WATCH_PEER)
-                    .catch((error: Error) => {
-                      this.syncText =
-                        '重连同步失败（不影响阅读）：' + error.message;
-                    });
-                }
+                if (ok) this.requestProgressSync(device);
               });
+            } else {
+              this.requestProgressSync(device);
             }
           } else {
             this.selectedDevice = -1;
@@ -273,6 +273,17 @@ struct Index {
         this.deviceStatus = '设备发现异常：' + e.message;
       }
     }
+  }
+
+  // 回到书架/恢复同一台设备时触发一次节流交换；不重注册、不按滚动发送。
+  private requestProgressSync(device: TargetDevice): void {
+    if (this.syncService === null || !this.receiverReady) return;
+    const now = Date.now();
+    if (now - this.lastProgressSyncAt < PROGRESS_SYNC_THROTTLE_MS) return;
+    this.lastProgressSyncAt = now;
+    this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
+      this.syncText = '同步失败（不影响阅读）：' + error.message;
+    });
   }
 
   // 注册/恢复同一个手表 → 手机消息接收回调。进度消息优先，

@@ -12,6 +12,7 @@ import { addReadingApplyListener,
 import { chapterIndexAt } from '../model/TextWindow';
 import {
   loadedSegmentBytes,
+  safeWindowLength,
   segmentIndexForOffset,
   splitWindowSegments
 } from '../model/ReaderSegments';
@@ -206,7 +207,16 @@ struct Reader {
       this.loading = false;
       return;
     }
-    const bytes = this.readBytes(base, length);
+    const raw = this.readBytes(base, length);
+    const usable: number = safeWindowLength(raw,
+      base + length < book.bytes) as number;
+    if (usable <= 0) {
+      this.segments = [];
+      this.loading = false;
+      this.status = '正文窗口边界异常';
+      return;
+    }
+    const bytes = raw.subarray(0, usable);
     const ranges = splitWindowSegments(bytes, SEGMENT_TARGET_BYTES,
       MAX_LOADED_SEGMENTS) as ReaderSegment[];
     const next: ReaderSegment[] = [];
@@ -305,7 +315,15 @@ struct Reader {
     if (start >= book.bytes) return;
     this.loadingMore = true;
     const length = Math.min(WINDOW_BYTES, book.bytes - start);
-    const bytes = this.readBytes(start, length);
+    const raw = this.readBytes(start, length);
+    const usable: number = safeWindowLength(raw,
+      start + length < book.bytes) as number;
+    if (usable <= 0) {
+      this.loadingMore = false;
+      this.status = '正文窗口边界异常，点“继续加载”重试';
+      return;
+    }
+    const bytes = raw.subarray(0, usable);
     const ranges = splitWindowSegments(bytes, SEGMENT_TARGET_BYTES,
       MAX_LOADED_SEGMENTS) as ReaderSegment[];
     const appended: ReaderSegment[] = [];

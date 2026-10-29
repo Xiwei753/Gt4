@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   SEGMENT_TARGET_BYTES,
+  safeWindowLength,
   segmentIndexForOffset,
   splitWindowSegments
 } from '../harmony/entry/src/main/ets/model/ReaderSegments.js';
@@ -163,5 +164,39 @@ assert.equal(reloadSegments[sameIndex].text,
   reloadSegments[0].text, 're-render must keep the same visible segment');
 assert.equal(segmentIndexForOffset([], 123), -1,
 'empty list must resolve to -1');
+
+// 5. 64 KiB 文件窗口边界不能切断 UTF-8 字符；逐窗口读取后拼接必须与原文一致。
+const continuous = [];
+for (let i = 0; i < 3000; i++) {
+  continuous.push('第' + i + '章 风起😀他说：“走吧。”然后转身……\n');
+}
+const continuousText = continuous.join('');
+const continuousBytes = encoder.encode(continuousText);
+let windowOffset = 0;
+let windowCount = 0;
+let joinedText = '';
+while (windowOffset < continuousBytes.length) {
+  const chunk = continuousBytes.subarray(windowOffset,
+    Math.min(windowOffset + 64 * 1024, continuousBytes.length));
+  const hasMore = windowOffset + chunk.length < continuousBytes.length;
+  const usable = safeWindowLength(chunk, hasMore);
+  assert.ok(usable > 0, 'window must retain at least one complete character');
+  const windowBytes = chunk.subarray(0, usable);
+  const windowSegments = splitWindowSegments(windowBytes,
+    SEGMENT_TARGET_BYTES, 4000);
+  const windowText = assertSegmentsCover(windowBytes, windowSegments,
+    '64KiB window@' + windowOffset);
+  assert.equal(windowText, decoder.decode(windowBytes),
+    'window segments must decode back to the exact window bytes');
+  joinedText += windowText;
+  windowOffset += usable;
+  windowCount += 1;
+  assert.ok(windowCount < 10000, 'window loop must terminate');
+}
+assert.ok(windowCount > 1, 'test text must span multiple 64 KiB windows');
+assert.equal(joinedText, continuousText,
+  'concatenated windows must equal the original text');
+assert.equal(joinedText.indexOf('\uFFFD'), -1,
+  'no replacement characters from split UTF-8 windows');
 
 console.log('reader segments: UTF-8 boundaries, fine offsets and re-anchoring passed');
