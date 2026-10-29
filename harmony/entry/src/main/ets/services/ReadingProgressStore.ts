@@ -10,6 +10,7 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { BookMeta } from '../model/BookModels';
+import { enqueueBookWrite } from '../model/ProgressWriteQueue';
 
 const PREF_NAME = 'suyue_reading_progress';
 const KEY_PREFIX = 'p.';
@@ -139,30 +140,32 @@ export class ReadingProgressStore {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
       return;
     }
-    let syncedOffset = UNKNOWN_BASELINE;
-    let pendingOffset = -1;
-    const existing = await this.readRecord(bookId);
-    if (existing !== null && existing.sha256 === sha256) {
-      if (existing.syncedOffset !== undefined) {
-        syncedOffset = existing.syncedOffset;
+    await enqueueBookWrite(bookId, async () => {
+      let syncedOffset = UNKNOWN_BASELINE;
+      let pendingOffset = -1;
+      const existing = await this.readRecord(bookId);
+      if (existing !== null && existing.sha256 === sha256) {
+        if (existing.syncedOffset !== undefined) {
+          syncedOffset = existing.syncedOffset;
+        }
+        if (existing.pendingOffset !== undefined &&
+            existing.pendingOffset >= 0) {
+          // 本地又往前读了：旧的待确认位置已被新位置取代。
+          pendingOffset = offset;
+        }
       }
-      if (existing.pendingOffset !== undefined &&
-          existing.pendingOffset >= 0) {
-        // 本地又往前读了：旧的待确认位置已被新位置取代。
-        pendingOffset = offset;
+      if (typeof baseline === 'number' && Number.isInteger(baseline) &&
+          baseline >= 0) {
+        syncedOffset = baseline;
+        pendingOffset = -1;
       }
-    }
-    if (typeof baseline === 'number' && Number.isInteger(baseline) &&
-        baseline >= 0) {
-      syncedOffset = baseline;
-      pendingOffset = -1;
-    }
-    await this.writeRecord(bookId, {
-      sha256: sha256,
-      offset: offset,
-      updatedAt: Date.now(),
-      syncedOffset: syncedOffset,
-      pendingOffset: pendingOffset
+      await this.writeRecord(bookId, {
+        sha256: sha256,
+        offset: offset,
+        updatedAt: Date.now(),
+        syncedOffset: syncedOffset,
+        pendingOffset: pendingOffset
+      });
     });
   }
 
@@ -172,26 +175,31 @@ export class ReadingProgressStore {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
       return;
     }
-    await this.writeRecord(bookId, {
-      sha256: sha256,
-      offset: offset,
-      updatedAt: typeof updatedAt === 'number' && updatedAt > 0 ?
-        updatedAt : Date.now(),
-      syncedOffset: offset,
-      pendingOffset: -1
+    await enqueueBookWrite(bookId, async () => {
+      await this.writeRecord(bookId, {
+        sha256: sha256,
+        offset: offset,
+        updatedAt: typeof updatedAt === 'number' && updatedAt > 0 ?
+          updatedAt : Date.now(),
+        syncedOffset: offset,
+        pendingOffset: -1
+      });
     });
   }
 
   // 本地进度胜出：只把基线推进到当前本地 offset，不制造“新阅读”。
   async markSynced(bookId: string, sha256: string, offset: number): Promise<void> {
-    const existing = await this.readRecord(bookId);
-    if (existing === null || existing.sha256 !== sha256) return;
-    await this.writeRecord(bookId, {
-      sha256: existing.sha256,
-      offset: existing.offset,
-      updatedAt: existing.updatedAt,
-      syncedOffset: offset,
-      pendingOffset: -1
+    if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) return;
+    await enqueueBookWrite(bookId, async () => {
+      const existing = await this.readRecord(bookId);
+      if (existing === null || existing.sha256 !== sha256) return;
+      await this.writeRecord(bookId, {
+        sha256: existing.sha256,
+        offset: existing.offset,
+        updatedAt: existing.updatedAt,
+        syncedOffset: offset,
+        pendingOffset: -1
+      });
     });
   }
 
@@ -202,15 +210,17 @@ export class ReadingProgressStore {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
       return;
     }
-    const existing = await this.readRecord(bookId);
-    if (existing === null || existing.sha256 !== sha256) return;
-    await this.writeRecord(bookId, {
-      sha256: existing.sha256,
-      offset: existing.offset,
-      updatedAt: existing.updatedAt,
-      syncedOffset: existing.syncedOffset !== undefined ?
-        existing.syncedOffset : UNKNOWN_BASELINE,
-      pendingOffset: offset
+    await enqueueBookWrite(bookId, async () => {
+      const existing = await this.readRecord(bookId);
+      if (existing === null || existing.sha256 !== sha256) return;
+      await this.writeRecord(bookId, {
+        sha256: existing.sha256,
+        offset: existing.offset,
+        updatedAt: existing.updatedAt,
+        syncedOffset: existing.syncedOffset !== undefined ?
+          existing.syncedOffset : UNKNOWN_BASELINE,
+        pendingOffset: offset
+      });
     });
   }
 
@@ -277,19 +287,21 @@ export class ReadingProgressStore {
 
   async remove(bookId: string): Promise<void> {
     if (!bookId) return;
-    try {
-      const store = await this.getStore();
-      store.deleteSync(this.keyOf(bookId));
-      const raw = await store.get(LAST_KEY, '') as string;
-      if (raw) {
-        const last = JSON.parse(raw) as StoredLast;
-        if (last && last.bookId === bookId) {
-          store.deleteSync(LAST_KEY);
+    await enqueueBookWrite(bookId, async (): Promise<void> => {
+      try {
+        const store = await this.getStore();
+        store.deleteSync(this.keyOf(bookId));
+        const raw = await store.get(LAST_KEY, '') as string;
+        if (raw) {
+          const last = JSON.parse(raw) as StoredLast;
+          if (last && last.bookId === bookId) {
+            store.deleteSync(LAST_KEY);
+          }
         }
+        await store.flush();
+      } catch (error) {
+        // 删除书籍本身不应因为进度清理失败而回滚。
       }
-      await store.flush();
-    } catch (error) {
-      // 删除书籍本身不应因为进度清理失败而回滚。
-    }
+    });
   }
 }
