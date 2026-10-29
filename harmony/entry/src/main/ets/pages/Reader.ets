@@ -19,6 +19,10 @@ import {
 } from '../model/ReaderSegments';
 import { bumpWriteGeneration, captureWriteGeneration }
   from '../model/ProgressWriteQueue';
+import { enterReaderWindow, exitReaderWindow,
+  refreshReaderWindowInsets, restoreShelfWindow,
+  setReaderWindowTheme, ReaderWindowInsets }
+  from '../services/ReaderWindowAppearance';
 
 const WINDOW_BYTES = 64 * 1024;
 // 每段约 256 字节，进度精度远高于旧的 6 KiB 块，又不会让列表项过多。
@@ -50,6 +54,7 @@ struct Reader {
   @State private darkTheme: boolean = true;
   @State private showSettings: boolean = false;
   @State private showChapters: boolean = false;
+  @State private showControls: boolean = false;
   @State private chapterPage: number = 0;
   @State private loading: boolean = true;
   @State private status: string = '正在打开……';
@@ -57,6 +62,13 @@ struct Reader {
   @State private currentOffset: number = 0;
   @State private progressLabel: string = '';
   @State private pagePadding: number = 16;
+  // 沉浸式布局只有一套避让策略：窗口全屏后，页面背景延伸，
+  // 正文和可点击控件用真实避让区换算出的 vp 间距，不再叠加
+  // expandSafeArea/ignoreLayoutSafeArea。
+  @State private safeTop: number = 0;
+  @State private safeBottom: number = 0;
+  @State private safeLeft: number = 0;
+  @State private safeRight: number = 0;
 
   private book: BookMeta | null = null;
   private repository: BookRepository | null = null;
@@ -76,6 +88,14 @@ struct Reader {
   private saveEpoch: number = 0;
   private loadingMore: boolean = false;
   private opened: boolean = false;
+  private leaving: boolean = false;
+  private lastWidth: number = 0;
+  private onWindowInsets = (insets: ReaderWindowInsets): void => {
+    if (this.safeTop !== insets.top) this.safeTop = insets.top;
+    if (this.safeBottom !== insets.bottom) this.safeBottom = insets.bottom;
+    if (this.safeLeft !== insets.left) this.safeLeft = insets.left;
+    if (this.safeRight !== insets.right) this.safeRight = insets.right;
+  };
   private remotePrepare = (bookId: string): void => {
     const book = this.book;
     if (book === null || book.bookId !== bookId) return;
@@ -133,16 +153,57 @@ struct Reader {
     }
   }
 
+  // 页面重新可见（首次进入、切后台回来、从其它页面返回）时重新确认
+  // 全屏布局与系统栏图标；系统可能在后台重置这些属性。
+  onPageShow(): void {
+    this.enterImmersiveWindow();
+  }
+
   onPageHide(): void {
     this.flushSave();
   }
 
+  onBackPress(): boolean {
+    if (this.showChapters) {
+      this.showChapters = false;
+      return true;
+    }
+    if (this.showSettings) {
+      this.showSettings = false;
+      return true;
+    }
+    if (this.showControls) {
+      this.showControls = false;
+      return true;
+    }
+    this.backToShelf();
+    return true;
+  }
+
   aboutToDisappear(): void {
+    this.leaving = true;
     removeReadingApplyListener(this.remoteApply);
     removeReadingPrepareListener(this.remotePrepare);
     this.cancelScrollGuard();
     this.flushSave();
     this.closeFile();
+    // 恢复书架的系统栏和普通布局；Index.onPageShow 还有一次兜底，
+    // 防止路由生命周期顺序不同导致全屏状态泄漏。
+    exitReaderWindow();
+  }
+
+  private enterImmersiveWindow(): void {
+    const context =
+      this.getUIContext().getHostContext() as common.UIAbilityContext;
+    enterReaderWindow(context, this.darkTheme, this.onWindowInsets);
+  }
+
+  private toggleControls(): void {
+    if (this.showChapters) return;
+    this.showControls = !this.showControls;
+    if (!this.showControls) {
+      this.showSettings = false;
+    }
   }
 
   private async openBook(): Promise<void> {
@@ -484,6 +545,11 @@ struct Reader {
   }
 
   private async backToShelf(): Promise<void> {
+    if (this.leaving) return;
+    this.leaving = true;
+    this.showChapters = false;
+    this.showSettings = false;
+    this.showControls = false;
     if (this.saveTimer !== -1) {
       clearTimeout(this.saveTimer);
       this.saveTimer = -1;
@@ -497,6 +563,11 @@ struct Reader {
         // 入口提示失败不影响返回。
       }
     }
+    // 先恢复书架固定的深色系统栏，再取消全屏布局，最后才返回；
+    // 这样路由转场期间不会把全屏布局泄漏给书架。
+    const context =
+      this.getUIContext().getHostContext() as common.UIAbilityContext;
+    await restoreShelfWindow(context);
     router.back();
   }
 
@@ -517,6 +588,7 @@ struct Reader {
 
   private toggleTheme(): void {
     this.darkTheme = !this.darkTheme;
+    setReaderWindowTheme(this.darkTheme);
     this.rescrollToCurrent();
   }
 
@@ -612,9 +684,10 @@ struct Reader {
         .onClick(() => { this.showSettings = !this.showSettings; })
     }
     .width('100%')
-    .padding({ left: this.pagePadding, right: this.pagePadding,
-      top: 10, bottom: 10 })
-    .backgroundColor(this.panelColor())
+    .padding({ left: this.pagePadding + this.safeLeft,
+      right: this.pagePadding + this.safeRight,
+      top: this.safeTop + 8, bottom: 8 })
+    .backgroundColor(this.pageBackground())
   }
 
   @Builder
@@ -650,8 +723,28 @@ struct Reader {
         .margin({ left: 8 })
     }
     .width('100%')
-    .padding({ left: this.pagePadding, right: this.pagePadding,
+    .padding({ left: this.pagePadding + this.safeLeft,
+      right: this.pagePadding + this.safeRight,
       top: 6, bottom: 6 })
+    .backgroundColor(this.pageBackground())
+  }
+
+  @Builder
+  statusRow() {
+    Row() {
+      Text(this.status).fontSize(12).fontColor(this.mutedColor())
+        .layoutWeight(1).maxLines(2)
+      if (this.status.indexOf('继续加载') >= 0) {
+        Button('继续加载').fontSize(12).height(28)
+          .backgroundColor(this.panelColor())
+          .fontColor(this.textColor())
+          .onClick(() => { this.continueFromHere(); })
+      }
+    }
+    .width('100%')
+    .padding({ left: this.pagePadding + this.safeLeft,
+      right: this.pagePadding + this.safeRight,
+      top: 4, bottom: 4 })
     .backgroundColor(this.pageBackground())
   }
 
@@ -677,131 +770,182 @@ struct Reader {
         .onClick(() => { this.nextChapter(); })
     }
     .width('100%')
-    .padding({ left: this.pagePadding, right: this.pagePadding,
-      top: 8, bottom: 10 })
-    .backgroundColor(this.panelColor())
+    .padding({ left: this.pagePadding + this.safeLeft,
+      right: this.pagePadding + this.safeRight,
+      top: 8, bottom: this.safeBottom + 8 })
+    .backgroundColor(this.pageBackground())
+  }
+
+  // 控件收起时只保留一条轻量进度，不占正文高度、不绘制假导航条。
+  @Builder
+  progressHint() {
+    Row() {
+      Text(this.progressLabel)
+        .fontSize(10)
+        .fontColor(this.mutedColor())
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%')
+    .justifyContent(FlexAlign.End)
+    .padding({ left: this.pagePadding + this.safeLeft,
+      right: this.pagePadding + this.safeRight,
+      bottom: this.safeBottom + 4 })
+    .hitTestBehavior(HitTestMode.None)
   }
 
   @Builder
   chapterOverlay() {
-    Column() {
-      Row() {
-        Text('目录 · ' + this.chapters.length + ' 章')
-          .fontSize(18).fontWeight(FontWeight.Medium)
-          .fontColor(this.textColor()).layoutWeight(1)
-        Button('关闭').fontSize(12).height(30)
-          .backgroundColor(this.panelColor())
-          .fontColor(this.textColor())
-          .onClick(() => { this.showChapters = false; })
+    Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => { this.showChapters = false; })
+      Column() {
+        Row() {
+          Text('目录 · ' + this.chapters.length + ' 章')
+            .fontSize(18).fontWeight(FontWeight.Medium)
+            .fontColor(this.textColor()).layoutWeight(1)
+          Button('关闭').fontSize(12).height(30)
+            .backgroundColor(this.panelColor())
+            .fontColor(this.textColor())
+            .onClick(() => { this.showChapters = false; })
+        }
+        .width('100%').padding({ bottom: 8 })
+        List() {
+          ForEach(this.chapterSlice(), (chapter: BookChapter,
+            index: number) => {
+            ListItem() {
+              Text((this.chapterPage * CHAPTER_PAGE_SIZE + index + 1) +
+                '. ' + chapter.title)
+                .fontSize(14)
+                .fontColor(this.textColor())
+                .width('100%')
+                .padding({ top: 9, bottom: 9 })
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .onClick(() => {
+                  this.jumpChapter(this.chapterPage * CHAPTER_PAGE_SIZE + index);
+                })
+            }
+          }, (chapter: BookChapter) => chapter.offset.toString())
+        }
+        .layoutWeight(1).width('100%')
+        .divider({ strokeWidth: 1, color: this.mutedColor() })
+        Row() {
+          Button('上一页').fontSize(12).height(30)
+            .backgroundColor(this.panelColor())
+            .fontColor(this.textColor())
+            .enabled(this.chapterPage > 0)
+            .onClick(() => { this.chapterPage--; })
+          Text((this.chapterPage + 1) + ' / ' + this.chapterPageCount())
+            .fontSize(12).fontColor(this.mutedColor())
+            .layoutWeight(1).textAlign(TextAlign.Center)
+          Button('下一页').fontSize(12).height(30)
+            .backgroundColor(this.panelColor())
+            .fontColor(this.textColor())
+            .enabled(this.chapterPage + 1 < this.chapterPageCount())
+            .onClick(() => { this.chapterPage++; })
+        }
+        .width('100%').padding({ top: 8 })
       }
-      .width('100%').padding({ bottom: 8 })
-      List() {
-        ForEach(this.chapterSlice(), (chapter: BookChapter,
-          index: number) => {
-          ListItem() {
-            Text((this.chapterPage * CHAPTER_PAGE_SIZE + index + 1) +
-              '. ' + chapter.title)
-              .fontSize(14)
-              .fontColor(this.textColor())
-              .width('100%')
-              .padding({ top: 9, bottom: 9 })
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .onClick(() => {
-                this.jumpChapter(this.chapterPage * CHAPTER_PAGE_SIZE + index);
-              })
-          }
-        }, (chapter: BookChapter) => chapter.offset.toString())
-      }
-      .layoutWeight(1).width('100%')
-      .divider({ strokeWidth: 1, color: this.mutedColor() })
-      Row() {
-        Button('上一页').fontSize(12).height(30)
-          .enabled(this.chapterPage > 0)
-          .onClick(() => { this.chapterPage--; })
-        Text((this.chapterPage + 1) + ' / ' + this.chapterPageCount())
-          .fontSize(12).fontColor(this.mutedColor())
-          .layoutWeight(1).textAlign(TextAlign.Center)
-        Button('下一页').fontSize(12).height(30)
-          .enabled(this.chapterPage + 1 < this.chapterPageCount())
-          .onClick(() => { this.chapterPage++; })
-      }
-      .width('100%').padding({ top: 8 })
+      .width('90%')
+      .height('80%')
+      .constraintSize({ maxWidth: 560 })
+      .padding(16)
+      .backgroundColor(this.panelColor())
+      .borderRadius(18)
     }
-    .width('90%').height('80%')
-    .padding(16)
-    .backgroundColor(this.panelColor())
-    .borderRadius(18)
+    .width('100%')
+    .height('100%')
+    .padding({ top: this.safeTop + 8, bottom: this.safeBottom + 8,
+      left: this.safeLeft, right: this.safeRight })
   }
 
   build() {
-    Stack({ alignContent: Alignment.Center }) {
-      Row() {
-        Column() {
-          this.topBar()
-          if (this.loading) {
-            Column() {
-              Text('正在打开……').fontSize(15).fontColor(this.mutedColor())
-            }
-            .layoutWeight(1).width('100%')
-            .justifyContent(FlexAlign.Center)
-          } else if (this.segments.length === 0) {
-            Column({ space: 10 }) {
-              Text(this.status).fontSize(15).fontColor(this.mutedColor())
-              Button('返回书架').onClick(() => { this.backToShelf(); })
-            }
-            .layoutWeight(1).width('100%')
-            .justifyContent(FlexAlign.Center)
-          } else {
-            List({ space: 0, scroller: this.scroller }) {
-              ForEach(this.segments, (segment: ReaderSegment) => {
-                ListItem() {
-                  Text(segment.text)
-                    .fontSize(this.fontSize)
-                    .lineHeight(this.fontSize * this.lineSpacing)
-                    .fontColor(this.textColor())
-                    .width('100%')
-                    .padding({ left: this.pagePadding, right: this.pagePadding,
-                      top: 6, bottom: 6 })
-                    .textAlign(TextAlign.Start)
-                }
-              }, (segment: ReaderSegment) => segment.offset.toString())
-            }
-            .layoutWeight(1)
-            .width('100%')
-            .scrollBar(BarState.Auto)
-            .edgeEffect(EdgeEffect.Spring)
-            .onScrollIndex((start: number, end: number) => {
-              this.onScrollIndex(start, end);
-            })
-          }
-          if (this.showSettings) {
-            this.settingsBar()
-          }
-          if (this.status.length > 0 && this.segments.length > 0) {
-            Row() {
-              Text(this.status).fontSize(12).fontColor(this.mutedColor())
-                .layoutWeight(1).maxLines(2)
-              if (this.status.indexOf('继续加载') >= 0) {
-                Button('继续加载').fontSize(12).height(28)
-                  .onClick(() => { this.continueFromHere(); })
+    Stack({ alignContent: Alignment.Bottom }) {
+      // 正文始终占满安全区；顶部/底部操作层以浮层出现，
+      // 显隐时不改变 List 高度，不会把当前阅读位置推走。
+      Stack({ alignContent: Alignment.Top }) {
+        Row() {
+          Column() {
+            if (this.loading) {
+              Column() {
+                Text('正在打开……').fontSize(15).fontColor(this.mutedColor())
               }
+              .width('100%').height('100%')
+              .justifyContent(FlexAlign.Center)
+            } else if (this.segments.length === 0) {
+              Column({ space: 10 }) {
+                Text(this.status).fontSize(15).fontColor(this.mutedColor())
+                Button('返回书架')
+                  .backgroundColor(this.panelColor())
+                  .fontColor(this.textColor())
+                  .onClick(() => { this.backToShelf(); })
+              }
+              .width('100%').height('100%')
+              .justifyContent(FlexAlign.Center)
+            } else {
+              List({ space: 0, scroller: this.scroller }) {
+                ForEach(this.segments, (segment: ReaderSegment) => {
+                  ListItem() {
+                    Text(segment.text)
+                      .fontSize(this.fontSize)
+                      .lineHeight(this.fontSize * this.lineSpacing)
+                      .fontColor(this.textColor())
+                      .width('100%')
+                      .padding({ left: this.pagePadding, right: this.pagePadding,
+                        top: 6, bottom: 6 })
+                      .textAlign(TextAlign.Start)
+                  }
+                }, (segment: ReaderSegment) => segment.offset.toString())
+              }
+              .width('100%')
+              .height('100%')
+              .scrollBar(BarState.Auto)
+              .edgeEffect(EdgeEffect.Spring)
+              .onScrollIndex((start: number, end: number) => {
+                this.onScrollIndex(start, end);
+              })
             }
-            .width('100%')
-            .padding({ left: this.pagePadding, right: this.pagePadding,
-              top: 4, bottom: 4 })
-            .backgroundColor(this.pageBackground())
           }
-          this.bottomBar()
+          .width('100%')
+          .height('100%')
+          .constraintSize({ maxWidth: 920 })
         }
         .width('100%')
         .height('100%')
-        .constraintSize({ maxWidth: 920 })
+        .padding({ top: this.safeTop, bottom: this.safeBottom,
+          left: this.safeLeft, right: this.safeRight })
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor(this.pageBackground())
+        .onClick(() => { this.toggleControls(); })
+
+        if (this.showControls) {
+          Column() {
+            this.topBar()
+            if (this.showSettings) {
+              this.settingsBar()
+            }
+          }
+          .width('100%')
+        }
       }
       .width('100%')
       .height('100%')
-      .justifyContent(FlexAlign.Center)
-      .backgroundColor(this.pageBackground())
+
+      Column() {
+        if (this.status.length > 0 && this.segments.length > 0) {
+          this.statusRow()
+        }
+        if (this.showControls) {
+          this.bottomBar()
+        } else if (this.segments.length > 0) {
+          this.progressHint()
+        }
+      }
+      .width('100%')
 
       if (this.showChapters) {
         this.chapterOverlay()
@@ -812,14 +956,19 @@ struct Reader {
     .backgroundColor(this.pageBackground())
     .onAreaChange((oldValue: Area, newValue: Area) => {
       const width = parseFloat(newValue.width.toString());
-      if (isFinite(width)) {
+      if (isFinite(width) && width > 0 &&
+          Math.abs(width - this.lastWidth) > 0.5) {
+        this.lastWidth = width;
         const nextPadding = width >= 720 ? 36 : 16;
         if (nextPadding !== this.pagePadding) {
           this.pagePadding = nextPadding;
-          // 宽度跨档会改变行宽，重新锚定当前字节位置。
-          this.rescrollToCurrent();
         }
+        // 折叠/旋转/分屏后行宽变化，按当前 UTF-8 位置重新锚定。
+        this.rescrollToCurrent();
       }
+      // 窗口尺寸变化后避让区可能同步变化；这里与
+      // avoidAreaChange 监听一起兜底。
+      refreshReaderWindowInsets();
     })
   }
 }

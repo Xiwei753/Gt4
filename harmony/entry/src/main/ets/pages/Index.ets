@@ -23,6 +23,7 @@ import { BookTransferService } from '../services/BookTransferService';
 import { ReadingSyncService } from '../services/ReadingSyncService';
 import { deviceNotice, planRetry, MAX_AUTO_RETRIES,
   runDeviceRefresh } from '../services/WearAuthPolicy';
+import { restoreShelfWindow } from '../services/ReaderWindowAppearance';
 
 // 返回书架时只做一次节流同步，不在滚动/每次刷新里发消息。
 const PROGRESS_SYNC_THROTTLE_MS = 2000;
@@ -107,6 +108,13 @@ struct Index {
   }
 
   onPageShow(): void {
+    // 阅读页返回或应用重新可见时，兜底恢复书架的普通布局与深色系统栏，
+    // 防止全屏布局/浅色系统栏图标泄漏到书架。
+    restoreShelfWindow(
+      this.getUIContext().getHostContext() as common.UIAbilityContext)
+      .catch((error: Error) => {
+        console.error('restore shelf window: ' + error.message);
+      });
     this.identityStatus = loadPeerIdentities();
     if (this.identityStatus.length === 0 && !isConfigured(WATCH_PEER)) {
       this.identityStatus =
