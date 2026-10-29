@@ -194,7 +194,8 @@ export class ReadingProgressStore {
   // 本地进度胜出：只把基线推进到当前本地 offset，不制造“新阅读”。
   async markSynced(bookId: string, sha256: string, offset: number): Promise<void> {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) return;
-    const writeGeneration = bumpWriteGeneration(bookId);
+    // 只更新同步元数据，不采用远端位置；不能提升写入代次，
+    // 否则会把尚未落盘的本地新阅读位置误判为过期。
     await enqueueBookWrite(bookId, async () => {
       const existing = await this.readRecord(bookId);
       if (existing === null || existing.sha256 !== sha256) return;
@@ -205,7 +206,7 @@ export class ReadingProgressStore {
         syncedOffset: offset,
         pendingOffset: -1
       });
-    }, writeGeneration);
+    });
   }
 
   // 本地进度等待对端确认：只记录待确认位置，不推进同步基线。
@@ -215,7 +216,7 @@ export class ReadingProgressStore {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
       return;
     }
-    const writeGeneration = bumpWriteGeneration(bookId);
+    // 只记录待确认位置，不采用远端位置；保持本地新阅读位置有效。
     await enqueueBookWrite(bookId, async () => {
       const existing = await this.readRecord(bookId);
       if (existing === null || existing.sha256 !== sha256) return;
@@ -227,7 +228,7 @@ export class ReadingProgressStore {
           existing.syncedOffset : UNKNOWN_BASELINE,
         pendingOffset: offset
       });
-    }, writeGeneration);
+    });
   }
 
   async saveLastBook(bookId: string): Promise<void> {

@@ -89,4 +89,47 @@ assert.deepEqual(state, {
   offset: 320, syncedOffset: 300, pendingOffset: -1
 }, 'a genuinely later save with current generation must still persist');
 
+// 7. markSynced 只更新基线，不得提升代次使已排队的本地新阅读失效。
+state = { offset: 100, syncedOffset: 100, pendingOffset: -1 };
+const localGeneration = captureWriteGeneration('book-f');
+const local200 = enqueueBookWrite('book-f', async () => {
+  await delay(20);
+  state = { ...state, offset: 200 };
+}, localGeneration);
+const markSynced = enqueueBookWrite('book-f', async () => {
+  state = { ...state, syncedOffset: 100 };
+});
+await Promise.all([local200, markSynced]);
+assert.deepEqual(state, {
+  offset: 200, syncedOffset: 100, pendingOffset: -1
+}, 'markSynced must not invalidate an already queued local save');
+
+// 8. markSynced 先执行、本地 save 后执行时，save 仍使用当前代次并落盘。
+state = { offset: 100, syncedOffset: 100, pendingOffset: -1 };
+await enqueueBookWrite('book-g', async () => {
+  state = { ...state, syncedOffset: 100 };
+});
+const afterMetaGeneration = captureWriteGeneration('book-g');
+await enqueueBookWrite('book-g', async () => {
+  state = { ...state, offset: 200 };
+}, afterMetaGeneration);
+assert.deepEqual(state, {
+  offset: 200, syncedOffset: 100, pendingOffset: -1
+}, 'a local save after markSynced must still persist');
+
+// 9. markPending 同理：只记录待确认位置，不能丢弃本地新阅读位置。
+state = { offset: 100, syncedOffset: 100, pendingOffset: -1 };
+const pendingSaveGeneration = captureWriteGeneration('book-h');
+const pendingLocal = enqueueBookWrite('book-h', async () => {
+  await delay(20);
+  state = { ...state, offset: 200, pendingOffset: 200 };
+}, pendingSaveGeneration);
+const markPending = enqueueBookWrite('book-h', async () => {
+  state = { ...state, pendingOffset: 200 };
+});
+await Promise.all([pendingLocal, markPending]);
+assert.deepEqual(state, {
+  offset: 200, syncedOffset: 100, pendingOffset: 200
+}, 'markPending must not invalidate an already queued local save');
+
 console.log('PASS: per-book progress write queue ordering and recovery');
