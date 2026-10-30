@@ -25,6 +25,9 @@ assert.match(readerSource,
 assert.match(readerSource,
   /if \(this\.status\.length > 0 \|\| this\.pageFooter\.length > 0\)/,
   'the reader must omit an empty bottom status/footer area');
+assert.match(readerSource,
+  /logLocationSavedAtResourceBoundary\(resourceIndex\)[\s\S]*?resourceIndex === this\.lastPositionLogResourceIndex[\s\S]*?this\.log\('pageShow', 'position\.saved'\)/,
+  'successful location diagnostics must be sampled by Reader Kit resource');
 
 const bookId = 'readerkit-write-order-test';
 const persistedLocations = new Map();

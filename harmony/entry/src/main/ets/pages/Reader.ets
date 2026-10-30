@@ -63,6 +63,7 @@ struct Reader {
   private spine: bookParser.SpineItem[] = [];
   private currentResourceIndex: number = 0;
   private currentDomPos: string = '';
+  private lastPositionLogResourceIndex: number = -1;
   private initialized: boolean = false;
   private leaving: boolean = false;
   private settingsLoad: Promise<void> = Promise.resolve();
@@ -301,15 +302,25 @@ struct Reader {
   private async saveCurrentLocation(): Promise<void> {
     const book = this.book;
     const state = this.readerState;
-    if (book === null || state === null || this.currentResourceIndex < 0 ||
-        this.currentDomPos.length > 4096) return;
+    const resourceIndex = this.currentResourceIndex;
+    const domPos = this.currentDomPos;
+    if (book === null || state === null || resourceIndex < 0 ||
+        domPos.length > 4096) return;
     try {
       await state.saveLocation(book.bookId, this.readerSha256(book),
-        this.currentResourceIndex, this.currentDomPos);
-      this.log('pageShow', 'position.saved');
+        resourceIndex, domPos);
+      this.logLocationSavedAtResourceBoundary(resourceIndex);
     } catch (error) {
       this.log('pageShow', 'position.save_fail', this.errorCode(error));
     }
+  }
+
+  // Position persistence still runs for every page, but sync log I/O only
+  // records the first successful save for each Reader Kit resource.
+  private logLocationSavedAtResourceBoundary(resourceIndex: number): void {
+    if (resourceIndex === this.lastPositionLogResourceIndex) return;
+    this.lastPositionLogResourceIndex = resourceIndex;
+    this.log('pageShow', 'position.saved');
   }
 
   private pageConfig(): readerCore.ReaderSetting {
