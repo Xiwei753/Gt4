@@ -1059,9 +1059,11 @@ struct Reader {
           })
         }
         .width('100%').height('100%')
+        // The window layout is already fullscreen; do not reserve its bottom
+        // navigation safe area in the Reader Kit viewport. Controls and the
+        // optional footer keep their own inset in the overlays below.
         .padding({ left: this.safeLeft, right: this.safeRight,
-          top: this.readerContentTopInsetVp(),
-          bottom: this.readerContentBottomInsetVp() })
+          top: this.readerContentTopInsetVp() })
 
         if (!this.loading && this.controlsVisible) {
           Column() {
