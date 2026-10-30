@@ -23,8 +23,11 @@ assert.match(readerSource,
   /private async backToShelf\(\)[\s\S]*?await this\.saveCurrentLocation\(\)/,
   'leaving the reader must wait for its final location write');
 assert.match(readerSource,
-  /if \(this\.status\.length > 0 \|\| this\.pageFooter\.length > 0\)/,
-  'the reader must omit an empty bottom status/footer area');
+  /readerFooter\(\)[\s\S]*?if \(this\.status\.length > 0\)/,
+  'reader diagnostics must only occupy footer space when present');
+assert.match(readerSource,
+  /Text\(this\.chapterTitle\)[\s\S]*?if \(this\.pageFooter\.length > 0\)[\s\S]*?Text\(this\.pageFooter\)/,
+  'the footer must show its trusted chapter and omit unavailable progress');
 assert.match(readerSource,
   /logLocationSavedAtResourceBoundary\(resourceIndex\)[\s\S]*?resourceIndex === this\.lastPositionLogResourceIndex[\s\S]*?this\.log\('pageShow', 'position\.saved'\)/,
   'successful location diagnostics must be sampled by Reader Kit resource');

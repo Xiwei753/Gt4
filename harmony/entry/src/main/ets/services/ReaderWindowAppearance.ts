@@ -56,13 +56,14 @@ class ReaderWindowAppearanceService {
       if (generation !== this.generation) return;
       const win = await this.obtainWindow(context);
       if (win === null || generation !== this.generation) return;
-      this.publishInsets(win, true);
       await this.setFullScreen(win);
+      if (generation !== this.generation) return;
+      await this.setStatusBarVisible(win, page === 'shelf');
       if (generation !== this.generation) return;
       await this.applySystemBars(win);
       if (generation !== this.generation) return;
       this.attachAvoidAreaListener(win);
-      this.publishInsets(win, false);
+      this.publishInsets(win, true);
       this.logWindowState(page + '_shown', 0);
       setTimeout((): void => {
         if (generation !== this.generation || this.mainWindow !== win) return;
@@ -71,6 +72,8 @@ class ReaderWindowAppearanceService {
         this.enqueue(async (): Promise<void> => {
           if (generation !== this.generation || this.mainWindow !== win) return;
           await this.setFullScreen(win);
+          await this.setStatusBarVisible(win, page === 'shelf');
+          if (generation !== this.generation) return;
           await this.applySystemBars(win);
           this.publishInsets(win, false);
           this.logWindowState(page + '_transition_verified', 0);
@@ -103,10 +106,14 @@ class ReaderWindowAppearanceService {
     if (this.activePage !== 'reader') return;
     this.activePage = 'none';
     this.insetsListener = null;
-    this.generation++;
+    const generation = ++this.generation;
     this.logWindowState('reader_exit', 0);
-    // Keep the main window full-screen and its system bars transparent. The
-    // shelf applies its own theme onPageShow without a non-immersive interval.
+    this.enqueue(async (): Promise<void> => {
+      if (generation !== this.generation) return;
+      const win = await this.obtainWindow(null);
+      if (win === null || generation !== this.generation) return;
+      await this.setStatusBarVisible(win, true);
+    });
   }
 
   private enqueue(action: () => Promise<void>): void {
@@ -151,6 +158,17 @@ class ReaderWindowAppearanceService {
     } catch (error) {
       this.logWindowState('system_bars_fail', this.errorCode(error));
       console.error('ReaderWindowAppearance: setWindowSystemBarProperties failed');
+    }
+  }
+
+  private async setStatusBarVisible(win: window.Window,
+    visible: boolean): Promise<void> {
+    try {
+      await win.setSpecificSystemBarEnabled('status', visible, false);
+    } catch (error) {
+      this.logWindowState(visible ? 'status_bar_show_fail' :
+        'status_bar_hide_fail', this.errorCode(error));
+      console.error('ReaderWindowAppearance: status bar visibility change failed');
     }
   }
 

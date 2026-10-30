@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // 本机阅读页使用系统 Reader Kit；传手表仍由独立的规范化 UTF-8 正文驱动。
 import { common } from '@kit.AbilityKit';
+import { batteryInfo } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { router, display } from '@kit.ArkUI';
+import { inputConsumer, KeyCode } from '@kit.InputKit';
 import { bookParser, ReadPageComponent, readerCore } from '@kit.ReaderKit';
 import { APP_SYSTEM_DARK_KEY, APP_THEME_MODE_KEY, AppThemePalette,
   AppThemeMode, isDarkTheme, themePalette } from '../services/AppTheme';
@@ -15,7 +17,8 @@ import { AppThemeStore, applyNativeThemeMode }
   from '../services/AppThemeStore';
 import { recordReaderDiagnostic } from '../services/ReaderDiagnostics';
 import { enterReaderWindow, exitReaderWindow,
-  refreshReaderWindowInsets, setAppWindowTheme, ReaderWindowInsets }
+  refreshReaderWindowInsets, setAppWindowTheme, showShelfWindow,
+  ReaderWindowInsets }
   from '../services/ReaderWindowAppearance';
 
 interface ReaderParams {
@@ -52,6 +55,9 @@ struct Reader {
   @State private safeRight: number = 0;
   @State private viewportWidthVp: number = 0;
   @State private viewportHeightVp: number = 0;
+  @State private timeText: string = '--:--';
+  @State private batteryPercent: number = -1;
+  @State private volumeKeyPaging: boolean = true;
 
   private book: BookMeta | null = null;
   private repository: BookRepository | null = null;
@@ -65,9 +71,20 @@ struct Reader {
   private currentDomPos: string = '';
   private lastPositionLogResourceIndex: number = -1;
   private initialized: boolean = false;
+  private readerReady: boolean = false;
+  private pageInForeground: boolean = false;
   private leaving: boolean = false;
   private settingsLoad: Promise<void> = Promise.resolve();
   private resizeTimer: number = -1;
+  private infoRefreshTimer: number = -1;
+  private volumeUpRegistered: boolean = false;
+  private volumeDownRegistered: boolean = false;
+  private volumeUpListener = (): void => {
+    this.flipPageFromVolumeKey(false);
+  };
+  private volumeDownListener = (): void => {
+    this.flipPageFromVolumeKey(true);
+  };
   private onWindowInsets = (insets: ReaderWindowInsets): void => {
     this.safeTop = insets.top;
     this.safeBottom = insets.bottom;
@@ -129,23 +146,36 @@ struct Reader {
   }
 
   onPageShow(): void {
+    this.pageInForeground = true;
     const context = this.context();
-    enterReaderWindow(context, this.themeMode, this.isDarkTheme(),
-      this.onWindowInsets);
+    if (this.readerAvailable && this.book !== null) {
+      this.refreshReaderInfo();
+      this.scheduleReaderInfoRefresh();
+      enterReaderWindow(context, this.themeMode, this.isDarkTheme(),
+        this.onWindowInsets);
+    } else {
+      showShelfWindow(context, this.themeMode, this.isDarkTheme(),
+        this.onWindowInsets);
+    }
+    this.syncVolumeKeyListeners();
     this.log('reader', 'foreground');
   }
 
   onPageHide(): void {
+    this.pageInForeground = false;
+    this.clearInfoRefreshTimer();
+    this.syncVolumeKeyListeners();
     this.saveCurrentLocation();
   }
 
   onBackPress(): boolean {
     if (this.catalogVisible) {
-      this.catalogVisible = false;
+      this.setCatalogVisible(false);
       return true;
     }
     if (this.settingsVisible) {
       this.settingsVisible = false;
+      this.syncVolumeKeyListeners();
       return true;
     }
     this.backToShelf();
@@ -154,6 +184,9 @@ struct Reader {
 
   aboutToDisappear(): void {
     this.leaving = true;
+    this.pageInForeground = false;
+    this.clearInfoRefreshTimer();
+    this.syncVolumeKeyListeners();
     if (this.resizeTimer !== -1) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = -1;
@@ -177,12 +210,147 @@ struct Reader {
     return book.readerFilePath || book.filePath;
   }
 
+  private formatTimePart(value: number): string {
+    return value < 10 ? '0' + value.toString() : value.toString();
+  }
+
+  private refreshReaderInfo(): void {
+    const now = new Date();
+    this.timeText = this.formatTimePart(now.getHours()) + ':' +
+      this.formatTimePart(now.getMinutes());
+    try {
+      const level = batteryInfo.batterySOC;
+      this.batteryPercent = Number.isFinite(level) ?
+        Math.min(100, Math.max(0, Math.round(level))) : -1;
+    } catch (error) {
+      this.batteryPercent = -1;
+    }
+  }
+
+  private scheduleReaderInfoRefresh(): void {
+    this.clearInfoRefreshTimer();
+    if (!this.pageInForeground || this.leaving) return;
+    const now = Date.now();
+    const delay = 60000 - (now % 60000) + 50;
+    this.infoRefreshTimer = setTimeout(() => {
+      this.infoRefreshTimer = -1;
+      if (!this.pageInForeground || this.leaving) return;
+      this.refreshReaderInfo();
+      this.scheduleReaderInfoRefresh();
+    }, delay);
+  }
+
+  private clearInfoRefreshTimer(): void {
+    if (this.infoRefreshTimer === -1) return;
+    clearTimeout(this.infoRefreshTimer);
+    this.infoRefreshTimer = -1;
+  }
+
+  private shouldConsumeVolumeKeys(): boolean {
+    return this.pageInForeground && this.readerReady && !this.loading &&
+      !this.leaving && !this.catalogVisible && !this.settingsVisible &&
+      this.volumeKeyPaging;
+  }
+
+  private syncVolumeKeyListeners(): void {
+    if (this.shouldConsumeVolumeKeys()) {
+      if (!this.volumeUpRegistered) {
+        try {
+          inputConsumer.on('keyPressed', {
+            key: KeyCode.KEYCODE_VOLUME_UP,
+            action: 1,
+            isRepeat: false
+          }, this.volumeUpListener);
+          this.volumeUpRegistered = true;
+        } catch (error) {
+          this.log('volumeKey', 'up_register_fail', this.errorCode(error));
+        }
+      }
+      if (!this.volumeDownRegistered) {
+        try {
+          inputConsumer.on('keyPressed', {
+            key: KeyCode.KEYCODE_VOLUME_DOWN,
+            action: 1,
+            isRepeat: false
+          }, this.volumeDownListener);
+          this.volumeDownRegistered = true;
+        } catch (error) {
+          this.log('volumeKey', 'down_register_fail', this.errorCode(error));
+        }
+      }
+      return;
+    }
+    this.unregisterVolumeKeyListeners();
+  }
+
+  private unregisterVolumeKeyListeners(): void {
+    if (this.volumeUpRegistered) {
+      try {
+        inputConsumer.off('keyPressed', this.volumeUpListener);
+      } catch (error) {
+        this.log('volumeKey', 'up_unregister_fail', this.errorCode(error));
+      }
+      this.volumeUpRegistered = false;
+    }
+    if (this.volumeDownRegistered) {
+      try {
+        inputConsumer.off('keyPressed', this.volumeDownListener);
+      } catch (error) {
+        this.log('volumeKey', 'down_unregister_fail', this.errorCode(error));
+      }
+      this.volumeDownRegistered = false;
+    }
+  }
+
+  private flipPageFromVolumeKey(isNext: boolean): void {
+    if (!this.shouldConsumeVolumeKeys()) return;
+    try {
+      this.controller.flipPage(isNext);
+    } catch (error) {
+      this.log('volumeKey', 'flip_fail', this.errorCode(error));
+    }
+  }
+
+  private setVolumeKeyPaging(enabled: boolean): void {
+    this.volumeKeyPaging = enabled;
+    this.syncVolumeKeyListeners();
+    this.persistSettings();
+  }
+
+  private setCatalogVisible(visible: boolean): void {
+    this.catalogVisible = visible;
+    this.syncVolumeKeyListeners();
+  }
+
+  private readerAreaChanged(area: Area): void {
+    const width = parseFloat(area.width.toString());
+    const height = parseFloat(area.height.toString());
+    if (!Number.isFinite(width) || !Number.isFinite(height) ||
+        width <= 0 || height <= 0 ||
+        (Math.abs(width - this.viewportWidthVp) < 0.5 &&
+         Math.abs(height - this.viewportHeightVp) < 0.5)) return;
+    this.viewportWidthVp = width;
+    this.viewportHeightVp = height;
+    if (this.resizeTimer !== -1) clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(() => {
+      this.resizeTimer = -1;
+      this.applyPageConfig(true);
+      refreshReaderWindowInsets();
+    }, 120);
+  }
+
+  private toggleSettings(): void {
+    this.settingsVisible = !this.settingsVisible;
+    this.syncVolumeKeyListeners();
+  }
+
   private async loadSettings(): Promise<void> {
     if (this.readerState === null) return;
     const settings = await this.readerState.loadSettings();
     this.fontSize = settings.fontSize;
     this.lineHeight = settings.lineHeight;
     this.flipMode = settings.flipMode;
+    this.volumeKeyPaging = settings.volumeKeyPaging;
     setAppWindowTheme(this.themeMode, this.isDarkTheme());
   }
 
@@ -256,9 +424,13 @@ struct Reader {
       await this.controller.startPlay(this.currentResourceIndex,
         this.currentDomPos);
       this.log('reader', 'startPlay.ok');
+      this.readerReady = true;
       this.loading = false;
       this.status = '';
+      this.syncVolumeKeyListeners();
     } catch (error) {
+      this.readerReady = false;
+      this.syncVolumeKeyListeners();
       const code = this.errorCode(error);
       this.log(this.failureStage(error), 'fail', code);
       this.loading = false;
@@ -371,7 +543,8 @@ struct Reader {
       fontSize: this.fontSize,
       lineHeight: this.lineHeight,
       nightMode: this.isDarkTheme(),
-      flipMode: this.flipMode
+      flipMode: this.flipMode,
+      volumeKeyPaging: this.volumeKeyPaging
     };
     if (this.readerState !== null) {
       this.readerState.saveSettings(settings).catch((error: Error) => {
@@ -401,9 +574,14 @@ struct Reader {
     if (this.loading || this.catalogVisible) return;
     if (this.settingsVisible) {
       this.settingsVisible = false;
+      this.syncVolumeKeyListeners();
       return;
     }
     this.controlsVisible = !this.controlsVisible;
+  }
+
+  private openCatalog(): void {
+    this.setCatalogVisible(true);
   }
 
   private setFlipMode(mode: string): void {
@@ -435,7 +613,7 @@ struct Reader {
       this.log('catalog', 'resolve_fail', this.errorCode(error));
       return;
     }
-    this.catalogVisible = false;
+    this.setCatalogVisible(false);
     this.currentResourceIndex = resourceIndex;
     this.currentDomPos = domPos;
     this.controller.startPlay(resourceIndex, domPos).then(() => {
@@ -449,6 +627,7 @@ struct Reader {
   private async backToShelf(): Promise<void> {
     if (this.leaving) return;
     this.leaving = true;
+    this.syncVolumeKeyListeners();
     await this.saveCurrentLocation();
     if (this.book !== null && this.progressStore !== null) {
       await this.progressStore.saveLastBook(this.book.bookId);
@@ -476,6 +655,69 @@ struct Reader {
   }
 
   @Builder
+  readerInfoBar() {
+    Column() {
+      Row() {
+        Text(this.title).fontSize(12).fontColor(this.palette().secondaryText)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+        Text(this.timeText).fontSize(12)
+          .fontColor(this.palette().secondaryText).margin({ left: 10 })
+        Row() {
+          Stack({ alignContent: Alignment.TopStart }) {
+            if (this.batteryPercent > 0) {
+              Row().width(Math.max(1,
+                Math.round(11 * this.batteryPercent / 100)))
+                .height(4).margin({ left: 2, top: 3 })
+                .backgroundColor(this.palette().secondaryText).borderRadius(1)
+            }
+          }
+          .width(17).height(10)
+          .border({ width: 1, color: this.palette().secondaryText, radius: 2 })
+          Column().width(2).height(4)
+            .backgroundColor(this.palette().secondaryText)
+            .margin({ left: 1 })
+          Text(this.batteryPercent < 0 ? '--%' :
+            this.batteryPercent.toString() + '%')
+            .fontSize(11).fontColor(this.palette().secondaryText)
+            .margin({ left: 4 })
+        }
+        .alignItems(VerticalAlign.Center).margin({ left: 8 })
+      }
+      .width('100%').height(32)
+    }
+    .width('100%')
+    .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight,
+      top: this.safeTop + 5, bottom: 5 })
+    .backgroundColor(this.palette().page)
+  }
+
+  @Builder
+  readerFooter() {
+    Column({ space: 4 }) {
+      if (this.status.length > 0) {
+        Text(this.status).fontSize(11).fontColor(this.palette().text)
+          .maxLines(2).width('100%').textAlign(TextAlign.Center)
+      }
+      Row() {
+        Text(this.chapterTitle).fontSize(11)
+          .fontColor(this.palette().secondaryText).layoutWeight(1)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        if (this.pageFooter.length > 0) {
+          Text(this.pageFooter).fontSize(11)
+            .fontColor(this.palette().secondaryText)
+            .maxLines(1).textAlign(TextAlign.End)
+        }
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight,
+      top: 6, bottom: 8 + this.safeBottom })
+    .backgroundColor(this.palette().page)
+  }
+
+  @Builder
   topControls() {
 
     Column() {
@@ -483,26 +725,18 @@ struct Reader {
         Button('‹').fontSize(24).width(44).height(40)
           .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
           .onClick(() => { this.backToShelf(); })
-        Column() {
-          Text(this.title).fontSize(16).fontColor(this.palette().text)
-            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.chapterTitle).fontSize(12).fontColor(this.palette().secondaryText)
-            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-            .margin({ top: 2 })
-        }
-        .alignItems(HorizontalAlign.Start).layoutWeight(1)
-        .margin({ left: 12, right: 8 })
+        Blank().layoutWeight(1)
         Button('目录').fontSize(13).height(36)
           .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
-          .onClick(() => { this.catalogVisible = true; })
+          .onClick(() => { this.openCatalog(); })
         Button('Aa').fontSize(13).height(36)
           .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
           .margin({ left: 8 })
-          .onClick(() => { this.settingsVisible = !this.settingsVisible; })
+          .onClick(() => { this.toggleSettings(); })
       }
       .width('100%')
       .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight,
-        top: this.safeTop + 8, bottom: 8 })
+        top: 8, bottom: 8 })
       .backgroundColor(this.palette().overlay)
 
       if (this.settingsVisible) {
@@ -546,6 +780,15 @@ struct Reader {
               })
           }
           .width('100%')
+          Row() {
+            Text('音量键翻页').fontSize(12)
+              .fontColor(this.palette().text).layoutWeight(1)
+            Toggle({ type: ToggleType.Switch, isOn: this.volumeKeyPaging })
+              .onChange((enabled: boolean) => {
+                this.setVolumeKeyPaging(enabled);
+              })
+          }
+          .width('100%')
         }
         .width('100%')
         .padding({ left: 12 + this.safeLeft,
@@ -563,14 +806,14 @@ struct Reader {
     Stack({ alignContent: Alignment.Center }) {
       Column().width('100%').height('100%')
         .backgroundColor(this.palette().overlay)
-        .onClick(() => { this.catalogVisible = false; })
+        .onClick(() => { this.setCatalogVisible(false); })
       Column() {
         Row() {
           Text('目录').fontSize(19).fontWeight(FontWeight.Medium)
             .fontColor(this.palette().text).layoutWeight(1)
           Button('关闭').height(32)
             .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
-            .onClick(() => { this.catalogVisible = false; })
+            .onClick(() => { this.setCatalogVisible(false); })
         }
         .width('100%').padding({ bottom: 10 })
         if (this.catalogs.length === 0) {
@@ -606,22 +849,45 @@ struct Reader {
 
     Stack({ alignContent: Alignment.TopStart }) {
       if (this.readerAvailable && this.book !== null) {
-        ReadPageComponent({
-          controller: this.controller,
-          readerCallback: (error, controller) => {
-            if (error) {
-              this.loading = false;
-              this.controlsVisible = true;
-              this.status = 'Reader Kit 组件初始化失败（错误码 ' +
-                this.errorCode(error) + '）';
-              this.log('reader', 'component.fail', this.errorCode(error));
-              return;
+        Column() {
+          this.readerInfoBar()
+          Stack({ alignContent: Alignment.TopStart }) {
+            ReadPageComponent({
+              controller: this.controller,
+              readerCallback: (error, controller) => {
+                if (error) {
+                  this.readerReady = false;
+                  this.loading = false;
+                  this.controlsVisible = true;
+                  this.status = 'Reader Kit 组件初始化失败（错误码 ' +
+                    this.errorCode(error) + '）';
+                  this.log('reader', 'component.fail', this.errorCode(error));
+                  this.syncVolumeKeyListeners();
+                  return;
+                }
+                this.initializeReader(controller);
+              }
+            })
+            .width('100%').height('100%')
+            .onClick(() => { this.toggleReaderControls(); })
+            .onAreaChange((oldArea: Area, newArea: Area) => {
+              this.readerAreaChanged(newArea);
+            })
+
+            if (!this.loading && this.controlsVisible) {
+              Column() {
+                this.topControls()
+                Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
+              }
+              .width('100%').height('100%')
+              .hitTestBehavior(HitTestMode.Transparent)
             }
-            this.initializeReader(controller);
           }
-        })
+          .width('100%').layoutWeight(1)
+          .padding({ left: this.safeLeft, right: this.safeRight })
+          if (!this.loading) this.readerFooter()
+        }
         .width('100%').height('100%')
-        .onClick(() => { this.toggleReaderControls(); })
       } else {
         Column() {
           Text(this.status).fontSize(15).fontColor(this.palette().text)
@@ -642,52 +908,10 @@ struct Reader {
         .backgroundColor(this.palette().overlay).hitTestBehavior(HitTestMode.None)
       }
 
-      if (!this.loading && this.readerAvailable && this.controlsVisible) {
-        Column() {
-          this.topControls()
-          Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
-          if (this.status.length > 0 || this.pageFooter.length > 0) {
-            Column() {
-              if (this.status.length > 0) {
-                Text(this.status).fontSize(11).fontColor(this.palette().text)
-                  .maxLines(2).width('100%').textAlign(TextAlign.Center)
-              }
-              if (this.pageFooter.length > 0) {
-                Text(this.pageFooter).fontSize(11).fontColor(this.palette().secondaryText)
-                  .width('100%').textAlign(TextAlign.Center)
-              }
-            }
-            .width('100%')
-            .padding({ left: 12 + this.safeLeft,
-              right: 12 + this.safeRight, top: 8,
-              bottom: 8 + this.safeBottom })
-            .backgroundColor(this.palette().overlay)
-          }
-        }
-        .width('100%').height('100%')
-        .hitTestBehavior(HitTestMode.Transparent)
-      }
-
       if (this.catalogVisible) this.catalogPanel()
     }
     .width('100%').height('100%').backgroundColor(this.palette().page)
     .expandSafeArea([SafeAreaType.SYSTEM],
       [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-    .onAreaChange((oldArea: Area, newArea: Area) => {
-      const width = parseFloat(newArea.width.toString());
-      const height = parseFloat(newArea.height.toString());
-      if (!Number.isFinite(width) || !Number.isFinite(height) ||
-          width <= 0 || height <= 0 ||
-          (Math.abs(width - this.viewportWidthVp) < 0.5 &&
-           Math.abs(height - this.viewportHeightVp) < 0.5)) return;
-      this.viewportWidthVp = width;
-      this.viewportHeightVp = height;
-      if (this.resizeTimer !== -1) clearTimeout(this.resizeTimer);
-      this.resizeTimer = setTimeout(() => {
-        this.resizeTimer = -1;
-        this.applyPageConfig(true);
-        refreshReaderWindowInsets();
-      }, 120);
-    })
   }
 }

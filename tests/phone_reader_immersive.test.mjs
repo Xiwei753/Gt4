@@ -8,6 +8,8 @@ const appearance = read(
   'harmony/entry/src/main/ets/services/ReaderWindowAppearance.ts');
 const reader = read('harmony/entry/src/main/ets/pages/Reader.ets');
 const index = read('harmony/entry/src/main/ets/pages/Index.ets');
+const readerState = read(
+  'harmony/entry/src/main/ets/services/ReaderKitStateStore.ts');
 
 assert.ok(appearance.includes('window.getLastWindow') &&
   appearance.includes('setWindowLayoutFullScreen(true)') &&
@@ -35,6 +37,44 @@ assert.ok(reader.includes('safeTop') && reader.includes('safeBottom') &&
   reader.includes('top: this.safeTop + 8') &&
   reader.includes('bottom: 8 + this.safeBottom'),
   'reader controls must avoid status bars, cutouts and the gesture area');
+assert.ok(reader.includes('this.readerInfoBar()') &&
+  reader.includes('this.readerFooter()') &&
+  reader.includes('top: this.safeTop + 5') &&
+  reader.includes('bottom: 8 + this.safeBottom') &&
+  reader.includes('this.getUIContext().vp2px(this.viewportHeightVp)'),
+  'the reader must reserve live safe-area space for its fixed header and footer');
+assert.ok(reader.includes('new Date()') && reader.includes('now.getHours()') &&
+  reader.includes('now.getMinutes()') && reader.includes('batteryInfo.batterySOC') &&
+  reader.includes('60000 - (now % 60000)') &&
+  reader.includes('clearInfoRefreshTimer()'),
+  'the header must read local time and battery and refresh only while visible');
+assert.ok(reader.includes("inputConsumer.on('keyPressed'") &&
+  reader.includes('KeyCode.KEYCODE_VOLUME_UP') &&
+  reader.includes('KeyCode.KEYCODE_VOLUME_DOWN') &&
+  reader.includes('action: 1') && reader.includes('isRepeat: false') &&
+  reader.includes("inputConsumer.off('keyPressed'") &&
+  reader.includes('this.controller.flipPage(isNext)'),
+  'volume keys must consume one press and call Reader Kit, with unsubscribe support');
+assert.ok(reader.includes('!this.catalogVisible && !this.settingsVisible') &&
+  reader.includes('this.pageInForeground && this.readerReady') &&
+  reader.includes('private setVolumeKeyPaging(enabled: boolean)'),
+  'volume paging must be limited to a ready foreground reader outside overlays');
+assert.ok(appearance.includes("setSpecificSystemBarEnabled('status', visible, false)") &&
+  appearance.includes("page === 'shelf'") &&
+  appearance.includes('this.setStatusBarVisible(win, true)') &&
+  !appearance.includes("setSpecificSystemBarEnabled('navigationIndicator', false"),
+  'the reader may hide only status and must restore it on the shelf');
+assert.ok(readerState.includes('volumeKeyPaging: true') &&
+  readerState.includes('typeof value.volumeKeyPaging === \'boolean\'') &&
+  readerState.includes('volumeKeyPaging: settings.volumeKeyPaging'),
+  'volume paging must default on and persist compatibly with saved settings');
+const readerBuildPosition = reader.indexOf('build() {');
+const infoBarPosition = reader.indexOf('this.readerInfoBar()', readerBuildPosition);
+const readPagePosition = reader.indexOf('ReadPageComponent({', infoBarPosition);
+const footerPosition = reader.indexOf('this.readerFooter()', readPagePosition);
+assert.ok(infoBarPosition > readerBuildPosition &&
+  readPagePosition > infoBarPosition && footerPosition > readPagePosition,
+  'Reader Kit content must sit between the fixed info bar and footer');
 assert.ok(reader.includes('Stack({ alignContent: Alignment.TopStart })') &&
   reader.includes('Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)'),
   'reader controls must remain at the top and bottom of the viewport');

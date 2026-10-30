@@ -21,13 +21,15 @@ export interface ReaderKitSettings {
   lineHeight: number;
   nightMode: boolean;
   flipMode: string;
+  volumeKeyPaging: boolean;
 }
 
 const DEFAULT_SETTINGS: ReaderKitSettings = {
   fontSize: 20,
   lineHeight: 1.6,
   nightMode: true,
-  flipMode: '1'
+  flipMode: '1',
+  volumeKeyPaging: true
 };
 
 export class ReaderKitStateStore {
@@ -106,7 +108,9 @@ export class ReaderKitStateStore {
               DEFAULT_SETTINGS.lineHeight),
             nightMode: typeof value.nightMode === 'boolean' ?
               value.nightMode : DEFAULT_SETTINGS.nightMode,
-            flipMode: value.flipMode === '0' ? '0' : '1'
+            flipMode: value.flipMode === '0' ? '0' : '1',
+            volumeKeyPaging: typeof value.volumeKeyPaging === 'boolean' ?
+              value.volumeKeyPaging : DEFAULT_SETTINGS.volumeKeyPaging
           };
         } catch (error) {
           return Object.assign({}, DEFAULT_SETTINGS);
@@ -123,7 +127,8 @@ export class ReaderKitStateStore {
         lineHeight: this.clampNumber(settings.lineHeight, 1.1, 2.4,
           DEFAULT_SETTINGS.lineHeight),
         nightMode: settings.nightMode,
-        flipMode: settings.flipMode === '0' ? '0' : '1'
+        flipMode: settings.flipMode === '0' ? '0' : '1',
+        volumeKeyPaging: settings.volumeKeyPaging
       } as ReaderKitSettings));
       await store.flush();
     });
