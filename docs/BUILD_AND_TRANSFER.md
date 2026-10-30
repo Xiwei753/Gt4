@@ -387,6 +387,14 @@ watch: entry-default-debug-signed.hap size=419960
 - 评审修正：阅读位置改为约 256 字节可见段落粒度并保存/恢复段首字节；64 KiB 读取窗口按 UTF-8 边界截断，窗口切换不产生替换字符；待确认 APPLY 只在手表侧确认后推进基线，断连不会回滚手机新进度；延迟 APPLY 会先重读手机本地进度并做三方判定，不静默覆盖新进度；返回书架时同一设备触发一次节流同步；刷新设备列表保留用户选择；手表 APPLY 允许合法回退；冲突键在提示结束后 `finally` 释放；last-read 时间戳独立存 `suyue.last.at`；同书 Preferences 读改写通过模块级队列跨 Store 实例串行，已在远程 APPLY 前完成的本地写不会反向覆盖远程新进度；远程 APPLY 前先发 prepare 事件，活动 Reader 取消旧 debounce 并提升写入代次，本地 save 在调度时捕获代次、队列执行时丢弃过期代次，避免 remote(300) 后旧定时器(100) 反向覆盖；之后真实滚动仍可保存新位置；markSynced/markPending 只更新同步元数据，不再提升写入代次，避免同位置同步取消尚未落盘的本地新进度，只有实际采用远端位置的 applyRemote 才作废旧写入。未改协议、章节引擎或数据库。剩余风险是设备端列表滚动/重排时序，真机验收仍未完成。
 - **未做**：Pocket 2 真机阅读、GT 4 真机安装/阅读、双端 Wear Engine 进度同步、锁屏/后台/断连场景。**不得据此标记 issue #18 完成。**
 
+### issue #22 Reader Kit 重建（2026-10-30，合成文件真机验收完成）
+
+- 新分支 `codex/issue-22-reader-kit` 从 `origin/main` 的 `d501042de981ed68709532ba9adf803158ce6018` 创建；没有 cherry-pick issue #21。旧 `codex/issue-21` 本地与远端分支引用均已删除；旧 worktree 保留为 detached checkout，未纳入新分支。
+- 最终手机 debug HAP 编译成功，`VERIFY_APP_OK`、SHA-256 摘要校验通过、`COMPILED_STRING_OK`；包大小 690,531 字节，SHA-256 `75e507b4dc650aee5ecc1bf936189cd4e41d861cbcd5de474fc68ad112d77909`。通过 `hdc install -r` 更新安装并启动成功，未卸载应用。
+- 定向检查通过：`tests/phone_reader_sync.test.mjs`、`tests/phone_reader_immersive.test.mjs`、`tests/source-contract.test.mjs`、`tests/reading_sync_policy.test.mjs`、`tests/progress_write_queue.test.mjs`、`tests/chapter_detection.test.mjs`。
+- HarmonyOS LEM-AL00 / API 26 真机上，用临时合成 TXT 与 EPUB 验证 Reader Kit 打开、横向手势翻页、目录展示和离开后续读；EPUB 从 `SYNTHETIC_PAGE_0000` 翻至 `0003`，重新打开后仍在 `0003`。测试书、Reader Kit 位置记录和源码夹具均已清理。最终 HAP 再次安装启动，书架只显示「书架」「传书」两 Tab，无测试书残留。
+- Reader Kit 的 `resourceIndex + startDomPos` 仍无法可靠映射为手表协议的 UTF-8 字节偏移，因此该类阅读位置保存在手机本机，不伪造手表进度，跨端进度同步暂停。实际文件选择器导入链路、更多真实 EPUB、Pocket 2/GT 4 及双端同步仍待验收；issue #22 保持打开。
+
 ## 现有源码不能直接认定兼容的地方
 
 - `watch/huawei/watch-lite/build-profile.json5` 暂时采用轻智能手表示例的 `6.1.1(24)` 模板数值，但**没有确认为 GT 4 开发安装实际可用的版本**。

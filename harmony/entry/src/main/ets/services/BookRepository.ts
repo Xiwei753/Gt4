@@ -6,6 +6,14 @@ import { fileIo } from '@kit.CoreFileKit';
 import { BookMeta, BookStatus } from '../model/BookModels';
 
 const LIBRARY_FILE = 'library.json';
+const SHELF_SETTINGS_FILE = 'shelf_settings.json';
+
+export type ShelfSortMode = 'recent' | 'title' | 'imported' | 'manual';
+
+interface ShelfSettings {
+  sortMode: ShelfSortMode;
+  manualOrder: string[];
+}
 
 export class BookRepository {
   private context: common.UIAbilityContext;
@@ -75,6 +83,12 @@ export class BookRepository {
     const idx = books.findIndex((b) => b.bookId === meta.bookId);
     if (idx >= 0 && books[idx].sha256 === meta.sha256) {
       books[idx].updatedAt = meta.updatedAt;
+      if (meta.readerFilePath) {
+        books[idx].readerFilePath = meta.readerFilePath;
+      }
+      if (meta.readerSha256) {
+        books[idx].readerSha256 = meta.readerSha256;
+      }
       this.writeIndex(books);
       return;
     }
@@ -96,6 +110,13 @@ export class BookRepository {
     } catch (e) {
       // 文件可能已不存在；索引清理仍然继续。
     }
+    if (target.readerFilePath && target.readerFilePath !== target.filePath) {
+      try {
+        fileIo.unlinkSync(target.readerFilePath);
+      } catch (e) {
+        // 清理索引时也继续处理缺失的源文件。
+      }
+    }
     books.splice(idx, 1);
     this.writeIndex(books);
     return true;
@@ -109,6 +130,70 @@ export class BookRepository {
     target[0].status = status;
     if (lastError !== undefined) target[0].lastError = lastError;
     this.writeIndex(books);
+  }
+
+  markProgressMapping(bookId: string,
+    mapping: 'utf8_byte' | 'readerkit_unmapped'): void {
+    const books = this.readIndex();
+    const target = books.find((book) => book.bookId === bookId);
+    if (!target || target.progressMapping === mapping) return;
+    target.progressMapping = mapping;
+    this.writeIndex(books);
+  }
+
+  getShelfSettings(): ShelfSettings {
+    try {
+      const text = this.readTextFile(this.context.filesDir + '/' +
+        SHELF_SETTINGS_FILE);
+      const value = JSON.parse(text) as ShelfSettings;
+      const validModes: ShelfSortMode[] = [
+        'recent', 'title', 'imported', 'manual'
+      ];
+      return {
+        sortMode: validModes.indexOf(value.sortMode) >= 0 ?
+          value.sortMode : 'recent',
+        manualOrder: Array.isArray(value.manualOrder) ?
+          value.manualOrder.filter((id) => typeof id === 'string') : []
+      };
+    } catch (error) {
+      return { sortMode: 'recent', manualOrder: [] };
+    }
+  }
+
+  setShelfSortMode(mode: ShelfSortMode): void {
+    const settings = this.getShelfSettings();
+    settings.sortMode = mode;
+    this.writeShelfSettings(settings);
+  }
+
+  setShelfManualOrder(bookIds: string[]): void {
+    const settings = this.getShelfSettings();
+    settings.manualOrder = bookIds.slice();
+    this.writeShelfSettings(settings);
+  }
+
+  private writeShelfSettings(settings: ShelfSettings): void {
+    const file = fileIo.openSync(this.context.filesDir + '/' +
+      SHELF_SETTINGS_FILE, fileIo.OpenMode.READ_WRITE |
+      fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+    try {
+      fileIo.writeSync(file.fd, new TextEncoderLite().encode(
+        JSON.stringify(settings)).buffer);
+    } finally {
+      fileIo.closeSync(file.fd);
+    }
+  }
+
+  private readTextFile(path: string): string {
+    const file = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
+    try {
+      const stat = fileIo.statSync(path);
+      const buffer = new ArrayBuffer(Math.max(stat.size, 0));
+      fileIo.readSync(file.fd, buffer);
+      return bufferToString(buffer);
+    } finally {
+      fileIo.closeSync(file.fd);
+    }
   }
 
   private fileExists(path: string): boolean {

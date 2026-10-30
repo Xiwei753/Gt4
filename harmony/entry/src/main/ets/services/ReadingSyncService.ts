@@ -185,7 +185,10 @@ export class ReadingSyncService {
   }
 
   private async sendState(requestId?: string): Promise<void> {
-    const books = this.repository.list();
+    // Reader Kit 的 spine/domPos 不能当成协议中的 UTF-8 字节偏移。
+    // 映射未经验证的书籍不参与位置同步，避免把旧字节游标伪装成当前页。
+    const books = this.repository.list().filter((book) =>
+      book.progressMapping !== 'readerkit_unmapped');
     const summaries = await this.progressStore.list(books);
     const last = await this.progressStore.loadLastRecord();
     const lastBook = last !== null ?
@@ -319,6 +322,7 @@ export class ReadingSyncService {
         // 手机上没这本书，或同名不同内容：忽略，绝不创建空书。
         continue;
       }
+      if (book.progressMapping === 'readerkit_unmapped') continue;
       if (remote.offset > book.bytes) continue;
       if (!this.isUtf8Boundary(book, remote.offset)) continue;
       const local = this.findSummary(localSummaries, remote.bookId);
@@ -383,9 +387,14 @@ export class ReadingSyncService {
         }
       }
     }
-    this.status(applied > 0 ?
+    const unmappedCount = this.repository.list().filter((book) =>
+      book.progressMapping === 'readerkit_unmapped').length;
+    const skipped = unmappedCount > 0 ?
+      '；Reader Kit 位置暂未换算为字节偏移，跳过 ' +
+        unmappedCount + ' 本' : '';
+    this.status((applied > 0 ?
       '进度同步：已采用手表进度 ' + applied + ' 本' :
-      '进度同步：已交换摘要', true);
+      '进度同步：已交换可映射书籍摘要') + skipped, true);
   }
 
   private async resolveConflict(book: BookMeta,
@@ -439,7 +448,8 @@ export class ReadingSyncService {
     if (!bookId || !sha256 || typeof offset !== 'number') return;
     const books = this.repository.list();
     const book = this.findBook(books, bookId);
-    if (book === null || book.sha256 !== sha256 ||
+    if (book === null || book.progressMapping === 'readerkit_unmapped' ||
+        book.sha256 !== sha256 ||
         offset > book.bytes) {
       return;
     }

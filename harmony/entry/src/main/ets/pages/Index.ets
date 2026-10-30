@@ -16,17 +16,18 @@ import { WATCH_PEER, PHONE_SELF,
   isConfigured } from '../model/PeerIdentity';
 import { loadPeerIdentities } from '../services/PeerIdentityLoader';
 import { importBook } from '../services/BookImportService';
-import { BookRepository } from '../services/BookRepository';
-import { ReadingProgressStore } from '../services/ReadingProgressStore';
+import { BookRepository, ShelfSortMode } from '../services/BookRepository';
+import { ReadingProgressStore, ReadingSummary }
+  from '../services/ReadingProgressStore';
+import { ReaderKitStateStore } from '../services/ReaderKitStateStore';
+import { exportReaderDiagnostics, recordReaderDiagnostic }
+  from '../services/ReaderDiagnostics';
 import { WearDeviceService, WearDeviceListResult } from '../services/WearDeviceService';
 import { BookTransferService } from '../services/BookTransferService';
 import { ReadingSyncService } from '../services/ReadingSyncService';
 import { deviceNotice, planRetry, MAX_AUTO_RETRIES,
   runDeviceRefresh } from '../services/WearAuthPolicy';
 import { restoreShelfWindow } from '../services/ReaderWindowAppearance';
-
-// 返回书架时只做一次节流同步，不在滚动/每次刷新里发消息。
-const PROGRESS_SYNC_THROTTLE_MS = 2000;
 
 // 双端身份严格分离（issue #13）：
 //   WATCH_PEER：对端 GT 4 Lite 身份，手机发送/注册回执时
@@ -39,6 +40,11 @@ const PROGRESS_SYNC_THROTTLE_MS = 2000;
 @Component
 struct Index {
   @State private books: BookMeta[] = [];
+  @State private progressSummaries: ReadingSummary[] = [];
+  @State private activeTab: string = 'shelf';
+  @State private sortMode: ShelfSortMode = 'recent';
+  @State private selectedTransferBookId: string = '';
+  @State private diagnosticsText: string = '';
   @State private pickedName: string = '尚未选择书籍';
   @State private pickStatus: string = '可选择 TXT 或 EPUB 文件';
   @State private busy: boolean = false;
@@ -73,7 +79,6 @@ struct Index {
   // 时一并清理，绝不做亚秒级连续请求。
   private retryTimer: number = -1;
   private autoRetryCount: number = 0;
-  private lastProgressSyncAt: number = 0;
 
   private getRepository(): BookRepository {
     if (this.repository === null) {
@@ -102,6 +107,7 @@ struct Index {
         this.getRepository());
       this.syncService.setStatusListener((text: string, ok: boolean) => {
         this.syncText = text;
+        recordReaderDiagnostic(context, 'sync', ok ? 'ok' : 'fail');
       });
     }
     return this.deviceService;
@@ -129,7 +135,10 @@ struct Index {
     if (this.syncService !== null) {
       this.syncService.setActiveBook('');
     }
-    this.refreshDevices();
+    recordReaderDiagnostic(
+      this.getUIContext().getHostContext() as common.UIAbilityContext,
+      'app', 'foreground');
+    if (this.activeTab === 'transfer') this.refreshDevices();
   }
 
   // issue #6 P0-B：切后台/页面退出时，取消任何在途发现的自动重试定时器，
@@ -152,19 +161,110 @@ struct Index {
   }
 
   private refresh(): void {
-    this.books = this.getRepository().list();
+    const repository = this.getRepository();
+    const settings = repository.getShelfSettings();
+    this.sortMode = settings.sortMode;
+    this.books = this.sortBooks(repository.list(), settings.sortMode,
+      settings.manualOrder);
   }
 
   private async refreshProgress(): Promise<void> {
     try {
       const summaries = await this.getProgressStore().list(this.books);
+      this.progressSummaries = summaries;
       const ids: string[] = [];
       for (let i = 0; i < summaries.length; i++) {
         ids.push(summaries[i].bookId);
       }
       this.readingBookIds = ids;
+      const last = await this.getProgressStore().loadLastRecord();
+      if (last !== null) {
+        for (let i = 0; i < this.progressSummaries.length; i++) {
+          if (this.progressSummaries[i].bookId === last.bookId) {
+            this.progressSummaries[i].updatedAt = Math.max(
+              this.progressSummaries[i].updatedAt, last.updatedAt);
+          }
+        }
+      }
+      if (last !== null && this.selectedTransferBookId.length === 0) {
+        this.selectedTransferBookId = last.bookId;
+      }
+      const settings = this.getRepository().getShelfSettings();
+      this.books = this.sortBooks(this.getRepository().list(),
+        settings.sortMode, settings.manualOrder);
     } catch (error) {
       this.readingBookIds = [];
+      this.progressSummaries = [];
+    }
+  }
+
+  private sortBooks(books: BookMeta[], mode: ShelfSortMode,
+    manualOrder: string[]): BookMeta[] {
+    const sorted = books.slice();
+    sorted.sort((a: BookMeta, b: BookMeta): number => {
+      if (mode === 'title') {
+        const left = a.title.toLowerCase();
+        const right = b.title.toLowerCase();
+        return left < right ? -1 : left > right ? 1 : 0;
+      }
+      if (mode === 'manual') {
+        const leftIndex = manualOrder.indexOf(a.bookId);
+        const rightIndex = manualOrder.indexOf(b.bookId);
+        const left = leftIndex >= 0 ? leftIndex : 1000000;
+        const right = rightIndex >= 0 ? rightIndex : 1000000;
+        if (left !== right) return left - right;
+      }
+      if (mode === 'recent') {
+        const left = this.readUpdatedAt(a.bookId);
+        const right = this.readUpdatedAt(b.bookId);
+        if (left !== right) return right - left;
+      }
+      return b.importedAt - a.importedAt;
+    });
+    return sorted;
+  }
+
+  private readUpdatedAt(bookId: string): number {
+    for (let i = 0; i < this.progressSummaries.length; i++) {
+      if (this.progressSummaries[i].bookId === bookId) {
+        return this.progressSummaries[i].updatedAt;
+      }
+    }
+    return 0;
+  }
+
+  private chooseSort(mode: ShelfSortMode): void {
+    this.getRepository().setShelfSortMode(mode);
+    this.sortMode = mode;
+    const settings = this.getRepository().getShelfSettings();
+    this.books = this.sortBooks(this.getRepository().list(), mode,
+      settings.manualOrder);
+  }
+
+  private moveBook(book: BookMeta, delta: number): void {
+    const order: string[] = [];
+    for (let i = 0; i < this.books.length; i++) {
+      order.push(this.books[i].bookId);
+    }
+    const index = order.indexOf(book.bookId);
+    const target = index + delta;
+    if (index < 0 || target < 0 || target >= order.length) return;
+    const current = order[index];
+    order[index] = order[target];
+    order[target] = current;
+    const repository = this.getRepository();
+    repository.setShelfManualOrder(order);
+    repository.setShelfSortMode('manual');
+    this.sortMode = 'manual';
+    this.books = this.sortBooks(repository.list(), 'manual', order);
+  }
+
+  private selectTab(tab: string): void {
+    this.activeTab = tab;
+    if (tab === 'transfer') {
+      this.refresh();
+      this.refreshProgress();
+      this.refreshDevices();
     }
   }
 
@@ -176,13 +276,7 @@ struct Index {
     if (this.syncService !== null) {
       this.syncService.setActiveBook(book.bookId);
     }
-    const device = this.devices[this.selectedDevice];
-    if (this.syncService !== null && device !== undefined &&
-        this.receiverReady && isConfigured(WATCH_PEER)) {
-      this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
-        this.syncText = '打开前同步失败（不影响阅读）：' + error.message;
-      });
-    }
+    this.selectedTransferBookId = book.bookId;
     router.pushUrl({
       url: 'pages/Reader',
       params: { bookId: book.bookId }
@@ -237,11 +331,7 @@ struct Index {
             this.selectedDevice = restored;
             const device = this.devices[restored];
             if (!this.receiverReady) {
-              this.registerReceiverFor(device).then((ok: boolean) => {
-                if (ok) this.requestProgressSync(device);
-              });
-            } else {
-              this.requestProgressSync(device);
+              this.registerReceiverFor(device);
             }
           } else {
             this.selectedDevice = -1;
@@ -283,17 +373,6 @@ struct Index {
     }
   }
 
-  // 回到书架/恢复同一台设备时触发一次节流交换；不重注册、不按滚动发送。
-  private requestProgressSync(device: TargetDevice): void {
-    if (this.syncService === null || !this.receiverReady) return;
-    const now = Date.now();
-    if (now - this.lastProgressSyncAt < PROGRESS_SYNC_THROTTLE_MS) return;
-    this.lastProgressSyncAt = now;
-    this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
-      this.syncText = '同步失败（不影响阅读）：' + error.message;
-    });
-  }
-
   // 注册/恢复同一个手表 → 手机消息接收回调。进度消息优先，
   // 未识别为进度的才交给传书状态机。
   private async registerReceiverFor(device: TargetDevice): Promise<boolean> {
@@ -333,12 +412,7 @@ struct Index {
       this.deviceStatus += '；手表 Lite 公钥指纹未配置或格式错误，' +
         '发送将保持禁用';
     }
-    const ok = await this.registerReceiverFor(device);
-    if (ok && this.syncService !== null) {
-      this.syncService.syncAll(device, WATCH_PEER).catch((error: Error) => {
-        this.syncText = '重连同步失败（不影响阅读）：' + error.message;
-      });
-    }
+    await this.registerReceiverFor(device);
   }
 
   private async chooseBook(): Promise<void> {
@@ -360,13 +434,16 @@ struct Index {
       const result = await importBook(context, uri);
       this.busy = false;
       if (!result.ok) {
+        recordReaderDiagnostic(context, 'import', 'fail');
         this.pickStatus = '导入失败：' + (result.reason || '未知原因');
         return;
       }
+      recordReaderDiagnostic(context, 'import', 'ok');
       this.pickStatus = '已导入：' + result.book!.title +
         '（' + result.book!.bytes + ' 字节，' +
         result.book!.chapters.length + ' 章）';
       this.refresh();
+      this.refreshProgress();
     } catch (error) {
       this.busy = false;
       this.pickStatus = '文件选择失败，请查看日志';
@@ -387,6 +464,9 @@ struct Index {
       if (result.index === 1) {
         this.getRepository().remove(book.bookId);
         await this.getProgressStore().remove(book.bookId);
+        await new ReaderKitStateStore(
+          this.getUIContext().getHostContext() as common.UIAbilityContext)
+          .removeLocation(book.bookId);
         this.refresh();
         this.refreshProgress();
         this.pickStatus = '已删除《' + book.title + '》';
@@ -445,10 +525,16 @@ struct Index {
     this.sending = false;
     this.activeTransferId = '';
     if (ok) {
+      recordReaderDiagnostic(
+        this.getUIContext().getHostContext() as common.UIAbilityContext,
+        'transfer', 'ok');
       this.transferText = '《' + book.title + '》手表已确认入库';
       this.getRepository().markStatus(book.bookId,
         BookStatus.SENT);
     } else {
+      recordReaderDiagnostic(
+        this.getUIContext().getHostContext() as common.UIAbilityContext,
+        'transfer', 'fail');
       this.transferText = '发送失败：' + lastFailure;
       this.getRepository().markStatus(book.bookId,
         BookStatus.TRANSFER_FAILED,
@@ -479,160 +565,295 @@ struct Index {
     await this.syncService.syncAll(device, WATCH_PEER);
   }
 
+  private findBook(bookId: string): BookMeta | null {
+    for (let i = 0; i < this.books.length; i++) {
+      if (this.books[i].bookId === bookId) return this.books[i];
+    }
+    return null;
+  }
+
   @Builder
-  bookItem(book: BookMeta) {
+  shelfBookCard(book: BookMeta) {
+    Column() {
+      Row() {
+        Column() {
+          Text(book.title).fontSize(17).fontWeight(FontWeight.Medium)
+            .fontColor('#F4F4F5').maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(book.kind.toUpperCase() + ' · ' + book.chapters.length +
+            ' 章 · ' + Math.ceil(book.bytes / 1024) + ' KB')
+            .fontSize(12).fontColor('#9CA3AF').margin({ top: 6 })
+        }
+        .alignItems(HorizontalAlign.Start).layoutWeight(1)
+        Text(book.status === BookStatus.SENT ? '已传书' : '本机可读')
+          .fontSize(11).fontColor('#A7F3D0')
+          .padding({ left: 9, right: 9, top: 5, bottom: 5 })
+          .backgroundColor('#15382E').borderRadius(10)
+      }
+      .width('100%').onClick(() => { this.openReader(book); })
+
+      Row() {
+        Button(this.isReading(book.bookId) ? '继续阅读' : '开始阅读')
+          .fontSize(13).height(34).backgroundColor('#314A69')
+          .onClick(() => { this.openReader(book); })
+        if (this.sortMode === 'manual') {
+          Button('↑').fontSize(12).height(34).margin({ left: 8 })
+            .onClick(() => { this.moveBook(book, -1); })
+          Button('↓').fontSize(12).height(34).margin({ left: 6 })
+            .onClick(() => { this.moveBook(book, 1); })
+        }
+        Button('删除').fontSize(12).height(34).margin({ left: 8 })
+          .backgroundColor('#3A2529').fontColor('#FCA5A5')
+          .onClick(() => { this.removeBook(book); })
+      }
+      .width('100%').margin({ top: 14 })
+    }
+    .alignItems(HorizontalAlign.Start).width('100%').padding(16)
+    .backgroundColor('#20242C').borderRadius(16)
+  }
+
+  @Builder
+  shelfPanel() {
+    Scroll() {
+      Column({ space: 16 }) {
+        Column({ space: 6 }) {
+          Text('素阅').fontSize(30).fontWeight(FontWeight.Bold)
+            .fontColor('#F4F4F5')
+          Text('本地书架 · 阅读与传书共用同一书库')
+            .fontSize(14).fontColor('#9CA3AF')
+        }
+        .alignItems(HorizontalAlign.Start).width('100%')
+
+        Row() {
+          Column() {
+            Text('你的书架').fontSize(18).fontWeight(FontWeight.Medium)
+              .fontColor('#F4F4F5')
+            Text(this.books.length + ' 本书 · 点卡片继续阅读')
+              .fontSize(12).fontColor('#A7ABB4').margin({ top: 4 })
+          }
+          .alignItems(HorizontalAlign.Start).layoutWeight(1)
+          Button(this.busy ? '导入中…' : '导入 TXT / EPUB')
+            .height(38).enabled(!this.busy)
+            .onClick(() => { this.chooseBook(); })
+        }
+        .width('100%').padding(16).backgroundColor('#20242C')
+        .borderRadius(16)
+
+        if (this.pickStatus !== '可选择 TXT 或 EPUB 文件') {
+          Text(this.pickStatus).fontSize(12).fontColor('#A7ABB4')
+            .width('100%').maxLines(2)
+        }
+
+        Row() {
+          Button('最近阅读').fontSize(12).height(32)
+            .backgroundColor(this.sortMode === 'recent' ?
+              '#314A69' : '#20242C')
+            .onClick(() => { this.chooseSort('recent'); })
+          Button('名称').fontSize(12).height(32).margin({ left: 6 })
+            .backgroundColor(this.sortMode === 'title' ?
+              '#314A69' : '#20242C')
+            .onClick(() => { this.chooseSort('title'); })
+          Button('导入时间').fontSize(12).height(32).margin({ left: 6 })
+            .backgroundColor(this.sortMode === 'imported' ?
+              '#314A69' : '#20242C')
+            .onClick(() => { this.chooseSort('imported'); })
+          Button('手动').fontSize(12).height(32).margin({ left: 6 })
+            .backgroundColor(this.sortMode === 'manual' ?
+              '#314A69' : '#20242C')
+            .onClick(() => { this.chooseSort('manual'); })
+        }
+        .width('100%')
+
+        if (this.books.length === 0) {
+          Column() {
+            Text('书架还是空的').fontSize(17).fontColor('#E5E7EB')
+            Text('导入 TXT 或 EPUB 后，书籍会保存在素阅的私有书库中。')
+              .fontSize(13).fontColor('#9CA3AF').margin({ top: 6 })
+          }
+          .alignItems(HorizontalAlign.Start).width('100%')
+          .padding(18).backgroundColor('#20242C').borderRadius(16)
+        } else {
+          ForEach(this.books, (book: BookMeta) => {
+            this.shelfBookCard(book)
+          }, (book: BookMeta) => book.bookId)
+        }
+
+        Row() {
+          Text('诊断日志只含阶段、时间和错误码，不记录正文、书名或路径。')
+            .fontSize(11).fontColor('#8E96A3').layoutWeight(1)
+          Button('导出日志').fontSize(12).height(32)
+            .onClick(() => { this.exportDiagnostics(); })
+        }
+        .width('100%').padding({ top: 8, bottom: 8 })
+        if (this.diagnosticsText.length > 0) {
+          Text(this.diagnosticsText).fontSize(12).fontColor('#A7ABB4')
+            .width('100%')
+        }
+      }
+      .alignItems(HorizontalAlign.Start).width('100%')
+      .padding({ left: 20, right: 20, top: 24, bottom: 18 })
+    }
+    .layoutWeight(1).width('100%').scrollBar(BarState.Auto)
+  }
+
+  @Builder
+  transferBookOption(book: BookMeta) {
     Row() {
       Column() {
-        Text(book.title)
-          .fontSize(16)
-          .fontColor('#f2f2f2')
-          .maxLines(1)
-        Text(book.kind.toUpperCase() + ' · ' + book.bytes +
-          ' 字节 · ' + book.chapters.length + ' 章')
-          .fontSize(12)
-          .fontColor('#9ca3af')
-          .margin({ top: 4 })
+        Text(book.title).fontSize(14).fontColor('#F4F4F5')
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(book.kind.toUpperCase() + ' · ' + book.chapters.length + ' 章')
+          .fontSize(11).fontColor('#9CA3AF').margin({ top: 4 })
       }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-
-      Text(book.status)
-        .fontSize(12)
-        .fontColor(book.status === BookStatus.READY ?
-          '#4ade80' : '#f87171')
-
-      Button(this.isReading(book.bookId) ? '继续阅读' : '阅读')
-        .fontSize(12)
-        .height(28)
-        .backgroundColor('#344259')
-        .margin({ left: 8 })
-        .onClick(() => { this.openReader(book); })
-
-      Button('发送')
-        .fontSize(12)
-        .height(28)
-        .enabled(this.canSend() &&
-          this.canTransferBook(book))
-        .margin({ left: 8 })
-        .onClick(() => { this.sendBook(book); })
-
-      Text('删除')
-        .fontSize(13)
-        .fontColor('#f87171')
-        .margin({ left: 12 })
-        .onClick(() => { this.removeBook(book); })
+      .alignItems(HorizontalAlign.Start).layoutWeight(1)
+      Text(this.selectedTransferBookId === book.bookId ? '已选择' : '选择')
+        .fontSize(12).fontColor(this.selectedTransferBookId === book.bookId ?
+          '#93C5FD' : '#A7ABB4')
     }
-    .width('100%')
-    .padding(14)
-    .backgroundColor('#20242c')
-    .borderRadius(14)
+    .width('100%').padding(14).backgroundColor(
+      this.selectedTransferBookId === book.bookId ? '#26384C' : '#20242C')
+    .borderRadius(12).onClick(() => {
+      this.selectedTransferBookId = book.bookId;
+    })
+  }
+
+  @Builder
+  transferPanel() {
+    Scroll() {
+      Column({ space: 16 }) {
+        Column({ space: 6 }) {
+          Text('传书').fontSize(28).fontWeight(FontWeight.Bold)
+            .fontColor('#F4F4F5')
+          Text('从同一个本地书库选择书籍发送到 GT Lite')
+            .fontSize(14).fontColor('#9CA3AF')
+        }
+        .alignItems(HorizontalAlign.Start).width('100%')
+
+        Column({ space: 10 }) {
+          Row() {
+            Text('选择书籍').fontSize(18)
+              .fontWeight(FontWeight.Medium).fontColor('#F4F4F5')
+              .layoutWeight(1)
+            Text(this.books.length + ' 本').fontSize(12)
+              .fontColor('#9CA3AF')
+          }
+          .width('100%')
+          if (this.books.length === 0) {
+            Text('先到书架导入 TXT 或 EPUB。').fontSize(13)
+              .fontColor('#A7ABB4')
+          } else {
+            ForEach(this.books, (book: BookMeta) => {
+              this.transferBookOption(book)
+            }, (book: BookMeta) => book.bookId)
+          }
+          if (this.findBook(this.selectedTransferBookId) !== null) {
+            Button(this.sending ? '正在发送…' : '发送到已选手表')
+              .width('100%').height(42).enabled(this.canSend() &&
+                this.canTransferBook(this.findBook(
+                  this.selectedTransferBookId)!))
+              .onClick(() => {
+                const selected = this.findBook(this.selectedTransferBookId);
+                if (selected !== null) this.sendBook(selected);
+              })
+          }
+          if (this.sending) {
+            Button('取消发送').height(34).backgroundColor('#7F1D1D')
+              .onClick(() => { this.cancelSend(); })
+          }
+          Text(this.transferText).fontSize(13)
+            .fontColor(this.sending ? '#FACC15' : '#A7ABB4')
+            .width('100%')
+        }
+        .alignItems(HorizontalAlign.Start).width('100%')
+        .padding(16).backgroundColor('#16181D').borderRadius(16)
+
+        Column({ space: 10 }) {
+          Text('手表连接').fontSize(18).fontWeight(FontWeight.Medium)
+            .fontColor('#F4F4F5')
+          Text(this.deviceStatus).fontSize(13).fontColor('#A7ABB4')
+            .width('100%')
+          if (this.identityStatus.length > 0) {
+            Text(this.identityStatus).fontSize(12).fontColor('#FCA5A5')
+              .width('100%')
+          }
+          if (this.devices.length > 0) {
+            Row() {
+              ForEach(this.devices, (device: TargetDevice,
+                index: number) => {
+                Button(device.name)
+                  .fontSize(12).height(32)
+                  .backgroundColor(this.selectedDevice === index ?
+                    '#314A69' : '#101114')
+                  .margin({ right: 8 })
+                  .onClick(() => { this.selectDevice(index); })
+              }, (device: TargetDevice) => device.randomId)
+            }
+          }
+          Button(this.deviceBusy ? '正在查找…' : '刷新设备')
+            .fontSize(13).height(34).enabled(!this.deviceBusy)
+            .onClick(() => { this.refreshDevices(); })
+          if (this.findBook(this.selectedTransferBookId) !== null &&
+              this.findBook(this.selectedTransferBookId)!.progressMapping ===
+                'readerkit_unmapped') {
+            Text('所选书籍的 Reader Kit 位置暂不能换算为 UTF-8 字节偏移。这本书的进度同步会跳过，旧进度仍保留。')
+              .fontSize(12).fontColor('#FCD34D').width('100%')
+          }
+          Button('同步可映射书籍的阅读进度')
+            .fontSize(13).height(36)
+            .enabled(this.selectedDevice >= 0 && this.receiverReady &&
+              isConfigured(WATCH_PEER))
+            .onClick(() => { this.syncReadingProgress(); })
+          Text(this.syncText).fontSize(12).fontColor('#93C5FD')
+            .width('100%')
+        }
+        .alignItems(HorizontalAlign.Start).width('100%')
+        .padding(16).backgroundColor('#20242C').borderRadius(16)
+      }
+      .alignItems(HorizontalAlign.Start).width('100%')
+      .padding({ left: 20, right: 20, top: 24, bottom: 18 })
+    }
+    .layoutWeight(1).width('100%').scrollBar(BarState.Auto)
+  }
+
+  @Builder
+  bottomTabs() {
+    Row() {
+      Button('书架')
+        .layoutWeight(1).height(52).fontSize(14)
+        .fontColor(this.activeTab === 'shelf' ? '#F4F4F5' : '#8E96A3')
+        .backgroundColor(this.activeTab === 'shelf' ? '#26384C' : '#15171C')
+        .onClick(() => { this.selectTab('shelf'); })
+      Button('传书')
+        .layoutWeight(1).height(52).fontSize(14)
+        .margin({ left: 10 })
+        .fontColor(this.activeTab === 'transfer' ? '#F4F4F5' : '#8E96A3')
+        .backgroundColor(this.activeTab === 'transfer' ? '#26384C' : '#15171C')
+        .onClick(() => { this.selectTab('transfer'); })
+    }
+    .width('100%').padding({ left: 16, right: 16, top: 8, bottom: 10 })
+    .backgroundColor('#101114')
+  }
+
+  private async exportDiagnostics(): Promise<void> {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    try {
+      const saved = await exportReaderDiagnostics(context);
+      this.diagnosticsText = saved ? '诊断日志已导出。' : '已取消导出。';
+    } catch (error) {
+      recordReaderDiagnostic(context, 'diagnostics', 'export_fail');
+      this.diagnosticsText = '导出失败，请重试。';
+    }
   }
 
   build() {
-    Column({ space: 18 }) {
-      Text('素阅')
-        .fontSize(30)
-        .fontWeight(FontWeight.Bold)
-        .fontColor('#f2f2f2')
-
-      Text('手机书库 · 配套 GT 4 46mm')
-        .fontSize(15)
-        .fontColor('#9ca3af')
-
-      Column({ space: 12 }) {
-        Text('导入书籍').fontSize(22)
-          .fontWeight(FontWeight.Medium).fontColor('#f2f2f2')
-        Text(this.pickedName).fontSize(16).fontColor('#e8eaf0')
-        Text(this.pickStatus).fontSize(14).fontColor('#a7abb4')
-        Button('选择 TXT / EPUB')
-          .enabled(!this.busy)
-          .onClick(() => { this.chooseBook(); })
+    Column() {
+      if (this.activeTab === 'shelf') {
+        this.shelfPanel()
+      } else {
+        this.transferPanel()
       }
-      .alignItems(HorizontalAlign.Start)
-      .padding(20)
-      .width('100%')
-      .backgroundColor('#20242c')
-      .borderRadius(18)
-
-      Column({ space: 10 }) {
-        Text('书架（' + this.books.length + ' 本）').fontSize(22)
-          .fontWeight(FontWeight.Medium).fontColor('#f2f2f2')
-        if (this.books.length === 0) {
-          Text('书库为空。导入 TXT 或 EPUB 后会列在这里，重启不丢。')
-            .fontSize(14)
-            .fontColor('#a7abb4')
-        }
-        List() {
-          ForEach(this.books, (book: BookMeta) => {
-            ListItem() {
-              this.bookItem(book)
-            }
-          }, (book: BookMeta) => book.bookId)
-        }
-        .width('100%')
-        .divider({ strokeWidth: 8, color: '#101114' })
-      }
-      .alignItems(HorizontalAlign.Start)
-      .padding(20)
-      .width('100%')
-      .backgroundColor('#16181d')
-      .borderRadius(18)
-
-      Column({ space: 8 }) {
-        Text('发送到 GT 4').fontSize(22)
-          .fontWeight(FontWeight.Medium).fontColor('#f2f2f2')
-        Text(this.deviceStatus).fontSize(14).fontColor('#a7abb4')
-        if (this.identityStatus.length > 0) {
-          Text(this.identityStatus).fontSize(13)
-            .fontColor('#f87171')
-        }
-        if (this.devices.length > 0) {
-          Row() {
-            ForEach(this.devices, (device: TargetDevice,
-              index: number) => {
-              Button(device.name)
-                .fontSize(12)
-                .height(28)
-                .backgroundColor(this.selectedDevice === index ?
-                  '#344259' : '#101114')
-                .margin({ right: 8 })
-                .onClick(() => { this.selectDevice(index); })
-            }, (device: TargetDevice) => device.randomId)
-          }
-        }
-        Button(this.deviceBusy ? '发现中……' : '刷新设备')
-          .fontSize(13)
-          .height(28)
-          .enabled(!this.deviceBusy)
-          .onClick(() => { this.refreshDevices(); })
-        Button('同步阅读进度')
-          .fontSize(13)
-          .height(28)
-          .enabled(this.selectedDevice >= 0 && this.receiverReady &&
-            isConfigured(WATCH_PEER))
-          .onClick(() => { this.syncReadingProgress(); })
-        if (this.sending) {
-          Button('取消发送')
-            .fontSize(13)
-            .height(28)
-            .backgroundColor('#7f1d1d')
-            .onClick(() => { this.cancelSend(); })
-        }
-        Text(this.transferText).fontSize(14)
-          .fontColor(this.sending ? '#facc15' : '#a7abb4')
-        Text(this.syncText).fontSize(13)
-          .fontColor('#93c5fd')
-      }
-      .alignItems(HorizontalAlign.Start)
-      .padding(20)
-      .width('100%')
-      .backgroundColor('#20242c')
-      .borderRadius(18)
+      this.bottomTabs()
     }
-    .alignItems(HorizontalAlign.Start)
-    .padding(24)
-    .width('100%')
-    .height('100%')
-    .backgroundColor('#101114')
+    .width('100%').height('100%').backgroundColor('#101114')
   }
 }

@@ -29,6 +29,13 @@ export interface BookMeta {
   kind: BookKind;
   // 规范化后的 UTF-8 正文（沙箱私有目录内）文件路径。
   filePath: string;
+  // Reader Kit 使用的输入文件路径。TXT 指向规范化文本；EPUB 指向
+  // 导入时保留的原始 EPUB。旧 library.json 记录没有此字段时仍可读取。
+  readerFilePath?: string;
+  // Reader Kit 输入文件摘要，用于避免不同 EPUB 误用同一续读位置。
+  readerSha256?: string;
+  // Reader Kit 的 spine/domPos 目前无法可靠映射为手表协议的 UTF-8 字节偏移。
+  progressMapping?: 'utf8_byte' | 'readerkit_unmapped';
   // 规范化后正文字节数（UTF-8 字节，非字符数）。
   bytes: number;
   // 规范化后正文的 SHA-256（十六进制小写），用于传输校验与重复导入识别。
