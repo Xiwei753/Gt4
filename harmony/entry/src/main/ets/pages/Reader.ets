@@ -4,15 +4,18 @@ import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { router, display } from '@kit.ArkUI';
 import { bookParser, ReadPageComponent, readerCore } from '@kit.ReaderKit';
+import { APP_SYSTEM_DARK_KEY, APP_THEME_MODE_KEY, AppThemePalette,
+  AppThemeMode, isDarkTheme, themePalette } from '../services/AppTheme';
 import { BookMeta } from '../model/BookModels';
 import { BookRepository } from '../services/BookRepository';
 import { ReadingProgressStore } from '../services/ReadingProgressStore';
 import { ReaderKitLocation, ReaderKitSettings,
   ReaderKitStateStore } from '../services/ReaderKitStateStore';
+import { AppThemeStore, applyNativeThemeMode }
+  from '../services/AppThemeStore';
 import { recordReaderDiagnostic } from '../services/ReaderDiagnostics';
 import { enterReaderWindow, exitReaderWindow,
-  refreshReaderWindowInsets, restoreShelfWindow,
-  setReaderWindowTheme, ReaderWindowInsets }
+  refreshReaderWindowInsets, setAppWindowTheme, ReaderWindowInsets }
   from '../services/ReaderWindowAppearance';
 
 interface ReaderParams {
@@ -36,7 +39,10 @@ struct Reader {
   @State private catalogs: bookParser.CatalogItem[] = [];
   @State private fontSize: number = 20;
   @State private lineHeight: number = 1.6;
-  @State private nightMode: boolean = true;
+  @StorageLink(APP_THEME_MODE_KEY) @Watch('themeStateChanged')
+  private themeMode: AppThemeMode = 'system';
+  @StorageLink(APP_SYSTEM_DARK_KEY) @Watch('themeStateChanged')
+  private systemDark: boolean = false;
   @State private flipMode: string = '1';
   @State private pageFooter: string = '';
   @State private chapterTitle: string = '';
@@ -123,7 +129,8 @@ struct Reader {
 
   onPageShow(): void {
     const context = this.context();
-    enterReaderWindow(context, this.nightMode, this.onWindowInsets);
+    enterReaderWindow(context, this.themeMode, this.isDarkTheme(),
+      this.onWindowInsets);
     this.log('reader', 'foreground');
   }
 
@@ -174,9 +181,33 @@ struct Reader {
     const settings = await this.readerState.loadSettings();
     this.fontSize = settings.fontSize;
     this.lineHeight = settings.lineHeight;
-    this.nightMode = settings.nightMode;
     this.flipMode = settings.flipMode;
-    setReaderWindowTheme(this.nightMode);
+    setAppWindowTheme(this.themeMode, this.isDarkTheme());
+  }
+
+  private isDarkTheme(): boolean {
+    return isDarkTheme(this.themeMode, this.systemDark);
+  }
+
+  private palette(): AppThemePalette {
+    return themePalette(this.themeMode, this.systemDark);
+  }
+
+  private themeStateChanged(): void {
+    const dark = this.isDarkTheme();
+    setAppWindowTheme(this.themeMode, dark);
+    this.applyPageConfig(true);
+  }
+
+  private setThemeMode(mode: AppThemeMode): void {
+    this.themeMode = mode;
+    const context = this.context();
+    new AppThemeStore(context).save(mode).catch((error: Error) => {
+      this.log('theme', 'save_fail', this.errorCode(error));
+    });
+    applyNativeThemeMode(context, mode);
+    setAppWindowTheme(mode, isDarkTheme(mode, this.systemDark));
+    this.applyPageConfig(true);
   }
 
   private async initializeReader(
@@ -225,11 +256,12 @@ struct Reader {
         this.currentDomPos);
       this.log('reader', 'startPlay.ok');
       this.loading = false;
-      this.status = 'Reader Kit 本机续读已启用。该位置暂无法可靠换算为手表 UTF-8 偏移，因此这本书的进度同步已暂停。';
+      this.status = '';
     } catch (error) {
       const code = this.errorCode(error);
       this.log(this.failureStage(error), 'fail', code);
       this.loading = false;
+      this.controlsVisible = true;
       this.status = 'Reader Kit 打开失败（错误码 ' + code + '）。请检查 Reader Kit 服务、文件格式和设备系统版本；诊断日志不含书名或路径。';
     }
   }
@@ -291,11 +323,11 @@ struct Reader {
       fontName: 'HarmonyOS Sans',
       fontSize: this.fontSize,
       fontWeight: 400,
-      fontColor: this.nightMode ? '#E8EAF0' : '#1F2937',
+      fontColor: this.isDarkTheme() ? '#E8EAF0' : '#1F2937',
       fontPath: '',
       lineHeight: this.lineHeight,
-      nightMode: this.nightMode,
-      themeColor: this.nightMode ? '#101114' : '#F7F4EC',
+      nightMode: this.isDarkTheme(),
+      themeColor: this.isDarkTheme() ? '#101114' : '#F7F4EC',
       themeBgImg: '',
       flipMode: this.flipMode,
       scaledDensity: scale,
@@ -326,7 +358,7 @@ struct Reader {
     const settings: ReaderKitSettings = {
       fontSize: this.fontSize,
       lineHeight: this.lineHeight,
-      nightMode: this.nightMode,
+      nightMode: this.isDarkTheme(),
       flipMode: this.flipMode
     };
     if (this.readerState !== null) {
@@ -334,7 +366,7 @@ struct Reader {
         this.log('settings', 'save', this.errorCode(error));
       });
     }
-    setReaderWindowTheme(this.nightMode);
+    setAppWindowTheme(this.themeMode, this.isDarkTheme());
     this.applyPageConfig(true);
   }
 
@@ -350,8 +382,16 @@ struct Reader {
   }
 
   private toggleTheme(): void {
-    this.nightMode = !this.nightMode;
-    this.persistSettings();
+    this.setThemeMode(this.isDarkTheme() ? 'light' : 'dark');
+  }
+
+  private toggleReaderControls(): void {
+    if (this.loading || this.catalogVisible) return;
+    if (this.settingsVisible) {
+      this.settingsVisible = false;
+      return;
+    }
+    this.controlsVisible = !this.controlsVisible;
   }
 
   private setFlipMode(mode: string): void {
@@ -401,7 +441,6 @@ struct Reader {
     if (this.book !== null && this.progressStore !== null) {
       await this.progressStore.saveLastBook(this.book.bookId);
     }
-    await restoreShelfWindow(this.context());
     router.back();
   }
 
@@ -426,62 +465,70 @@ struct Reader {
 
   @Builder
   topControls() {
+
     Column() {
       Row() {
         Button('‹').fontSize(24).width(44).height(40)
-          .backgroundColor('#CC171A20').fontColor('#F4F4F5')
+          .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
           .onClick(() => { this.backToShelf(); })
         Column() {
-          Text(this.title).fontSize(16).fontColor('#F4F4F5')
+          Text(this.title).fontSize(16).fontColor(this.palette().text)
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.chapterTitle).fontSize(12).fontColor('#B7BBC4')
+          Text(this.chapterTitle).fontSize(12).fontColor(this.palette().secondaryText)
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
             .margin({ top: 2 })
         }
         .alignItems(HorizontalAlign.Start).layoutWeight(1)
         .margin({ left: 12, right: 8 })
         Button('目录').fontSize(13).height(36)
-          .backgroundColor('#CC171A20').fontColor('#F4F4F5')
+          .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
           .onClick(() => { this.catalogVisible = true; })
         Button('Aa').fontSize(13).height(36)
-          .backgroundColor('#CC171A20').fontColor('#F4F4F5')
+          .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
           .margin({ left: 8 })
           .onClick(() => { this.settingsVisible = !this.settingsVisible; })
       }
       .width('100%')
       .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight,
         top: this.safeTop + 8, bottom: 8 })
-      .backgroundColor('#99101114')
+      .backgroundColor(this.palette().overlay)
 
       if (this.settingsVisible) {
         Column({ space: 6 }) {
           Row() {
             Button('A−').height(32)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
               .onClick(() => { this.changeFont(-2); })
             Text('字号 ' + this.fontSize).fontSize(12)
-              .fontColor('#F4F4F5').layoutWeight(1)
+              .fontColor(this.palette().text).layoutWeight(1)
               .textAlign(TextAlign.Center)
             Button('A+').height(32)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
               .onClick(() => { this.changeFont(2); })
           }
           .width('100%')
           Row() {
-            Text('行距').fontSize(12).fontColor('#D1D5DB')
+            Text('行距').fontSize(12).fontColor(this.palette().secondaryText)
               .layoutWeight(1)
             Button('−').width(52).height(32)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
               .onClick(() => { this.changeLineHeight(-0.1); })
             Text(this.lineHeight.toFixed(1)).fontSize(12)
-              .fontColor('#F4F4F5').width(48).textAlign(TextAlign.Center)
+              .fontColor(this.palette().text).width(48).textAlign(TextAlign.Center)
             Button('+').width(52).height(32)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
               .onClick(() => { this.changeLineHeight(0.1); })
           }
           .width('100%')
           Row() {
-            Button(this.nightMode ? '浅色主题' : '深色主题')
+            Button(this.themeMode === 'system' ? '跟随系统' :
+              this.isDarkTheme() ? '深色主题' : '浅色主题')
               .height(32).layoutWeight(1)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
               .onClick(() => { this.toggleTheme(); })
             Button(this.flipMode === '1' ? '横向滑页' : '仿真翻页')
               .height(32).layoutWeight(1).margin({ left: 8 })
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
               .onClick(() => {
                 this.setFlipMode(this.flipMode === '1' ? '0' : '1');
               })
@@ -491,7 +538,7 @@ struct Reader {
         .width('100%')
         .padding({ left: 12 + this.safeLeft,
           right: 12 + this.safeRight, top: 6, bottom: 8 })
-        .backgroundColor('#F0101114')
+        .backgroundColor(this.palette().surface)
       }
     }
     .alignItems(HorizontalAlign.Start)
@@ -500,21 +547,23 @@ struct Reader {
 
   @Builder
   catalogPanel() {
+
     Stack({ alignContent: Alignment.Center }) {
       Column().width('100%').height('100%')
-        .backgroundColor('#99000000')
+        .backgroundColor(this.palette().overlay)
         .onClick(() => { this.catalogVisible = false; })
       Column() {
         Row() {
           Text('目录').fontSize(19).fontWeight(FontWeight.Medium)
-            .layoutWeight(1)
+            .fontColor(this.palette().text).layoutWeight(1)
           Button('关闭').height(32)
+            .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
             .onClick(() => { this.catalogVisible = false; })
         }
         .width('100%').padding({ bottom: 10 })
         if (this.catalogs.length === 0) {
           Text('这本书没有可用目录').fontSize(14)
-            .fontColor('#9CA3AF').padding(20)
+            .fontColor(this.palette().secondaryText).padding(20)
         } else {
           List() {
             ForEach(this.catalogs, (item: bookParser.CatalogItem) => {
@@ -530,11 +579,11 @@ struct Reader {
               item.catalogId.toString())
           }
           .width('100%').layoutWeight(1)
-          .divider({ strokeWidth: 1, color: '#30343D' })
+          .divider({ strokeWidth: 1, color: this.palette().border })
         }
       }
       .width('90%').height('78%').constraintSize({ maxWidth: 620 })
-      .padding(18).backgroundColor('#1C2028').borderRadius(20)
+      .padding(18).backgroundColor(this.palette().surface).borderRadius(20)
     }
     .width('100%').height('100%')
     .padding({ top: this.safeTop + 8, bottom: this.safeBottom + 8,
@@ -542,6 +591,7 @@ struct Reader {
   }
 
   build() {
+
     Stack({ alignContent: Alignment.TopStart }) {
       if (this.readerAvailable && this.book !== null) {
         ReadPageComponent({
@@ -549,6 +599,7 @@ struct Reader {
           readerCallback: (error, controller) => {
             if (error) {
               this.loading = false;
+              this.controlsVisible = true;
               this.status = 'Reader Kit 组件初始化失败（错误码 ' +
                 this.errorCode(error) + '）';
               this.log('reader', 'component.fail', this.errorCode(error));
@@ -558,23 +609,25 @@ struct Reader {
           }
         })
         .width('100%').height('100%')
+        .onClick(() => { this.toggleReaderControls(); })
       } else {
         Column() {
-          Text(this.status).fontSize(15).fontColor('#D1D5DB')
+          Text(this.status).fontSize(15).fontColor(this.palette().text)
           Button('返回书架').margin({ top: 20 })
+            .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
             .onClick(() => { this.backToShelf(); })
         }
         .width('100%').height('100%')
         .justifyContent(FlexAlign.Center)
-        .backgroundColor('#101114')
+        .backgroundColor(this.palette().page)
       }
 
       if (this.loading) {
         Column() {
-          Text('正在打开……').fontSize(14).fontColor('#D1D5DB')
+          Text('正在打开……').fontSize(14).fontColor(this.palette().text)
         }
         .width('100%').height('100%').justifyContent(FlexAlign.Center)
-        .backgroundColor('#CC101114').hitTestBehavior(HitTestMode.None)
+        .backgroundColor(this.palette().overlay).hitTestBehavior(HitTestMode.None)
       }
 
       if (!this.loading && this.readerAvailable && this.controlsVisible) {
@@ -583,17 +636,17 @@ struct Reader {
           Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
           Column() {
             if (this.status.length > 0) {
-              Text(this.status).fontSize(11).fontColor('#E5E7EB')
+              Text(this.status).fontSize(11).fontColor(this.palette().text)
                 .maxLines(2).width('100%').textAlign(TextAlign.Center)
             }
-            Text(this.pageFooter).fontSize(11).fontColor('#B7BBC4')
+            Text(this.pageFooter).fontSize(11).fontColor(this.palette().secondaryText)
               .width('100%').textAlign(TextAlign.Center)
           }
           .width('100%')
           .padding({ left: 12 + this.safeLeft,
             right: 12 + this.safeRight, top: 8,
             bottom: 8 + this.safeBottom })
-          .backgroundColor('#99101114')
+          .backgroundColor(this.palette().overlay)
         }
         .width('100%').height('100%')
         .hitTestBehavior(HitTestMode.Transparent)
@@ -601,7 +654,9 @@ struct Reader {
 
       if (this.catalogVisible) this.catalogPanel()
     }
-    .width('100%').height('100%').backgroundColor('#101114')
+    .width('100%').height('100%').backgroundColor(this.palette().page)
+    .expandSafeArea([SafeAreaType.SYSTEM],
+      [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .onAreaChange((oldArea: Area, newArea: Area) => {
       const width = parseFloat(newArea.width.toString());
       const height = parseFloat(newArea.height.toString());

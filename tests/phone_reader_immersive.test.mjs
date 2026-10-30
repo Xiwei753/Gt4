@@ -10,9 +10,12 @@ const reader = read('harmony/entry/src/main/ets/pages/Reader.ets');
 const index = read('harmony/entry/src/main/ets/pages/Index.ets');
 
 assert.ok(appearance.includes('window.getLastWindow') &&
-  appearance.includes('setWindowLayoutFullScreen(enabled)') &&
+  appearance.includes('setWindowLayoutFullScreen(true)') &&
+  appearance.includes('getWindowProperties().isLayoutFullScreen') &&
+  appearance.includes('getWindowSystemBarProperties()') &&
+  appearance.includes('sameSystemBarState') &&
   appearance.includes('setWindowSystemBarProperties'),
-  'reader must use the real window and restore system bar styling');
+  'window must stay immersive and reconcile only observed system-bar changes');
 assert.ok(appearance.includes('getWindowAvoidArea') &&
   appearance.includes('TYPE_SYSTEM') &&
   appearance.includes('TYPE_CUTOUT') &&
@@ -25,7 +28,6 @@ assert.ok(appearance.includes('densityPixels') &&
 assert.ok(reader.includes('ReadPageComponent({') &&
   reader.includes('enterReaderWindow') &&
   reader.includes('refreshReaderWindowInsets') &&
-  reader.includes('restoreShelfWindow') &&
   reader.includes('exitReaderWindow'),
   'Reader Kit page must wire the component and immersive lifecycle');
 assert.ok(reader.includes('safeTop') && reader.includes('safeBottom') &&
@@ -39,8 +41,8 @@ assert.ok(reader.includes('Stack({ alignContent: Alignment.TopStart })') &&
 assert.ok(reader.includes('.hitTestBehavior(HitTestMode.Transparent)'),
   'reader control overlay must pass non-control gestures to Reader Kit');
 assert.ok(reader.includes('onPageShow(): void') &&
-  reader.includes('enterReaderWindow(context, this.nightMode'),
-  'reader must reapply immersive appearance when resumed');
+  reader.includes('enterReaderWindow(context, this.themeMode'),
+  'reader must apply the shared theme and immersive appearance when resumed');
 assert.ok(reader.includes("if (this.catalogVisible)") &&
   reader.includes('if (this.settingsVisible)') &&
   reader.includes('onBackPress(): boolean'),
@@ -50,11 +52,33 @@ assert.ok(reader.includes('this.getUIContext().vp2px(this.viewportWidthVp)') &&
   reader.includes('applyPageConfig(true)') &&
   reader.includes('refreshReaderWindowInsets()'),
   'rotation and fold changes must update Reader Kit viewport and restore its anchor');
-assert.ok(index.includes('restoreShelfWindow') &&
-  index.includes('onPageShow(): void'),
-  'shelf must defensively restore its own window styling');
-assert.ok(!reader.includes('.expandSafeArea(') &&
-  !reader.includes('.ignoreLayoutSafeArea('),
-  'reader must not combine measured insets with built-in safe area expansion');
+assert.ok(index.includes('showShelfWindow') &&
+  index.includes('onPageShow(): void') &&
+  index.includes("@StorageLink(APP_THEME_MODE_KEY)") &&
+  index.includes("chooseTheme('system')") &&
+  index.includes("chooseTheme('light')") &&
+  index.includes("chooseTheme('dark')"),
+  'shelf must expose the persisted app-wide theme modes');
+assert.ok(reader.includes('.expandSafeArea([SafeAreaType.SYSTEM]') &&
+  index.includes('.expandSafeArea([SafeAreaType.SYSTEM]') &&
+  !appearance.includes('setWindowLayoutFullScreen(false)'),
+  'shelf and reader must share fullscreen content with measured safe insets');
+assert.ok(reader.includes('.onClick(() => { this.toggleReaderControls(); })') &&
+  reader.includes('private toggleReaderControls()'),
+  'a body tap must toggle controls while leaving Reader Kit swipe gestures intact');
+assert.ok(reader.includes('this.loading = false;\n      this.status = \'\';') &&
+  !reader.includes('本机续读已启用'),
+  'successful initialization must clear status and keep sync guidance out of reading text');
+assert.ok(index.includes("List({ space: 8 })") &&
+  index.includes('Image(\'file://\' + book.coverFilePath)') &&
+  index.includes('导出诊断日志') &&
+  index.includes("Button(this.manageBooks ? '完成整理' : '整理书架')") &&
+  index.includes("Text(this.busy ? '…' : '+')") &&
+  index.includes("Text('▤')") && index.includes("Text('↗')"),
+  'shelf must use a compact lazy book list, cover images, tucked actions and low-profile tabs');
+assert.ok(index.includes('this.palette().text') &&
+  index.includes('themePalette(this.themeMode, this.systemDark)') &&
+  index.includes('this.palette().warningText'),
+  'shelf and transfer UI must use shared light/dark theme tokens');
 
 console.log('PASS: phone Reader Kit immersive contracts');

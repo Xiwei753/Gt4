@@ -61,8 +61,8 @@ assert.ok(reader.includes('flipMode') &&
   'Reader Kit controls must expose flip mode, font, line height and theme');
 assert.ok(reader.includes("this.flipMode === '1' ? '横向滑页' : '仿真翻页'"),
   'Reader Kit mode labels must match the sample API mode values');
-assert.ok(reader.includes('readerkit_unmapped') &&
-  reader.includes('暂无法可靠换算'),
+assert.ok(reader.includes("'readerkit_unmapped'") &&
+  !reader.includes('暂无法可靠换算'),
   'Reader Kit DOM position must not be treated as a protocol byte offset');
 
 const progress = read(
@@ -127,8 +127,9 @@ assert.ok(routePos >= 0 && transferPos > routePos,
 assert.ok(index.includes("Button('同步可映射书籍的阅读进度')") &&
   index.includes('syncReadingProgress'),
   'phone index must expose manual progress sync');
-assert.ok(index.includes("Button('书架')") && index.includes("Button('传书')"),
-  'phone home must expose only bookshelf and transfer tabs');
+assert.ok(index.includes("Text('书架')") && index.includes("Text('传书')") &&
+  index.includes('bottomTabs()'),
+  'phone home must expose only compact bookshelf and transfer tabs');
 assert.ok(index.includes("setShelfSortMode('manual')") &&
   index.includes('setShelfManualOrder'),
   'manual shelf ordering must persist');
@@ -215,6 +216,17 @@ assert.ok(importService.includes("if (ext === 'epub')") &&
   importService.includes("originalDir + '/' + bookId + '.epub'") &&
   importService.includes('readerFilePath'),
   'EPUB import must preserve original EPUB separately from transfer text');
+const epubImport = read(
+  'harmony/entry/src/main/ets/services/EpubImportService.ts');
+assert.ok(epubImport.includes('dc:creator') &&
+  epubImport.includes("'cover-image'") &&
+  epubImport.includes("image/jpeg") &&
+  epubImport.includes('coverBytes'),
+  'EPUB import must extract optional author and original raster cover data');
+assert.ok(importService.includes("booksDir + '/covers'") &&
+  importService.includes('coverFilePath') &&
+  repository.includes('target.coverFilePath'),
+  'EPUB cover images must live in the app library and be cleaned with the book');
 const readerState = read(
   'harmony/entry/src/main/ets/services/ReaderKitStateStore.ts');
 assert.ok(readerState.includes('startDomPos') &&

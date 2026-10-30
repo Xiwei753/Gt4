@@ -26,6 +26,9 @@ export interface BookChapter {
 export interface BookMeta {
   bookId: string;
   title: string;
+  // Optional EPUB package metadata used by the phone bookshelf.
+  author?: string;
+  coverFilePath?: string;
   kind: BookKind;
   // 规范化后的 UTF-8 正文（沙箱私有目录内）文件路径。
   filePath: string;

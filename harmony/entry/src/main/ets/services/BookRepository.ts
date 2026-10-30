@@ -83,6 +83,8 @@ export class BookRepository {
     const idx = books.findIndex((b) => b.bookId === meta.bookId);
     if (idx >= 0 && books[idx].sha256 === meta.sha256) {
       books[idx].updatedAt = meta.updatedAt;
+      if (meta.author) books[idx].author = meta.author;
+      if (meta.coverFilePath) books[idx].coverFilePath = meta.coverFilePath;
       if (meta.readerFilePath) {
         books[idx].readerFilePath = meta.readerFilePath;
       }
@@ -115,6 +117,13 @@ export class BookRepository {
         fileIo.unlinkSync(target.readerFilePath);
       } catch (e) {
         // 清理索引时也继续处理缺失的源文件。
+      }
+    }
+    if (target.coverFilePath) {
+      try {
+        fileIo.unlinkSync(target.coverFilePath);
+      } catch (e) {
+        // An absent cover does not block removal of its book record.
       }
     }
     books.splice(idx, 1);
