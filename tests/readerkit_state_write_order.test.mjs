@@ -9,6 +9,13 @@ const stateSource = readFileSync(
   'harmony/entry/src/main/ets/services/ReaderKitStateStore.ts', 'utf8');
 const readerSource = readFileSync(
   'harmony/entry/src/main/ets/pages/Reader.ets', 'utf8');
+const readerFooterStart = readerSource.indexOf('@Builder\n  readerFooter() {');
+const readerFooterEnd = readerSource.indexOf('@Builder\n  topControls() {',
+  readerFooterStart);
+assert.ok(readerFooterStart >= 0 && readerFooterEnd > readerFooterStart,
+  'reader footer builder must remain directly inspectable');
+const readerFooterSource = readerSource.slice(readerFooterStart,
+  readerFooterEnd);
 
 assert.match(stateSource,
   /loadLocation\([\s\S]*?enqueueBookWrite\(bookId/,
@@ -23,8 +30,10 @@ assert.match(readerSource,
   /private async backToShelf\(\)[\s\S]*?await this\.saveCurrentLocation\(\)/,
   'leaving the reader must wait for its final location write');
 assert.match(readerSource,
-  /readerFooter\(\)[\s\S]*?if \(this\.status\.length > 0\)/,
-  'reader diagnostics must only occupy footer space when present');
+  /if \(!this\.loading && this\.status\.length > 0\)[\s\S]*?\.position\(\{ x: 0, y: this\.readerContentTopInsetVp\(\) \}\)/,
+  'reader diagnostics must be a non-layout status overlay');
+assert.doesNotMatch(readerFooterSource, /this\.status/,
+  'reader diagnostics must not add a second line to the compact footer');
 assert.match(readerSource,
   /Text\(this\.chapterTitle\)[\s\S]*?if \(this\.pageFooter\.length > 0\)[\s\S]*?Text\(this\.pageFooter\)/,
   'the footer must show its trusted chapter and omit unavailable progress');

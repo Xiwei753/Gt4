@@ -29,6 +29,8 @@ interface ErrorCodeCarrier {
   code?: number;
 }
 
+const READER_FOOTER_HEIGHT_VP = 18;
+
 @Entry
 @Component
 struct Reader {
@@ -53,6 +55,8 @@ struct Reader {
   @State private safeBottom: number = 0;
   @State private safeLeft: number = 0;
   @State private safeRight: number = 0;
+  @State private statusBarHeight: number = 0;
+  @State private headerTitleMaxWidthVp: number = 10000;
   @State private viewportWidthVp: number = 0;
   @State private viewportHeightVp: number = 0;
   @State private timeText: string = '--:--';
@@ -90,6 +94,8 @@ struct Reader {
     this.safeBottom = insets.bottom;
     this.safeLeft = insets.left;
     this.safeRight = insets.right;
+    this.statusBarHeight = insets.statusBarHeight;
+    this.headerTitleMaxWidthVp = this.calculateHeaderTitleMaxWidth(insets);
   };
   private pageShowListener = (info: readerCore.PageDataInfo): void => {
     this.onReaderPageShow(info);
@@ -125,7 +131,6 @@ struct Reader {
       return;
     }
     this.title = this.book.title;
-    this.chapterTitle = this.book.title;
     const path = this.readerPath(this.book);
     if (this.book.kind === 'epub' &&
         (!this.book.readerFilePath ||
@@ -454,6 +459,8 @@ struct Reader {
         info.resourceIndex >= this.spine.length) return;
     this.currentResourceIndex = info.resourceIndex;
     this.currentDomPos = info.startDomPos;
+    // Reader Kit documents this as the current page number. Keep its exact
+    // value; do not derive or label an app-side percentage from it.
     this.pageFooter = info.pageFooterContent || '';
     this.chapterTitle = this.catalogTitleFor(info.resourceIndex);
     this.saveCurrentLocation();
@@ -468,7 +475,34 @@ struct Reader {
         }
       }
     }
-    return this.book !== null ? this.book.title : '';
+    return '';
+  }
+
+  private calculateHeaderTitleMaxWidth(insets: ReaderWindowInsets): number {
+    if (insets.windowWidth <= 0) return 10000;
+    const contentLeft = insets.left + 12;
+    const contentRight = insets.windowWidth - insets.right - 12;
+    let maxWidth = Math.max(0, contentRight - contentLeft);
+    if (insets.topCutoutRight > insets.topCutoutLeft &&
+        insets.topCutoutRight > contentLeft &&
+        insets.topCutoutLeft < contentRight) {
+      if (insets.topCutoutLeft <= contentLeft) return 0;
+      maxWidth = Math.min(maxWidth, insets.topCutoutLeft - contentLeft);
+    }
+    return maxWidth;
+  }
+
+  private readerContentTopInsetVp(): number {
+    return Math.max(this.safeTop, this.statusBarHeight);
+  }
+
+  private readerFooterHeightVp(): number {
+    return this.chapterTitle.length > 0 || this.pageFooter.length > 0 ?
+      READER_FOOTER_HEIGHT_VP : 0;
+  }
+
+  private readerContentBottomInsetVp(): number {
+    return this.safeBottom + this.readerFooterHeightVp();
   }
 
   private async saveCurrentLocation(): Promise<void> {
@@ -660,65 +694,62 @@ struct Reader {
 
   @Builder
   readerInfoBar() {
-    Column() {
+    Row() {
+      Text(this.title).fontSize(12).fontColor(this.palette().secondaryText)
+        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+        .constraintSize({ maxWidth: this.headerTitleMaxWidthVp })
+      Text(this.timeText).fontSize(12)
+        .fontColor(this.palette().secondaryText).margin({ left: 10 })
       Row() {
-        Text(this.title).fontSize(12).fontColor(this.palette().secondaryText)
-          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-          .layoutWeight(1)
-        Text(this.timeText).fontSize(12)
-          .fontColor(this.palette().secondaryText).margin({ left: 10 })
-        Row() {
-          Stack({ alignContent: Alignment.TopStart }) {
-            if (this.batteryPercent > 0) {
-              Row().width(Math.max(1,
-                Math.round(11 * this.batteryPercent / 100)))
-                .height(4).margin({ left: 2, top: 3 })
-                .backgroundColor(this.palette().secondaryText).borderRadius(1)
-            }
+        Stack({ alignContent: Alignment.TopStart }) {
+          if (this.batteryPercent > 0) {
+            Row().width(Math.max(1,
+              Math.round(11 * this.batteryPercent / 100)))
+              .height(4).margin({ left: 2, top: 3 })
+              .backgroundColor(this.palette().secondaryText).borderRadius(1)
           }
-          .width(17).height(10)
-          .border({ width: 1, color: this.palette().secondaryText, radius: 2 })
-          Column().width(2).height(4)
-            .backgroundColor(this.palette().secondaryText)
-            .margin({ left: 1 })
-          Text(this.batteryPercent < 0 ? '--%' :
-            this.batteryPercent.toString() + '%')
-            .fontSize(11).fontColor(this.palette().secondaryText)
-            .margin({ left: 4 })
         }
-        .alignItems(VerticalAlign.Center).margin({ left: 8 })
+        .width(17).height(10)
+        .border({ width: 1, color: this.palette().secondaryText, radius: 2 })
+        Column().width(2).height(4)
+          .backgroundColor(this.palette().secondaryText)
+          .margin({ left: 1 })
+        Text(this.batteryPercent < 0 ? '--%' :
+          this.batteryPercent.toString() + '%')
+          .fontSize(11).fontColor(this.palette().secondaryText)
+          .margin({ left: 4 })
       }
-      .width('100%').height(32)
+      .alignItems(VerticalAlign.Center).margin({ left: 8 })
     }
-    .width('100%')
-    .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight,
-      top: this.safeTop + 5, bottom: 5 })
+    .width('100%').height(this.statusBarHeight)
+    .alignItems(VerticalAlign.Center)
+    .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight })
     .backgroundColor(this.palette().page)
+    .hitTestBehavior(HitTestMode.None)
   }
 
   @Builder
   readerFooter() {
-    Column({ space: 4 }) {
-      if (this.status.length > 0) {
-        Text(this.status).fontSize(11).fontColor(this.palette().text)
-          .maxLines(2).width('100%').textAlign(TextAlign.Center)
-      }
-      Row() {
+    Row() {
+      if (this.chapterTitle.length > 0) {
         Text(this.chapterTitle).fontSize(11)
           .fontColor(this.palette().secondaryText).layoutWeight(1)
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-        if (this.pageFooter.length > 0) {
-          Text(this.pageFooter).fontSize(11)
-            .fontColor(this.palette().secondaryText)
-            .maxLines(1).textAlign(TextAlign.End)
-        }
       }
-      .width('100%')
+      if (this.chapterTitle.length === 0 && this.pageFooter.length > 0) {
+        Blank().layoutWeight(1)
+      }
+      if (this.pageFooter.length > 0) {
+        Text(this.pageFooter).fontSize(11)
+          .fontColor(this.palette().secondaryText)
+          .maxLines(1).textAlign(TextAlign.End)
+      }
     }
-    .width('100%')
-    .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight,
-      top: 6, bottom: 8 + this.safeBottom })
+    .width('100%').height(READER_FOOTER_HEIGHT_VP)
+    .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight })
     .backgroundColor(this.palette().page)
+    .hitTestBehavior(HitTestMode.None)
   }
 
   @Builder
@@ -844,7 +875,8 @@ struct Reader {
       .padding(18).backgroundColor(this.palette().surface).borderRadius(20)
     }
     .width('100%').height('100%')
-    .padding({ top: this.safeTop + 8, bottom: this.safeBottom + 8,
+    .padding({ top: this.readerContentTopInsetVp() + 8,
+      bottom: this.safeBottom + 8,
       left: this.safeLeft, right: this.safeRight })
   }
 
@@ -853,44 +885,64 @@ struct Reader {
     Stack({ alignContent: Alignment.TopStart }) {
       if (this.readerAvailable && this.book !== null) {
         Column() {
-          this.readerInfoBar()
-          Stack({ alignContent: Alignment.TopStart }) {
-            ReadPageComponent({
-              controller: this.controller,
-              readerCallback: (error, controller) => {
-                if (error) {
-                  this.readerReady = false;
-                  this.loading = false;
-                  this.controlsVisible = true;
-                  this.status = 'Reader Kit 组件初始化失败（错误码 ' +
-                    this.errorCode(error) + '）';
-                  this.log('reader', 'component.fail', this.errorCode(error));
-                  this.syncVolumeKeyListeners();
-                  return;
-                }
-                this.initializeReader(controller);
+          ReadPageComponent({
+            controller: this.controller,
+            readerCallback: (error, controller) => {
+              if (error) {
+                this.readerReady = false;
+                this.loading = false;
+                this.controlsVisible = true;
+                this.status = 'Reader Kit 组件初始化失败（错误码 ' +
+                  this.errorCode(error) + '）';
+                this.log('reader', 'component.fail', this.errorCode(error));
+                this.syncVolumeKeyListeners();
+                return;
               }
-            })
-            .width('100%').height('100%')
-            .onClick(() => { this.toggleReaderControls(); })
-            .onAreaChange((oldArea: Area, newArea: Area) => {
-              this.readerAreaChanged(newArea);
-            })
-
-            if (!this.loading && this.controlsVisible) {
-              Column() {
-                this.topControls()
-                Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
-              }
-              .width('100%').height('100%')
-              .hitTestBehavior(HitTestMode.Transparent)
+              this.initializeReader(controller);
             }
-          }
+          })
           .width('100%').layoutWeight(1)
-          .padding({ left: this.safeLeft, right: this.safeRight })
-          if (!this.loading) this.readerFooter()
+          .onClick(() => { this.toggleReaderControls(); })
+          .onAreaChange((oldArea: Area, newArea: Area) => {
+            this.readerAreaChanged(newArea);
+          })
         }
         .width('100%').height('100%')
+        .padding({ left: this.safeLeft, right: this.safeRight,
+          top: this.readerContentTopInsetVp(),
+          bottom: this.readerContentBottomInsetVp() })
+
+        if (!this.loading && this.controlsVisible) {
+          Column() {
+            this.topControls()
+            Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
+          }
+          .width('100%').height('100%')
+          .padding({ left: this.safeLeft, right: this.safeRight,
+            top: this.readerContentTopInsetVp(),
+            bottom: this.readerContentBottomInsetVp() })
+          .hitTestBehavior(HitTestMode.Transparent)
+        }
+
+        this.readerInfoBar()
+        if (!this.loading && this.status.length > 0) {
+          Text(this.status).fontSize(11).fontColor(this.palette().text)
+            .width('100%')
+            .padding({ left: 12 + this.safeLeft,
+              right: 12 + this.safeRight, top: 4, bottom: 4 })
+            .backgroundColor(this.palette().overlay)
+            .position({ x: 0, y: this.readerContentTopInsetVp() })
+            .hitTestBehavior(HitTestMode.None)
+        }
+        if (!this.loading && this.readerFooterHeightVp() > 0) {
+          Column() {
+            Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
+            this.readerFooter()
+          }
+          .width('100%').height('100%')
+          .padding({ bottom: this.safeBottom })
+          .hitTestBehavior(HitTestMode.None)
+        }
       } else {
         Column() {
           Text(this.status).fontSize(15).fontColor(this.palette().text)

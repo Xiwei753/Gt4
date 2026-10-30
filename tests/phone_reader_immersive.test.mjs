@@ -32,10 +32,12 @@ assert.ok(appearance.includes('window.getLastWindow') &&
   appearance.includes('setWindowSystemBarProperties'),
   'window must stay immersive and reconcile only observed system-bar changes');
 assert.ok(appearance.includes('getWindowAvoidArea') &&
+  appearance.includes('getWindowAvoidAreaIgnoringVisibility') &&
+  appearance.includes('systemIgnoringVisibility') &&
   appearance.includes('TYPE_SYSTEM') &&
   appearance.includes('TYPE_CUTOUT') &&
   appearance.includes('TYPE_NAVIGATION_INDICATOR'),
-  'reader insets must come from current system avoid areas');
+  'reader layout must distinguish the original status bar from visible system and cutout areas');
 assert.ok(appearance.includes('densityPixels') &&
   appearance.includes("on('avoidAreaChange'") &&
   appearance.includes("off('avoidAreaChange'"),
@@ -45,22 +47,27 @@ assert.ok(reader.includes('ReadPageComponent({') &&
   reader.includes('refreshReaderWindowInsets') &&
   reader.includes('exitReaderWindow'),
   'Reader Kit page must wire the component and immersive lifecycle');
-assert.ok(readerInfoBar.includes('left: 12 + this.safeLeft') &&
+assert.ok(readerInfoBar.includes('.height(this.statusBarHeight)') &&
+  readerInfoBar.includes('left: 12 + this.safeLeft') &&
   readerInfoBar.includes('right: 12 + this.safeRight') &&
-  readerInfoBar.includes('top: this.safeTop + 5') &&
+  readerInfoBar.includes('this.headerTitleMaxWidthVp') &&
+  !readerInfoBar.includes('this.safeTop') &&
   readerFooter.includes('left: 12 + this.safeLeft') &&
   readerFooter.includes('right: 12 + this.safeRight') &&
-  readerFooter.includes('bottom: 8 + this.safeBottom'),
-  'the actual reader header and footer must avoid measured system insets');
+  readerFooter.includes('height(READER_FOOTER_HEIGHT_VP)') &&
+  !readerFooter.includes('this.safeBottom'),
+  'the actual reader header uses the original status bar height and the footer is a single line above navigation');
 assert.ok(readerBuild.includes('this.readerInfoBar()') &&
   readerBuild.includes('this.readerFooter()') &&
+  readerBuild.includes('readerContentTopInsetVp()') &&
+  readerBuild.includes('readerContentBottomInsetVp()') &&
   reader.includes('this.getUIContext().vp2px(this.viewportHeightVp)'),
-  'the reader must reserve live safe-area space for its fixed header and footer');
-assert.ok(readerBuild.includes('.padding({ left: this.safeLeft, right: this.safeRight })') &&
+  'the Reader Kit viewport must be measured inside exact top and bottom reservations');
+assert.ok(/\.padding\(\{ left: this\.safeLeft, right: this\.safeRight,\s+top: this\.readerContentTopInsetVp\(\),\s+bottom: this\.readerContentBottomInsetVp\(\) \}\)/.test(readerBuild) &&
   topControls.includes('.padding({ left: 12, right: 12,') &&
   !topControls.includes('this.safeLeft') &&
   !topControls.includes('this.safeRight'),
-  'top controls must use the Reader Kit stack safe inset exactly once');
+  'Reader Kit and controls must share one measured safe-area coordinate system');
 assert.ok(reader.includes('new Date()') && reader.includes('now.getHours()') &&
   reader.includes('now.getMinutes()') && reader.includes('batteryInfo.batterySOC') &&
   reader.includes('60000 - (now % 60000)') &&
@@ -103,13 +110,24 @@ assert.ok(readerState.includes('volumeKeyPaging: true') &&
   readerState.includes('typeof value.volumeKeyPaging === \'boolean\'') &&
   readerState.includes('volumeKeyPaging: settings.volumeKeyPaging'),
   'volume paging must default on and persist compatibly with saved settings');
-const readerBuildPosition = reader.indexOf('build() {');
-const infoBarPosition = reader.indexOf('this.readerInfoBar()', readerBuildPosition);
-const readPagePosition = reader.indexOf('ReadPageComponent({', infoBarPosition);
-const footerPosition = reader.indexOf('this.readerFooter()', readPagePosition);
-assert.ok(infoBarPosition > readerBuildPosition &&
-  readPagePosition > infoBarPosition && footerPosition > readPagePosition,
-  'Reader Kit content must sit between the fixed info bar and footer');
+const infoBarPosition = readerBuild.indexOf('this.readerInfoBar()');
+const readPagePosition = readerBuild.indexOf('ReadPageComponent({');
+const footerPosition = readerBuild.indexOf('this.readerFooter()');
+assert.ok(readPagePosition >= 0 && infoBarPosition > readPagePosition &&
+  footerPosition > infoBarPosition,
+  'reader bars must overlay the full-screen Reader Kit viewport');
+const pageContainerEnd = readerBuild.indexOf(
+  '.padding({ left: this.safeLeft, right: this.safeRight,', readPagePosition);
+assert.ok(pageContainerEnd > readPagePosition &&
+  !readerBuild.slice(readPagePosition, pageContainerEnd).includes('readerInfoBar()') &&
+  !readerBuild.slice(readPagePosition, pageContainerEnd).includes('readerFooter()'),
+  'permanent reader bars must not be separate children that consume viewport height');
+const catalogTitleStart = reader.indexOf('private catalogTitleFor(');
+const catalogTitleEnd = reader.indexOf('\n  private calculateHeaderTitleMaxWidth(', catalogTitleStart);
+assert.ok(catalogTitleStart >= 0 && catalogTitleEnd > catalogTitleStart &&
+  reader.slice(catalogTitleStart, catalogTitleEnd).includes("return '';") &&
+  !reader.slice(catalogTitleStart, catalogTitleEnd).includes('this.book.title'),
+  'the footer must omit chapter text when Reader Kit catalog mapping has no match');
 assert.ok(reader.includes('Stack({ alignContent: Alignment.TopStart })') &&
   reader.includes('Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)'),
   'reader controls must remain at the top and bottom of the viewport');

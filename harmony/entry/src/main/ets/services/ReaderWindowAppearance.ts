@@ -11,6 +11,10 @@ export interface ReaderWindowInsets {
   bottom: number;
   left: number;
   right: number;
+  statusBarHeight: number;
+  windowWidth: number;
+  topCutoutLeft: number;
+  topCutoutRight: number;
 }
 
 export type ReaderWindowInsetsListener = (insets: ReaderWindowInsets) => void;
@@ -58,9 +62,9 @@ class ReaderWindowAppearanceService {
       if (win === null || generation !== this.generation) return;
       await this.setFullScreen(win);
       if (generation !== this.generation) return;
-      await this.setStatusBarVisible(win, page === 'shelf');
-      if (generation !== this.generation) return;
       await this.applySystemBars(win);
+      if (generation !== this.generation) return;
+      await this.setStatusBarVisible(win, page === 'shelf');
       if (generation !== this.generation) return;
       this.attachAvoidAreaListener(win);
       this.publishInsets(win, true);
@@ -72,9 +76,10 @@ class ReaderWindowAppearanceService {
         this.enqueue(async (): Promise<void> => {
           if (generation !== this.generation || this.mainWindow !== win) return;
           await this.setFullScreen(win);
+          await this.applySystemBars(win);
+          if (generation !== this.generation) return;
           await this.setStatusBarVisible(win, page === 'shelf');
           if (generation !== this.generation) return;
-          await this.applySystemBars(win);
           this.publishInsets(win, false);
           this.logWindowState(page + '_transition_verified', 0);
         });
@@ -93,6 +98,8 @@ class ReaderWindowAppearanceService {
       if (win === null || generation !== this.generation) return;
       await this.setFullScreen(win);
       await this.applySystemBars(win);
+      if (generation !== this.generation) return;
+      await this.setStatusBarVisible(win, this.activePage === 'shelf');
       this.logWindowState('theme_applied', 0);
     });
   }
@@ -289,18 +296,44 @@ class ReaderWindowAppearanceService {
 
   private readInsets(win: window.Window): ReaderWindowInsets {
     const system = this.safeAvoidArea(win, window.AvoidAreaType.TYPE_SYSTEM);
+    const systemIgnoringVisibility = this.safeAvoidAreaIgnoringVisibility(win,
+      window.AvoidAreaType.TYPE_SYSTEM);
     const cutout = this.safeAvoidArea(win, window.AvoidAreaType.TYPE_CUTOUT);
     const indicator = this.safeAvoidArea(win,
       window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-    const topPx = Math.max(this.topEdge(system), this.topEdge(cutout));
+    const statusBarPx = Math.max(this.topEdge(system),
+      this.topEdge(systemIgnoringVisibility));
+    const cutoutTopPx = this.topEdge(cutout);
+    const topPx = Math.max(statusBarPx, cutoutTopPx);
     const bottomPx = Math.max(this.bottomEdge(system), this.bottomEdge(indicator));
     const leftPx = Math.max(this.leftEdge(system), this.leftEdge(cutout));
     const rightPx = Math.max(this.rightEdge(system), this.rightEdge(cutout));
+    let windowWidthPx = 0;
+    try {
+      windowWidthPx = win.getWindowProperties().windowRect.width;
+    } catch (error) {
+      try {
+        windowWidthPx = display.getDefaultDisplaySync().width;
+      } catch (displayError) {
+        windowWidthPx = leftPx + rightPx;
+      }
+    }
+    let topCutoutLeft = 0;
+    let topCutoutRight = 0;
+    if (cutout !== null && cutout.visible && cutout.topRect.width > 0 &&
+        cutoutTopPx > 0) {
+      topCutoutLeft = this.pxToVp(cutout.topRect.left);
+      topCutoutRight = this.pxToVp(cutout.topRect.left + cutout.topRect.width);
+    }
     return {
       top: this.pxToVp(topPx),
       bottom: this.pxToVp(bottomPx),
       left: this.pxToVp(leftPx),
-      right: this.pxToVp(rightPx)
+      right: this.pxToVp(rightPx),
+      statusBarHeight: this.pxToVp(statusBarPx),
+      windowWidth: this.pxToVp(windowWidthPx),
+      topCutoutLeft: topCutoutLeft,
+      topCutoutRight: topCutoutRight
     };
   }
 
@@ -308,6 +341,15 @@ class ReaderWindowAppearanceService {
     type: window.AvoidAreaType): window.AvoidArea | null {
     try {
       return win.getWindowAvoidArea(type);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private safeAvoidAreaIgnoringVisibility(win: window.Window,
+    type: window.AvoidAreaType): window.AvoidArea | null {
+    try {
+      return win.getWindowAvoidAreaIgnoringVisibility(type);
     } catch (error) {
       return null;
     }
