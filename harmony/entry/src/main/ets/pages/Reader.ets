@@ -18,7 +18,7 @@ import { AppThemeStore, applyNativeThemeMode }
 import { recordReaderDiagnostic } from '../services/ReaderDiagnostics';
 import { enterReaderWindow, exitReaderWindow,
   refreshReaderWindowInsets, setAppWindowTheme, showShelfWindow,
-  ReaderWindowInsets }
+  ReaderWindowCutout, ReaderWindowInsets }
   from '../services/ReaderWindowAppearance';
 
 interface ReaderParams {
@@ -27,6 +27,18 @@ interface ReaderParams {
 
 interface ErrorCodeCarrier {
   code?: number;
+}
+
+interface ReaderSafeInterval {
+  left: number;
+  right: number;
+}
+
+interface ReaderHeaderLayout {
+  titleX: number;
+  titleWidth: number;
+  infoX: number;
+  infoWidth: number;
 }
 
 const READER_FOOTER_HEIGHT_VP = 18;
@@ -49,14 +61,16 @@ struct Reader {
   @StorageLink(APP_SYSTEM_DARK_KEY) @Watch('themeStateChanged')
   private systemDark: boolean = false;
   @State private flipMode: string = '1';
-  @State private pageFooter: string = '';
   @State private chapterTitle: string = '';
   @State private safeTop: number = 0;
   @State private safeBottom: number = 0;
   @State private safeLeft: number = 0;
   @State private safeRight: number = 0;
   @State private statusBarHeight: number = 0;
-  @State private headerTitleMaxWidthVp: number = 10000;
+  @State private headerTitleX: number = 12;
+  @State private headerTitleMaxWidthVp: number = 0;
+  @State private headerInfoX: number = 0;
+  @State private headerInfoWidth: number = 0;
   @State private viewportWidthVp: number = 0;
   @State private viewportHeightVp: number = 0;
   @State private timeText: string = '--:--';
@@ -73,6 +87,11 @@ struct Reader {
   private spine: bookParser.SpineItem[] = [];
   private currentResourceIndex: number = 0;
   private currentDomPos: string = '';
+  private viewportXVp: number = 0;
+  private viewportYVp: number = 0;
+  private windowInsetsReady: boolean = false;
+  private viewportNeedsInsetsLayout: boolean = false;
+  private viewportAreaWaiters: Array<() => void> = [];
   private lastPositionLogResourceIndex: number = -1;
   private initialized: boolean = false;
   private readerReady: boolean = false;
@@ -90,13 +109,33 @@ struct Reader {
     this.flipPageFromVolumeKey(true);
   };
   private onWindowInsets = (insets: ReaderWindowInsets): void => {
+    this.applyWindowInsets(insets);
+  };
+  private applyWindowInsets(insets: ReaderWindowInsets): void {
+    const oldTop = this.readerContentTopInsetVp();
+    const oldBottom = this.readerContentBottomInsetVp();
+    const oldLeft = this.safeLeft;
+    const oldRight = this.safeRight;
     this.safeTop = insets.top;
     this.safeBottom = insets.bottom;
     this.safeLeft = insets.left;
     this.safeRight = insets.right;
-    this.statusBarHeight = insets.statusBarHeight;
-    this.headerTitleMaxWidthVp = this.calculateHeaderTitleMaxWidth(insets);
-  };
+    this.statusBarHeight = insets.statusBarHeight > 0 ?
+      insets.statusBarHeight : insets.top;
+    const header = this.calculateHeaderLayout(insets);
+    this.headerTitleX = header.titleX;
+    this.headerTitleMaxWidthVp = header.titleWidth;
+    this.headerInfoX = header.infoX;
+    this.headerInfoWidth = header.infoWidth;
+    this.windowInsetsReady = true;
+    if (Math.abs(oldTop - this.readerContentTopInsetVp()) >= 0.5 ||
+        Math.abs(oldBottom - this.readerContentBottomInsetVp()) >= 0.5 ||
+        Math.abs(oldLeft - this.safeLeft) >= 0.5 ||
+        Math.abs(oldRight - this.safeRight) >= 0.5) {
+      this.viewportNeedsInsetsLayout = true;
+    }
+    this.resolveViewportAreaWaiters();
+  }
   private pageShowListener = (info: readerCore.PageDataInfo): void => {
     this.onReaderPageShow(info);
   };
@@ -330,18 +369,72 @@ struct Reader {
   private readerAreaChanged(area: Area): void {
     const width = parseFloat(area.width.toString());
     const height = parseFloat(area.height.toString());
+    const x = area.globalPosition.x !== undefined ?
+      parseFloat(area.globalPosition.x.toString()) : 0;
+    const y = area.globalPosition.y !== undefined ?
+      parseFloat(area.globalPosition.y.toString()) : 0;
     if (!Number.isFinite(width) || !Number.isFinite(height) ||
-        width <= 0 || height <= 0 ||
-        (Math.abs(width - this.viewportWidthVp) < 0.5 &&
-         Math.abs(height - this.viewportHeightVp) < 0.5)) return;
+        width <= 0 || height <= 0) return;
+    const geometryChanged =
+      Math.abs(width - this.viewportWidthVp) >= 0.5 ||
+      Math.abs(height - this.viewportHeightVp) >= 0.5 ||
+      Math.abs(x - this.viewportXVp) >= 0.5 ||
+      Math.abs(y - this.viewportYVp) >= 0.5;
+    if (!geometryChanged) {
+      if (this.windowInsetsReady && this.viewportNeedsInsetsLayout) {
+        this.viewportNeedsInsetsLayout = false;
+        this.resolveViewportAreaWaiters();
+      }
+      return;
+    }
     this.viewportWidthVp = width;
     this.viewportHeightVp = height;
+    this.viewportXVp = Number.isFinite(x) ? x : 0;
+    this.viewportYVp = Number.isFinite(y) ? y : 0;
+    if (this.windowInsetsReady) this.viewportNeedsInsetsLayout = false;
+    this.resolveViewportAreaWaiters();
+    this.logReaderViewport('area_changed');
     if (this.resizeTimer !== -1) clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => {
       this.resizeTimer = -1;
-      this.applyPageConfig(true);
+      if (this.readerReady) this.applyPageConfig(true);
       refreshReaderWindowInsets();
     }, 120);
+  }
+
+  private waitForViewportArea(): Promise<void> {
+    if (this.windowInsetsReady && !this.viewportNeedsInsetsLayout &&
+        this.viewportWidthVp > 0 && this.viewportHeightVp > 0) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve: () => void): void => {
+      this.viewportAreaWaiters.push(resolve);
+    });
+  }
+
+  private resolveViewportAreaWaiters(): void {
+    if (!this.windowInsetsReady || this.viewportNeedsInsetsLayout ||
+        this.viewportWidthVp <= 0 || this.viewportHeightVp <= 0) return;
+    const waiters = this.viewportAreaWaiters.splice(0);
+    for (let i = 0; i < waiters.length; i++) waiters[i]();
+  }
+
+  private logReaderViewport(stage: string): void {
+    const ui = this.getUIContext();
+    const readerWidthPx = ui.vp2px(this.viewportWidthVp);
+    const readerHeightPx = ui.vp2px(this.viewportHeightVp);
+    recordReaderDiagnostic(this.context(), 'readerViewport', stage, 0, {
+      readerXVp: this.viewportXVp,
+      readerYVp: this.viewportYVp,
+      readerWidthVp: this.viewportWidthVp,
+      readerHeightVp: this.viewportHeightVp,
+      readerXPx: ui.vp2px(this.viewportXVp),
+      readerYPx: ui.vp2px(this.viewportYVp),
+      readerWidthPx: readerWidthPx,
+      readerHeightPx: readerHeightPx,
+      pageViewportWidthPx: Math.max(1, Math.round(readerWidthPx)),
+      pageViewportHeightPx: Math.max(1, Math.round(readerHeightPx))
+    });
   }
 
   private toggleSettings(): void {
@@ -417,13 +510,16 @@ struct Reader {
 
       this.controller.on('pageShow', this.pageShowListener);
       this.controller.on('resourceRequest', this.resourceRequestListener);
-      this.controller.setPageConfig(this.pageConfig());
       const saved = await state.loadLocation(book.bookId,
         this.readerSha256(book));
       const start = this.validLocation(saved) ? saved! : null;
       this.currentResourceIndex = start !== null ?
         start.resourceIndex : 0;
       this.currentDomPos = start !== null ? start.startDomPos : '';
+      this.log('readerViewport', 'initial_measure_wait');
+      await this.waitForViewportArea();
+      if (this.leaving) return;
+      this.controller.setPageConfig(this.pageConfig());
       this.status = '正在打开书籍……';
       this.log('reader', 'startPlay.start');
       await this.controller.startPlay(this.currentResourceIndex,
@@ -459,9 +555,8 @@ struct Reader {
         info.resourceIndex >= this.spine.length) return;
     this.currentResourceIndex = info.resourceIndex;
     this.currentDomPos = info.startDomPos;
-    // Reader Kit documents this as the current page number. Keep its exact
-    // value; do not derive or label an app-side percentage from it.
-    this.pageFooter = info.pageFooterContent || '';
+    // Reader Kit's pageFooterContent has not been verified as progress and
+    // may contain book metadata. Do not present it as a page number.
     this.chapterTitle = this.catalogTitleFor(info.resourceIndex);
     this.saveCurrentLocation();
   }
@@ -478,18 +573,71 @@ struct Reader {
     return '';
   }
 
-  private calculateHeaderTitleMaxWidth(insets: ReaderWindowInsets): number {
-    if (insets.windowWidth <= 0) return 10000;
+  private calculateHeaderLayout(insets: ReaderWindowInsets): ReaderHeaderLayout {
+    if (insets.windowWidth <= 0) {
+      return { titleX: 12, titleWidth: 0, infoX: 0, infoWidth: 0 };
+    }
     const contentLeft = insets.left + 12;
     const contentRight = insets.windowWidth - insets.right - 12;
-    let maxWidth = Math.max(0, contentRight - contentLeft);
-    if (insets.topCutoutRight > insets.topCutoutLeft &&
-        insets.topCutoutRight > contentLeft &&
-        insets.topCutoutLeft < contentRight) {
-      if (insets.topCutoutLeft <= contentLeft) return 0;
-      maxWidth = Math.min(maxWidth, insets.topCutoutLeft - contentLeft);
+    let intervals: ReaderSafeInterval[] = contentRight > contentLeft ?
+      [{ left: contentLeft, right: contentRight }] : [];
+    const headerHeight = Math.max(this.statusBarHeight, 1);
+    for (let i = 0; i < insets.cutouts.length; i++) {
+      const cutout: ReaderWindowCutout = insets.cutouts[i];
+      if (cutout.top >= headerHeight || cutout.bottom <= 0) continue;
+      const next: ReaderSafeInterval[] = [];
+      for (let j = 0; j < intervals.length; j++) {
+        const interval = intervals[j];
+        if (cutout.right <= interval.left || cutout.left >= interval.right) {
+          next.push(interval);
+          continue;
+        }
+        if (cutout.left > interval.left) {
+          next.push({ left: interval.left,
+            right: Math.min(interval.right, cutout.left) });
+        }
+        if (cutout.right < interval.right) {
+          next.push({ left: Math.max(interval.left, cutout.right),
+            right: interval.right });
+        }
+      }
+      intervals = next.filter((interval: ReaderSafeInterval) =>
+        interval.right - interval.left > 0);
     }
-    return maxWidth;
+    if (intervals.length === 0) {
+      return { titleX: contentLeft, titleWidth: 0,
+        infoX: contentLeft, infoWidth: 0 };
+    }
+
+    const minimumInfoWidth = 100;
+    let infoIntervalIndex = -1;
+    for (let i = intervals.length - 1; i >= 0; i--) {
+      if (intervals[i].right - intervals[i].left >= minimumInfoWidth) {
+        infoIntervalIndex = i;
+        break;
+      }
+    }
+    if (infoIntervalIndex < 0) {
+      let widest = 0;
+      for (let i = 0; i < intervals.length; i++) {
+        const width = intervals[i].right - intervals[i].left;
+        if (width > widest) {
+          widest = width;
+          infoIntervalIndex = i;
+        }
+      }
+    }
+    const infoInterval = intervals[infoIntervalIndex];
+    const infoWidth = Math.min(minimumInfoWidth,
+      infoInterval.right - infoInterval.left);
+    const infoX = infoInterval.right - infoWidth;
+    const titleInterval = intervals[0];
+    const titleX = titleInterval.left;
+    const titleWidth = infoIntervalIndex === 0 ?
+      Math.max(0, infoX - titleX - 8) :
+      titleInterval.right - titleInterval.left;
+    return { titleX: titleX, titleWidth: titleWidth,
+      infoX: infoX, infoWidth: infoWidth };
   }
 
   private readerContentTopInsetVp(): number {
@@ -497,7 +645,7 @@ struct Reader {
   }
 
   private readerFooterHeightVp(): number {
-    return this.chapterTitle.length > 0 || this.pageFooter.length > 0 ?
+    return this.chapterTitle.length > 0 ?
       READER_FOOTER_HEIGHT_VP : 0;
   }
 
@@ -533,10 +681,9 @@ struct Reader {
     const displayInfo = display.getDefaultDisplaySync();
     const scale = displayInfo.scaledDensity > 0 ?
       displayInfo.scaledDensity : 1;
-    const widthPx = this.viewportWidthVp > 0 ?
-      this.getUIContext().vp2px(this.viewportWidthVp) : displayInfo.width;
-    const heightPx = this.viewportHeightVp > 0 ?
-      this.getUIContext().vp2px(this.viewportHeightVp) : displayInfo.height;
+    const widthPx = this.getUIContext().vp2px(this.viewportWidthVp);
+    const heightPx = this.getUIContext().vp2px(this.viewportHeightVp);
+    this.logReaderViewport('page_config');
     return {
       fontName: 'HarmonyOS Sans',
       fontSize: this.fontSize,
@@ -545,7 +692,7 @@ struct Reader {
       fontPath: '',
       lineHeight: this.lineHeight,
       nightMode: this.isDarkTheme(),
-      themeColor: this.isDarkTheme() ? '#101114' : '#F7F4EC',
+      themeColor: this.palette().readerPage,
       themeBgImg: '',
       flipMode: this.flipMode,
       scaledDensity: scale,
@@ -555,7 +702,8 @@ struct Reader {
   }
 
   private applyPageConfig(restorePosition: boolean): void {
-    if (this.parser === null || this.leaving) return;
+    if (this.parser === null || this.leaving || !this.readerReady ||
+        this.viewportWidthVp <= 0 || this.viewportHeightVp <= 0) return;
     try {
       this.controller.setPageConfig(this.pageConfig());
       this.log('pageConfig', 'updated');
@@ -694,38 +842,49 @@ struct Reader {
 
   @Builder
   readerInfoBar() {
-    Row() {
-      Text(this.title).fontSize(12).fontColor(this.palette().secondaryText)
-        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
-        .constraintSize({ maxWidth: this.headerTitleMaxWidthVp })
-      Text(this.timeText).fontSize(12)
-        .fontColor(this.palette().secondaryText).margin({ left: 10 })
+    Stack({ alignContent: Alignment.TopStart }) {
       Row() {
-        Stack({ alignContent: Alignment.TopStart }) {
-          if (this.batteryPercent > 0) {
-            Row().width(Math.max(1,
-              Math.round(11 * this.batteryPercent / 100)))
-              .height(4).margin({ left: 2, top: 3 })
-              .backgroundColor(this.palette().secondaryText).borderRadius(1)
-          }
-        }
-        .width(17).height(10)
-        .border({ width: 1, color: this.palette().secondaryText, radius: 2 })
-        Column().width(2).height(4)
-          .backgroundColor(this.palette().secondaryText)
-          .margin({ left: 1 })
-        Text(this.batteryPercent < 0 ? '--%' :
-          this.batteryPercent.toString() + '%')
-          .fontSize(11).fontColor(this.palette().secondaryText)
-          .margin({ left: 4 })
+        Text(this.title).fontSize(12)
+          .fontColor(this.palette().secondaryText)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
       }
-      .alignItems(VerticalAlign.Center).margin({ left: 8 })
+      .width(this.headerTitleMaxWidthVp)
+      .height('100%')
+      .alignItems(VerticalAlign.Center)
+      .position({ x: this.headerTitleX, y: 0 })
+
+      Row() {
+        Text(this.timeText).fontSize(12).width(34)
+          .textAlign(TextAlign.End).fontColor(this.palette().secondaryText)
+        Row() {
+          Stack({ alignContent: Alignment.TopStart }) {
+            if (this.batteryPercent > 0) {
+              Row().width(Math.max(1,
+                Math.round(11 * this.batteryPercent / 100)))
+                .height(4).margin({ left: 2, top: 3 })
+                .backgroundColor(this.palette().secondaryText).borderRadius(1)
+            }
+          }
+          .width(17).height(10)
+          .border({ width: 1, color: this.palette().secondaryText, radius: 2 })
+          Column().width(2).height(4)
+            .backgroundColor(this.palette().secondaryText)
+            .margin({ left: 1 })
+          Text(this.batteryPercent < 0 ? '--%' :
+            this.batteryPercent.toString() + '%')
+            .fontSize(11).width(27)
+            .fontColor(this.palette().secondaryText).margin({ left: 4 })
+        }
+        .margin({ left: 8 })
+      }
+      .alignItems(VerticalAlign.Center)
+      .width(this.headerInfoWidth)
+      .height('100%')
+      .position({ x: this.headerInfoX, y: 0 })
     }
     .width('100%').height(this.statusBarHeight)
-    .alignItems(VerticalAlign.Center)
-    .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight })
-    .backgroundColor(this.palette().page)
+    .backgroundColor(this.palette().readerPage)
     .hitTestBehavior(HitTestMode.None)
   }
 
@@ -737,18 +896,10 @@ struct Reader {
           .fontColor(this.palette().secondaryText).layoutWeight(1)
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
       }
-      if (this.chapterTitle.length === 0 && this.pageFooter.length > 0) {
-        Blank().layoutWeight(1)
-      }
-      if (this.pageFooter.length > 0) {
-        Text(this.pageFooter).fontSize(11)
-          .fontColor(this.palette().secondaryText)
-          .maxLines(1).textAlign(TextAlign.End)
-      }
     }
     .width('100%').height(READER_FOOTER_HEIGHT_VP)
     .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight })
-    .backgroundColor(this.palette().page)
+    .backgroundColor(this.palette().readerPage)
     .hitTestBehavior(HitTestMode.None)
   }
 
@@ -965,7 +1116,7 @@ struct Reader {
 
       if (this.catalogVisible) this.catalogPanel()
     }
-    .width('100%').height('100%').backgroundColor(this.palette().page)
+    .width('100%').height('100%').backgroundColor(this.palette().readerPage)
     .expandSafeArea([SafeAreaType.SYSTEM],
       [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
