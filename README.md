@@ -7,7 +7,7 @@
 ## 按运行平台划分的工程
 
 - **华为轻智能手表（`watch/huawei/watch-lite`）**：HarmonyOS Lite Wearable 的 JS FA（HML/CSS/JS）。不能直接运行 Rust writer_core、ArkTS Stage HAP 或 Wear OS APK。
-- **HarmonyOS 应用（`harmony`）**：HarmonyOS NEXT / ArkTS Stage（优先 Pocket 2），手机、平板、折叠屏共用同一工程与自适应 UI。适合做 TXT/EPUB 转换与书籍管理。
+- **HarmonyOS 应用（`harmony`）**：HarmonyOS NEXT / ArkTS Stage，手机、平板和折叠屏共用一套书库、传书页与官方 Reader Kit 阅读页。
 - **Android 应用（`android`）**：在 nova 7 Pro 等 Android/HMS 手机上运行的原生 Kotlin APK，角色与 `harmony` 相同（同为「手机」），复用同一套 `protocol` v0，用官方 Android Wear Engine SDK 传书给 GT 4。见 [android/README.md](android/README.md)。
 - **`protocol`**：双端约定的协议文档，非直接共享可执行的二进制核心。
 
@@ -18,8 +18,8 @@
 - 手表端接收双通道：消息通道（CHUNK 拼接 → 摘要 → 入库）与文件通道（Wear Engine 送达 → 复制入沙箱 → 大小+流式摘要校验 → 原子入库）；失败一律清理暂存、绝不入书架；RESULT/ACK/RESUME 经 `wearengine.sendMsg` 唯一通道回手机；单本在途互斥（并发传书回 `E_BUSY`）。
 - 手表端**构建期内置书籍**（issue #10 复核后）：`WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug` 把顶层 TXT（UTF-8/GB18030/UTF-16 自动转 UTF-8、同内容去重）规范化后放进**内置 rawfile 资源** `resources/rawfile/gt4books/<bookId>.txt`，书单 `books/BookCatalog.g.js` **只含元数据**。此前把正文编译成 JS 数据模块会让阅读页 JS 达 2.1 MB、对应 GT4 安装报 **错误 34**；现正文在 rawfile、页面 JS 保持约 60 KB（构建打印 `WATCH_PAGE_JS`）。设备侧 `storage/BundledBookSource.js` 按需窗口读 rawfile，读不到再 `file.copy` 到私有目录读，都失败则显示真实接口名/错误码。私人正文被 gitignore、构建 `EXIT` trap 还原清理；产物经 `BOOKS_IN_BIN_OK` 校验内部单 BIN 真的带正文字节。**未验证**：GT4 能否读/复制 rawfile 只能真机判定。详见 [watch/huawei/watch-lite/README.md](watch/huawei/watch-lite/README.md)。
 - 手机端实现 TXT/EPUB 导入：文档选择器 → 授权 URI 分块读取（32 MiB 上限）→ 编码识别/EPUB 解包 → 规范化 UTF-8 写入沙箱（摘要对规范化字节计算并写后复核）→ 书库索引；已在本机 HarmonyOS CLI 真实编译并签名成功（debug HAP，见下）。
-- 手机端本机阅读器首版（issue #18）：书架可进入 `pages/Reader`，只接收 `bookId` 并由 `BookRepository` 解析真实文件；按 64 KiB 读取窗口 + 约 256 字节可见段落有界加载，滚动按可见段首字节精确保存/恢复，不把 32 MiB 正文放进状态；章节目录跳转、字号/行距/明暗主题、手机/平板/折叠屏自适应宽度；进度以规范化 UTF-8 **字节偏移**写入 Preferences，按 `bookId` + `sha256` 隔离，字体/主题/窗口变化不重置，删书清理，重复导入同内容保留。已编译进 debug HAP，**未做 Pocket 2 真机阅读验收**。
-- 手机 ↔ 手表阅读进度同步（issue #18，独立于传书）：协议新增 `READ_PROGRESS_GET/STATE/APPLY`，每条 JSON <4096 字节，只带 bookId/sha256/字节 offset/时间/上次阅读入口，不带正文、目录或书架；手机复用已注册的 P2P 通道，手表在同一个 `subscribeMsg` 回调里分流到 `wear/ProgressSync.js`，不创建第二套订阅。只对本地已有且摘要一致的书应用，校验范围和 UTF-8 边界；两边都改过时手机弹窗选择，不按 offset 大小静默覆盖；删除书清理进度/基线/last。**双端真机同步尚未验证**。
+- 手机端 Reader Kit 重建（issue #22）：主页只有「书架」「传书」两个 Tab；书架整卡打开官方 `ReadPageComponent`，使用 `bookParser` 解析沙箱内 TXT/EPUB，支持目录、字号、行高、主题、横向滑页/仿真翻页和按视口尺寸重排。新导入 EPUB 同时保存原 EPUB 与供手表使用的规范化 UTF-8 文本；旧 EPUB 缺少原始文件时提示重新导入，不删除原书或旧进度。Reader Kit 的 `resourceIndex + startDomPos` 单独保存在本机，不假作手表协议 UTF-8 字节偏移；尚未验证映射的书会从双向位置同步中排除，其他可映射书仍可同步。Reader Kit 不支持模拟器，**Pocket 2 上打开 TXT/EPUB、翻页与续读仍需真机完成验收**。
+- 手机 ↔ 手表阅读进度同步（独立于传书）：协议 `READ_PROGRESS_GET/STATE/APPLY` 每条 JSON <4096 字节，只带 bookId/sha256/字节 offset/时间/上次阅读入口，不带正文、目录或书架；手机复用已注册 P2P 通道，手表在同一个 `subscribeMsg` 回调里分流，不创建第二套订阅。只对本地已有且摘要一致的书应用，校验范围与 UTF-8 边界；冲突由用户选择，不按 offset 大小静默覆盖；删除书清理同步数据。**双端真机同步尚未验证**。
 - TXT 章节识别增强（issue #18）：Harmony、Android、构建期 Python 共用同一套多阶段规则（格式 → 标题形态 → 目录去重 → 章节号连续性/LIS），支持 `第123章出发`、`第十二节`、全角/中文数字、装饰/站点前缀、CRLF、emoji UTF-8 字节偏移；前导目录密集重复标题会去重，普通正文里的“第…章”不会误切；无法可靠识别时回退单章“正文”。跨端夹具与 10k 章性能测试见 `tests/chapter_detection.test.mjs`；**不声称高准确率或已覆盖所有非标准 TXT**。
 - 双端身份分离：`PHONE_SELF`（手机 APP ID，手表 `supportLists` / `setFingerprint` 登记用）与 `WATCH_PEER`（GT 4 Lite `bundleName_Base64(签名证书原始 EC 公钥点)`，手机 `remoteApp` 用）；构建期从真实 profile/证书注入，空值或格式错误明确禁用发送；构建后核对最终 HAP 产物并验签。
 - 手机端 Wear Engine 发送：设备发现、显式选择目标、`transferFile` 文件通道（句柄终态关闭）、每轮重试重新注册 RESULT waiter（上传/回执超时分离）、取消接 `cancelFileTransfer` 并通知手表清理；等待手表 RESULT 回执才认定入库；**Wear Engine 真机互通待验证**。应用级 Client ID 元数据（`module.metadata.client_id`，issue #6）已写入并在最终签名 HAP 中构建期校验（`METADATA_OK`）；设备发现对确定性错误（`1008509999`）不自动重试，仅在途串行 + 短暂错误有限退避（见 [WEAR_ENGINE_CLIENT_ID](docs/WEAR_ENGINE_CLIENT_ID.md)）。

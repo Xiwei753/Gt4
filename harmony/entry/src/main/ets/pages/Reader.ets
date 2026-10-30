@@ -1,179 +1,151 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 鸿蒙手机本机阅读器首版：按规范化 UTF-8 字节窗口读取，绝不把整本
-// 32 MiB 正文塞进状态；字体/主题/窗口宽度只影响显示，不改变进度。
+// 本机阅读页使用系统 Reader Kit；传手表仍由独立的规范化 UTF-8 正文驱动。
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
-import { router } from '@kit.ArkUI';
-import { BookChapter, BookMeta } from '../model/BookModels';
+import { router, display } from '@kit.ArkUI';
+import { bookParser, ReadPageComponent, readerCore } from '@kit.ReaderKit';
+import { APP_SYSTEM_DARK_KEY, APP_THEME_MODE_KEY, AppThemePalette,
+  AppThemeMode, isDarkTheme, themePalette } from '../services/AppTheme';
+import { BookMeta } from '../model/BookModels';
 import { BookRepository } from '../services/BookRepository';
 import { ReadingProgressStore } from '../services/ReadingProgressStore';
-import { addReadingApplyListener, addReadingPrepareListener,
-  removeReadingApplyListener,
-  removeReadingPrepareListener } from '../services/ReadingSyncEvents';
-import { chapterIndexAt } from '../model/TextWindow';
-import {
-  loadedSegmentBytes,
-  safeWindowLength,
-  segmentIndexForOffset,
-  splitWindowSegments
-} from '../model/ReaderSegments';
-import { bumpWriteGeneration, captureWriteGeneration }
-  from '../model/ProgressWriteQueue';
+import { ReaderKitLocation, ReaderKitSettings,
+  ReaderKitStateStore } from '../services/ReaderKitStateStore';
+import { AppThemeStore, applyNativeThemeMode }
+  from '../services/AppThemeStore';
+import { recordReaderDiagnostic } from '../services/ReaderDiagnostics';
 import { enterReaderWindow, exitReaderWindow,
-  refreshReaderWindowInsets, restoreShelfWindow,
-  setReaderWindowTheme, ReaderWindowInsets }
+  refreshReaderWindowInsets, setAppWindowTheme, ReaderWindowInsets }
   from '../services/ReaderWindowAppearance';
-
-const WINDOW_BYTES = 64 * 1024;
-// 每段约 256 字节，进度精度远高于旧的 6 KiB 块，又不会让列表项过多。
-const SEGMENT_TARGET_BYTES = 256;
-const MAX_LOADED_SEGMENTS = 900;
-const MAX_LOADED_BYTES = 256 * 1024;
-// 程序化滚动后 List 会先发临时索引；等动画落定再接收 onScrollIndex。
-const SCROLL_GUARD_MS = 700;
-const CHAPTER_PAGE_SIZE = 100;
 
 interface ReaderParams {
   bookId?: string;
 }
 
-interface ReaderSegment {
-  offset: number;
-  length: number;
-  text: string;
+interface ErrorCodeCarrier {
+  code?: number;
 }
 
 @Entry
 @Component
 struct Reader {
   @State private title: string = '';
-  @State private segments: ReaderSegment[] = [];
-  @State private chapters: BookChapter[] = [];
-  @State private fontSize: number = 20;
-  @State private lineSpacing: number = 1.65;
-  @State private darkTheme: boolean = true;
-  @State private showSettings: boolean = false;
-  @State private showChapters: boolean = false;
-  @State private showControls: boolean = false;
-  @State private chapterPage: number = 0;
   @State private loading: boolean = true;
-  @State private status: string = '正在打开……';
-  @State private currentIndex: number = 0;
-  @State private currentOffset: number = 0;
-  @State private progressLabel: string = '';
-  @State private pagePadding: number = 16;
-  // 沉浸式布局只有一套避让策略：窗口全屏后，页面背景延伸，
-  // 正文和可点击控件用真实避让区换算出的 vp 间距，不再叠加
-  // expandSafeArea/ignoreLayoutSafeArea。
+  @State private readerAvailable: boolean = false;
+  @State private status: string = '正在初始化 Reader Kit……';
+  @State private controlsVisible: boolean = true;
+  @State private settingsVisible: boolean = false;
+  @State private catalogVisible: boolean = false;
+  @State private catalogs: bookParser.CatalogItem[] = [];
+  @State private fontSize: number = 20;
+  @State private lineHeight: number = 1.6;
+  @StorageLink(APP_THEME_MODE_KEY) @Watch('themeStateChanged')
+  private themeMode: AppThemeMode = 'system';
+  @StorageLink(APP_SYSTEM_DARK_KEY) @Watch('themeStateChanged')
+  private systemDark: boolean = false;
+  @State private flipMode: string = '1';
+  @State private pageFooter: string = '';
+  @State private chapterTitle: string = '';
   @State private safeTop: number = 0;
   @State private safeBottom: number = 0;
   @State private safeLeft: number = 0;
   @State private safeRight: number = 0;
+  @State private viewportWidthVp: number = 0;
+  @State private viewportHeightVp: number = 0;
 
   private book: BookMeta | null = null;
   private repository: BookRepository | null = null;
   private progressStore: ReadingProgressStore | null = null;
-  private fd: number = -1;
-  private scroller: Scroller = new Scroller();
-  private saveTimer: number = -1;
-  private lastSavedOffset: number = -1;
-  // 跳章/同步/字号重排期间禁止 onScrollIndex 覆盖目标位置。
-  private scrollGuardActive: boolean = false;
-  private scrollGuardToken: number = 0;
-  private scrollGuardTimer: number = -1;
-  private scrollGuardTarget: number = -1;
-  // 串行化进度写入，避免较早的异步写入晚于新位置落盘；
-  // epoch 用于远端进度应用后作废尚未执行的本地写入。
-  private saveChain: Promise<void> = Promise.resolve();
-  private saveEpoch: number = 0;
-  private loadingMore: boolean = false;
-  private opened: boolean = false;
+  private readerState: ReaderKitStateStore | null = null;
+  private controller: readerCore.ReaderComponentController =
+    new readerCore.ReaderComponentController();
+  private parser: bookParser.BookParserHandler | null = null;
+  private spine: bookParser.SpineItem[] = [];
+  private currentResourceIndex: number = 0;
+  private currentDomPos: string = '';
+  private lastPositionLogResourceIndex: number = -1;
+  private initialized: boolean = false;
   private leaving: boolean = false;
-  private lastWidth: number = 0;
+  private settingsLoad: Promise<void> = Promise.resolve();
+  private resizeTimer: number = -1;
   private onWindowInsets = (insets: ReaderWindowInsets): void => {
-    if (this.safeTop !== insets.top) this.safeTop = insets.top;
-    if (this.safeBottom !== insets.bottom) this.safeBottom = insets.bottom;
-    if (this.safeLeft !== insets.left) this.safeLeft = insets.left;
-    if (this.safeRight !== insets.right) this.safeRight = insets.right;
+    this.safeTop = insets.top;
+    this.safeBottom = insets.bottom;
+    this.safeLeft = insets.left;
+    this.safeRight = insets.right;
   };
-  private remotePrepare = (bookId: string): void => {
-    const book = this.book;
-    if (book === null || book.bookId !== bookId) return;
-    // 远端写入 Preferences 之前先取消旧 debounce 并作废旧代次，
-    // 防止旧定时器在远端写入之后又把旧位置排进队列。
-    this.saveEpoch++;
-    if (this.saveTimer !== -1) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = -1;
-    }
-    bumpWriteGeneration(bookId);
+  private pageShowListener = (info: readerCore.PageDataInfo): void => {
+    this.onReaderPageShow(info);
   };
-
-  private remoteApply = (bookId: string, offset: number): void => {
-    const book = this.book;
-    if (book === null || book.bookId !== bookId) return;
-    // 远端进度优先于尚未落盘的本地写入。
-    this.saveEpoch++;
-    if (this.saveTimer !== -1) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = -1;
+  private resourceRequestListener = (path: string): ArrayBuffer => {
+    const parser = this.parser;
+    if (parser === null) return new ArrayBuffer(0);
+    try {
+      return parser.getResourceContent(this.currentResourceIndex, path);
+    } catch (error) {
+      this.log('resource', 'read', this.errorCode(error));
+      return new ArrayBuffer(0);
     }
-    const target = this.snapFileOffset(offset);
-    this.status = '已采用同步进度，正在重绘……';
-    this.loadWindowAt(target, target, true).then(() => {
-      this.lastSavedOffset = this.currentOffset;
-      this.status = '';
-    }).catch(() => {
-      this.status = '同步进度重绘失败，继续使用当前位置';
-    });
   };
-
-  private getRepository(): BookRepository {
-    if (this.repository === null) {
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      this.repository = new BookRepository(context);
-    }
-    return this.repository;
-  }
-
-  private getProgressStore(): ReadingProgressStore {
-    if (this.progressStore === null) {
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      this.progressStore = new ReadingProgressStore(context);
-    }
-    return this.progressStore;
-  }
 
   aboutToAppear(): void {
-    addReadingApplyListener(this.remoteApply);
-    addReadingPrepareListener(this.remotePrepare);
-    if (!this.opened) {
-      this.opened = true;
-      this.openBook();
+    const params = router.getParams() as ReaderParams;
+    const bookId = params && typeof params.bookId === 'string' ?
+      params.bookId : '';
+    if (!bookId) {
+      this.loading = false;
+      this.status = '缺少书籍参数，无法打开阅读页';
+      return;
     }
+    const context = this.context();
+    this.repository = new BookRepository(context);
+    this.progressStore = new ReadingProgressStore(context);
+    this.readerState = new ReaderKitStateStore(context);
+    this.book = this.repository.get(bookId);
+    if (this.book === null) {
+      this.loading = false;
+      this.status = '书籍不存在，或正文文件已被删除';
+      return;
+    }
+    this.title = this.book.title;
+    this.chapterTitle = this.book.title;
+    const path = this.readerPath(this.book);
+    if (this.book.kind === 'epub' &&
+        (!this.book.readerFilePath ||
+         this.book.readerFilePath === this.book.filePath)) {
+      this.loading = false;
+      this.status = '这本 EPUB 是旧版导入记录，缺少原始 EPUB 文件。请重新导入原文件后再用 Reader Kit 阅读；现有书籍和手表数据已保留。';
+      return;
+    }
+    if (!fileIo.accessSync(path)) {
+      this.loading = false;
+      this.status = 'Reader Kit 输入文件不可用。请重新导入这本书；现有进度不会删除。';
+      return;
+    }
+    this.readerAvailable = true;
+    this.settingsLoad = this.loadSettings().catch((error: Error) => {
+      this.log('settings', 'load', this.errorCode(error));
+    });
   }
 
-  // 页面重新可见（首次进入、切后台回来、从其它页面返回）时重新确认
-  // 全屏布局与系统栏图标；系统可能在后台重置这些属性。
   onPageShow(): void {
-    this.enterImmersiveWindow();
+    const context = this.context();
+    enterReaderWindow(context, this.themeMode, this.isDarkTheme(),
+      this.onWindowInsets);
+    this.log('reader', 'foreground');
   }
 
   onPageHide(): void {
-    this.flushSave();
+    this.saveCurrentLocation();
   }
 
   onBackPress(): boolean {
-    if (this.showChapters) {
-      this.showChapters = false;
+    if (this.catalogVisible) {
+      this.catalogVisible = false;
       return true;
     }
-    if (this.showSettings) {
-      this.showSettings = false;
-      return true;
-    }
-    if (this.showControls) {
-      this.showControls = false;
+    if (this.settingsVisible) {
+      this.settingsVisible = false;
       return true;
     }
     this.backToShelf();
@@ -182,793 +154,540 @@ struct Reader {
 
   aboutToDisappear(): void {
     this.leaving = true;
-    removeReadingApplyListener(this.remoteApply);
-    removeReadingPrepareListener(this.remotePrepare);
-    this.cancelScrollGuard();
-    this.flushSave();
-    this.closeFile();
-    // 恢复书架的系统栏和普通布局；Index.onPageShow 还有一次兜底，
-    // 防止路由生命周期顺序不同导致全屏状态泄漏。
+    if (this.resizeTimer !== -1) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = -1;
+    }
+    this.saveCurrentLocation();
+    try {
+      this.controller.off('pageShow', this.pageShowListener);
+      this.controller.off('resourceRequest', this.resourceRequestListener);
+      this.controller.releaseBook();
+    } catch (error) {
+      this.log('reader', 'release', this.errorCode(error));
+    }
     exitReaderWindow();
   }
 
-  private enterImmersiveWindow(): void {
-    const context =
-      this.getUIContext().getHostContext() as common.UIAbilityContext;
-    enterReaderWindow(context, this.darkTheme, this.onWindowInsets);
+  private context(): common.UIAbilityContext {
+    return this.getUIContext().getHostContext() as common.UIAbilityContext;
   }
 
-  private toggleControls(): void {
-    if (this.showChapters) return;
-    this.showControls = !this.showControls;
-    if (!this.showControls) {
-      this.showSettings = false;
-    }
+  private readerPath(book: BookMeta): string {
+    return book.readerFilePath || book.filePath;
   }
 
-  private async openBook(): Promise<void> {
-    const params = router.getParams() as ReaderParams;
-    const bookId = params && typeof params.bookId === 'string' ? params.bookId : '';
-    if (!bookId) {
-      this.loading = false;
-      this.status = '缺少书籍参数，无法打开阅读页';
-      return;
-    }
-    const book = this.getRepository().get(bookId);
-    if (book === null) {
-      this.loading = false;
-      this.status = '书籍不存在，或正文文件已被删除';
-      return;
-    }
-    this.book = book;
-    this.title = book.title;
-    this.chapters = book.chapters;
-    try {
-      this.fd = fileIo.openSync(book.filePath,
-        fileIo.OpenMode.READ_ONLY).fd;
-    } catch (error) {
-      this.loading = false;
-      this.status = '打开正文失败，请重新导入或查看日志';
-      return;
-    }
-
-    let start = 0;
-    try {
-      const record = await this.getProgressStore().load(
-        book.bookId, book.sha256);
-      if (record !== null) start = record.offset;
-    } catch (error) {
-      // 进度读取失败不能阻塞阅读，从文件头开始。
-    }
-    await this.loadWindowAt(start, start, true);
-    try {
-      await this.getProgressStore().saveLastBook(book.bookId);
-    } catch (error) {
-      // 最后阅读书只是入口提示，失败不影响正文。
-    }
-    this.loading = false;
+  private async loadSettings(): Promise<void> {
+    if (this.readerState === null) return;
+    const settings = await this.readerState.loadSettings();
+    this.fontSize = settings.fontSize;
+    this.lineHeight = settings.lineHeight;
+    this.flipMode = settings.flipMode;
+    setAppWindowTheme(this.themeMode, this.isDarkTheme());
   }
 
-  private readBytes(offset: number, length: number): Uint8Array {
-    if (this.fd < 0 || length <= 0) return new Uint8Array(0);
-    const buffer = new Uint8Array(length);
-    const read = fileIo.readSync(this.fd, buffer.buffer,
-      { offset: offset, length: length });
-    return buffer.subarray(0, Math.max(read, 0));
+  private isDarkTheme(): boolean {
+    return isDarkTheme(this.themeMode, this.systemDark);
   }
 
-  // 保存/同步来的 offset 可能落在 UTF-8 续字节上；向前吸附到字符起点。
-  private snapFileOffset(offset: number): number {
-    const book = this.book;
-    if (book === null) return 0;
-    if (!Number.isFinite(offset)) return 0;
-    let value = Math.floor(offset);
-    if (value <= 0) return 0;
-    if (value >= book.bytes) return book.bytes;
-    const start = Math.max(0, value - 3);
-    const bytes = this.readBytes(start, value - start + 1);
-    let pos = value;
-    while (pos > start &&
-        (bytes[pos - start] & 0xC0) === 0x80) {
-      pos--;
-    }
-    return pos;
+  private palette(): AppThemePalette {
+    return themePalette(this.themeMode, this.systemDark);
   }
 
-  private async loadWindowAt(startOffset: number,
-    anchorOffset: number, scroll: boolean): Promise<void> {
-    const book = this.book;
-    if (book === null || this.fd < 0) return;
-    const base = this.snapFileOffset(startOffset);
-    const length = Math.min(WINDOW_BYTES, book.bytes - base);
-    if (length <= 0) {
-      this.segments = [];
-      this.loading = false;
-      return;
-    }
-    const raw = this.readBytes(base, length);
-    const usable: number = safeWindowLength(raw,
-      base + length < book.bytes) as number;
-    if (usable <= 0) {
-      this.segments = [];
-      this.loading = false;
-      this.status = '正文窗口边界异常';
-      return;
-    }
-    const bytes = raw.subarray(0, usable);
-    const ranges = splitWindowSegments(bytes, SEGMENT_TARGET_BYTES,
-      MAX_LOADED_SEGMENTS) as ReaderSegment[];
-    const next: ReaderSegment[] = [];
-    for (let i = 0; i < ranges.length; i++) {
-      const range = ranges[i];
-      next.push({
-        offset: base + range.offset,
-        length: range.length,
-        text: range.text
-      });
-    }
-    // 先定位到包含 anchorOffset 的分段，再整体替换列表并滚到该段。
-    const target = this.indexIn(next, anchorOffset);
-    if (scroll) this.armScrollGuard(target, true);
-    this.segments = next;
-    this.currentIndex = target;
-    this.currentOffset = next.length > 0 ? next[target].offset : base;
-    this.updateProgressLabel();
-    this.status = '';
+  private themeStateChanged(): void {
+    const dark = this.isDarkTheme();
+    setAppWindowTheme(this.themeMode, dark);
+    this.applyPageConfig(true);
   }
 
-  private indexIn(list: ReaderSegment[], offset: number): number {
-    if (list.length === 0) return 0;
-    return segmentIndexForOffset(list, offset);
-  }
-
-  private indexForOffset(offset: number): number {
-    return this.indexIn(this.segments, offset);
-  }
-
-  // 跳转后 List 可能先发出临时的 0 号索引；在滚动落定前忽略
-  // onScrollIndex，避免把刚同步/跳转到的位置又写回文件头。
-  private cancelScrollGuard(): void {
-    this.scrollGuardToken++;
-    this.scrollGuardActive = false;
-    this.scrollGuardTarget = -1;
-    if (this.scrollGuardTimer !== -1) {
-      clearTimeout(this.scrollGuardTimer);
-      this.scrollGuardTimer = -1;
-    }
-  }
-
-  private armScrollGuard(index: number, animate: boolean): void {
-    this.scrollGuardToken++;
-    const token = this.scrollGuardToken;
-    this.scrollGuardActive = true;
-    // 跳章/同步允许目标段到顶后提前结束守卫；重排要等布局稳定。
-    this.scrollGuardTarget = animate ? index : -1;
-    if (this.scrollGuardTimer !== -1) {
-      clearTimeout(this.scrollGuardTimer);
-    }
-    this.scrollGuardTimer = setTimeout(() => {
-      if (token !== this.scrollGuardToken) return;
-      this.scrollGuardActive = false;
-      this.scrollGuardTarget = -1;
-      this.scrollGuardTimer = -1;
-      this.updateProgressLabel();
-      // 跳转目标可能靠近当前窗口末尾；落定后补一次有界加载。
-      if (this.currentIndex >= this.segments.length - 2) {
-        this.appendNext();
-      }
-    }, SCROLL_GUARD_MS);
-    // 字号/行距/宽度变化后先让本轮布局完成，再按段索引回锚。
-    setTimeout(() => {
-      if (token !== this.scrollGuardToken) return;
-      if (index >= 0 && index < this.segments.length) {
-        this.scroller.scrollToIndex(index, animate);
-      }
-    }, animate ? 0 : 50);
-  }
-
-  // 字号/行距/主题/窗口宽度变化后用当前字节位置重新定位，不回到 0。
-  private rescrollToCurrent(): void {
-    if (this.segments.length === 0) return;
-    const index = this.indexForOffset(this.currentOffset);
-    this.currentIndex = index;
-    this.armScrollGuard(index, false);
-  }
-
-  private loadedBytes(): number {
-    return loadedSegmentBytes(this.segments) as number;
-  }
-
-  private appendNext(): void {
-    const book = this.book;
-    if (book === null || this.fd < 0 || this.loadingMore ||
-        this.segments.length === 0) return;
-    const loaded = this.loadedBytes();
-    if (this.segments.length >= MAX_LOADED_SEGMENTS ||
-        loaded >= MAX_LOADED_BYTES) {
-      this.status = '已到当前窗口末尾，点“继续加载”继续阅读';
-      return;
-    }
-    const last = this.segments[this.segments.length - 1];
-    const start = last.offset + last.length;
-    if (start >= book.bytes) return;
-    this.loadingMore = true;
-    const length = Math.min(WINDOW_BYTES, book.bytes - start);
-    const raw = this.readBytes(start, length);
-    const usable: number = safeWindowLength(raw,
-      start + length < book.bytes) as number;
-    if (usable <= 0) {
-      this.loadingMore = false;
-      this.status = '正文窗口边界异常，点“继续加载”重试';
-      return;
-    }
-    const bytes = raw.subarray(0, usable);
-    const ranges = splitWindowSegments(bytes, SEGMENT_TARGET_BYTES,
-      MAX_LOADED_SEGMENTS) as ReaderSegment[];
-    const appended: ReaderSegment[] = [];
-    let used = loaded;
-    for (let i = 0; i < ranges.length; i++) {
-      const range = ranges[i];
-      if (this.segments.length + appended.length >= MAX_LOADED_SEGMENTS) break;
-      if (used + range.length > MAX_LOADED_BYTES) break;
-      appended.push({
-        offset: start + range.offset,
-        length: range.length,
-        text: range.text
-      });
-      used += range.length;
-    }
-    if (appended.length > 0) {
-      this.segments = this.segments.concat(appended);
-      this.status = '';
-    } else if (start < book.bytes) {
-      // 余量不足一段时不要静默卡住，仍给出“继续加载”入口。
-      this.status = '已到当前窗口末尾，点“继续加载”继续阅读';
-    }
-    this.loadingMore = false;
-  }
-
-  private continueFromHere(): void {
-    this.status = '';
-    this.loadWindowAt(this.currentOffset, this.currentOffset, true);
-  }
-
-  private onScrollIndex(start: number, end: number): void {
-    if (this.scrollGuardActive) {
-      // 目标段真正到达列表顶部后才恢复接收；中途的 0 号/过路索引一律忽略。
-      if (this.scrollGuardTarget < 0 || start !== this.scrollGuardTarget) {
-        return;
-      }
-      if (this.scrollGuardTimer !== -1) {
-        clearTimeout(this.scrollGuardTimer);
-        this.scrollGuardTimer = -1;
-      }
-      this.scrollGuardActive = false;
-      this.scrollGuardTarget = -1;
-    }
-    if (start < 0 || start >= this.segments.length) return;
-    const segment = this.segments[start];
-    this.currentIndex = start;
-    this.currentOffset = segment.offset;
-    this.updateProgressLabel();
-    this.scheduleSave(segment.offset);
-    if (end >= this.segments.length - 2) {
-      this.appendNext();
-    }
-  }
-
-  private updateProgressLabel(): void {
-    const book = this.book;
-    if (book === null || book.bytes <= 0) {
-      this.progressLabel = '';
-      return;
-    }
-    const percent = Math.min(100,
-      Math.floor(this.currentOffset * 100 / book.bytes));
-    this.progressLabel = percent + '% · ' + this.currentChapterTitle();
-  }
-
-  private currentChapterIndex(): number {
-    if (this.chapters.length === 0) return -1;
-    return chapterIndexAt(this.chapters, this.currentOffset);
-  }
-
-  private currentChapterTitle(): string {
-    const index = this.currentChapterIndex();
-    if (index >= 0 && index < this.chapters.length) {
-      return this.chapters[index].title;
-    }
-    return '正文';
-  }
-
-  private scheduleSave(offset: number): void {
-    if (offset === this.lastSavedOffset) return;
-    const book = this.book;
-    if (book === null) return;
-    const generation: number =
-      captureWriteGeneration(book.bookId) as number;
-    if (this.saveTimer !== -1) {
-      clearTimeout(this.saveTimer);
-    }
-    this.saveTimer = setTimeout(() => {
-      this.saveTimer = -1;
-      this.saveOffset(offset, generation);
-    }, 700);
-  }
-
-  private saveOffset(offset: number, generation?: number): Promise<void> {
-    const book = this.book;
-    if (book === null || !Number.isInteger(offset) || offset < 0) {
-      return this.saveChain;
-    }
-    if (offset === this.lastSavedOffset) return this.saveChain;
-    const epoch = this.saveEpoch;
-    const writeGeneration: number = generation !== undefined ? generation :
-      captureWriteGeneration(book.bookId) as number;
-    this.saveChain = this.saveChain.then(async () => {
-      // 远端进度已应用，旧的本地位置不能再覆盖它。
-      if (epoch !== this.saveEpoch) return;
-      if (offset === this.lastSavedOffset) return;
-      try {
-        await this.getProgressStore().save(book.bookId, book.sha256,
-          offset, undefined, writeGeneration);
-        if (epoch === this.saveEpoch) {
-          this.lastSavedOffset = offset;
-        }
-      } catch (error) {
-        // 阅读进度保存失败不能打断翻页；下次退出/重开会再尝试。
-      }
+  private setThemeMode(mode: AppThemeMode): void {
+    this.themeMode = mode;
+    const context = this.context();
+    new AppThemeStore(context).save(mode).catch((error: Error) => {
+      this.log('theme', 'save_fail', this.errorCode(error));
     });
-    return this.saveChain;
+    applyNativeThemeMode(context, mode);
+    setAppWindowTheme(mode, isDarkTheme(mode, this.systemDark));
+    this.applyPageConfig(true);
   }
 
-  private flushSave(): void {
-    if (this.saveTimer !== -1) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = -1;
-    }
+  private async initializeReader(
+    componentController: readerCore.ReaderComponentController): Promise<void> {
+    if (this.initialized || this.leaving || !this.readerAvailable) return;
+    this.initialized = true;
+    this.controller = componentController;
     const book = this.book;
-    const generation: number = book !== null ?
-      captureWriteGeneration(book.bookId) as number : 0;
-    this.saveOffset(this.currentOffset, generation);
+    const state = this.readerState;
+    const repository = this.repository;
+    if (book === null || state === null || repository === null) return;
+    const context = this.context();
+    try {
+      this.status = '正在初始化 Reader Kit……';
+      this.log('reader', 'init.start');
+      await this.controller.init(context);
+      this.log('reader', 'init.ok');
+
+      // getDefaultHandler 依赖 controller.init(context) 已成功完成。
+      this.log('parser', 'create.start');
+      this.parser = await bookParser.getDefaultHandler(this.readerPath(book));
+      this.log('parser', 'create.ok');
+      this.controller.registerBookParser(this.parser);
+      this.log('parser', 'register.ok');
+
+      this.spine = this.parser.getSpineList();
+      this.catalogs = this.parser.getCatalogList();
+      await this.settingsLoad;
+      repository.markProgressMapping(book.bookId, 'readerkit_unmapped');
+      if (this.progressStore !== null) {
+        await this.progressStore.saveLastBook(book.bookId);
+      }
+
+      this.controller.on('pageShow', this.pageShowListener);
+      this.controller.on('resourceRequest', this.resourceRequestListener);
+      this.controller.setPageConfig(this.pageConfig());
+      const saved = await state.loadLocation(book.bookId,
+        this.readerSha256(book));
+      const start = this.validLocation(saved) ? saved! : null;
+      this.currentResourceIndex = start !== null ?
+        start.resourceIndex : 0;
+      this.currentDomPos = start !== null ? start.startDomPos : '';
+      this.status = '正在打开书籍……';
+      this.log('reader', 'startPlay.start');
+      await this.controller.startPlay(this.currentResourceIndex,
+        this.currentDomPos);
+      this.log('reader', 'startPlay.ok');
+      this.loading = false;
+      this.status = '';
+    } catch (error) {
+      const code = this.errorCode(error);
+      this.log(this.failureStage(error), 'fail', code);
+      this.loading = false;
+      this.controlsVisible = true;
+      this.status = 'Reader Kit 打开失败（错误码 ' + code + '）。请检查 Reader Kit 服务、文件格式和设备系统版本；诊断日志不含书名或路径。';
+    }
   }
 
-  private closeFile(): void {
-    if (this.fd >= 0) {
-      try {
-        fileIo.closeSync(this.fd);
-      } catch (error) {
-        // 已关闭或文件被系统回收。
+  private validLocation(location: ReaderKitLocation | null): boolean {
+    return location !== null && this.spine.length > 0 &&
+      location.resourceIndex < this.spine.length;
+  }
+
+  private readerSha256(book: BookMeta): string {
+    return book.readerSha256 || book.sha256;
+  }
+
+  private onReaderPageShow(info: readerCore.PageDataInfo): void {
+    if (info.state !== readerCore.PageState.PAGE_ON_SHOW) return;
+    if (!Number.isInteger(info.resourceIndex) || info.resourceIndex < 0 ||
+        info.resourceIndex >= this.spine.length) return;
+    this.currentResourceIndex = info.resourceIndex;
+    this.currentDomPos = info.startDomPos;
+    this.pageFooter = info.pageFooterContent || '';
+    this.chapterTitle = this.catalogTitleFor(info.resourceIndex);
+    this.saveCurrentLocation();
+  }
+
+  private catalogTitleFor(resourceIndex: number): string {
+    for (let i = 0; i < this.spine.length; i++) {
+      if (this.spine[i].index !== resourceIndex) continue;
+      for (let j = 0; j < this.catalogs.length; j++) {
+        if (this.catalogs[j].idRef === this.spine[i].idRef) {
+          return this.catalogs[j].catalogName;
+        }
       }
-      this.fd = -1;
     }
+    return this.book !== null ? this.book.title : '';
+  }
+
+  private async saveCurrentLocation(): Promise<void> {
+    const book = this.book;
+    const state = this.readerState;
+    const resourceIndex = this.currentResourceIndex;
+    const domPos = this.currentDomPos;
+    if (book === null || state === null || resourceIndex < 0 ||
+        domPos.length > 4096) return;
+    try {
+      await state.saveLocation(book.bookId, this.readerSha256(book),
+        resourceIndex, domPos);
+      this.logLocationSavedAtResourceBoundary(resourceIndex);
+    } catch (error) {
+      this.log('pageShow', 'position.save_fail', this.errorCode(error));
+    }
+  }
+
+  // Position persistence still runs for every page, but sync log I/O only
+  // records the first successful save for each Reader Kit resource.
+  private logLocationSavedAtResourceBoundary(resourceIndex: number): void {
+    if (resourceIndex === this.lastPositionLogResourceIndex) return;
+    this.lastPositionLogResourceIndex = resourceIndex;
+    this.log('pageShow', 'position.saved');
+  }
+
+  private pageConfig(): readerCore.ReaderSetting {
+    const displayInfo = display.getDefaultDisplaySync();
+    const scale = displayInfo.scaledDensity > 0 ?
+      displayInfo.scaledDensity : 1;
+    const widthPx = this.viewportWidthVp > 0 ?
+      this.getUIContext().vp2px(this.viewportWidthVp) : displayInfo.width;
+    const heightPx = this.viewportHeightVp > 0 ?
+      this.getUIContext().vp2px(this.viewportHeightVp) : displayInfo.height;
+    return {
+      fontName: 'HarmonyOS Sans',
+      fontSize: this.fontSize,
+      fontWeight: 400,
+      fontColor: this.isDarkTheme() ? '#E8EAF0' : '#1F2937',
+      fontPath: '',
+      lineHeight: this.lineHeight,
+      nightMode: this.isDarkTheme(),
+      themeColor: this.isDarkTheme() ? '#101114' : '#F7F4EC',
+      themeBgImg: '',
+      flipMode: this.flipMode,
+      scaledDensity: scale,
+      viewPortWidth: Math.max(1, Math.round(widthPx)),
+      viewPortHeight: Math.max(1, Math.round(heightPx))
+    };
+  }
+
+  private applyPageConfig(restorePosition: boolean): void {
+    if (this.parser === null || this.leaving) return;
+    try {
+      this.controller.setPageConfig(this.pageConfig());
+      this.log('pageConfig', 'updated');
+      if (restorePosition && this.currentDomPos.length > 0) {
+        this.controller.startPlay(this.currentResourceIndex,
+          this.currentDomPos).catch((error: Error) => {
+          this.log('pageConfig', 'restore_fail', this.errorCode(error));
+        });
+      }
+    } catch (error) {
+      this.status = '更新阅读排版失败（错误码 ' +
+        this.errorCode(error) + '）';
+      this.log('pageConfig', 'update_fail', this.errorCode(error));
+    }
+  }
+
+  private persistSettings(): void {
+    const settings: ReaderKitSettings = {
+      fontSize: this.fontSize,
+      lineHeight: this.lineHeight,
+      nightMode: this.isDarkTheme(),
+      flipMode: this.flipMode
+    };
+    if (this.readerState !== null) {
+      this.readerState.saveSettings(settings).catch((error: Error) => {
+        this.log('settings', 'save', this.errorCode(error));
+      });
+    }
+    setAppWindowTheme(this.themeMode, this.isDarkTheme());
+    this.applyPageConfig(true);
+  }
+
+  private changeFont(delta: number): void {
+    this.fontSize = Math.min(34, Math.max(14, this.fontSize + delta));
+    this.persistSettings();
+  }
+
+  private changeLineHeight(delta: number): void {
+    this.lineHeight = Math.min(2.4,
+      Math.max(1.1, Math.round((this.lineHeight + delta) * 10) / 10));
+    this.persistSettings();
+  }
+
+  private toggleTheme(): void {
+    this.setThemeMode(this.isDarkTheme() ? 'light' : 'dark');
+  }
+
+  private toggleReaderControls(): void {
+    if (this.loading || this.catalogVisible) return;
+    if (this.settingsVisible) {
+      this.settingsVisible = false;
+      return;
+    }
+    this.controlsVisible = !this.controlsVisible;
+  }
+
+  private setFlipMode(mode: string): void {
+    if (mode !== '0' && mode !== '1') return;
+    this.flipMode = mode;
+    this.persistSettings();
+  }
+
+  private jumpToCatalog(catalog: bookParser.CatalogItem): void {
+    const parser = this.parser;
+    if (parser === null) return;
+    let resourceIndex = -1;
+    for (let i = 0; i < this.spine.length; i++) {
+      if (catalog.idRef && this.spine[i].idRef === catalog.idRef) {
+        resourceIndex = this.spine[i].index;
+        break;
+      }
+    }
+    if (resourceIndex < 0) {
+      this.status = '目录项没有对应的正文资源';
+      return;
+    }
+    let domPos = '';
+    try {
+      if (catalog.href) domPos = parser.getDomPosByCatalogHref(catalog.href);
+    } catch (error) {
+      this.status = '获取目录位置失败（错误码 ' +
+        this.errorCode(error) + '）';
+      this.log('catalog', 'resolve_fail', this.errorCode(error));
+      return;
+    }
+    this.catalogVisible = false;
+    this.currentResourceIndex = resourceIndex;
+    this.currentDomPos = domPos;
+    this.controller.startPlay(resourceIndex, domPos).then(() => {
+      this.log('catalog', 'jump.ok');
+    }).catch((error: Error) => {
+      this.status = '目录跳转失败（错误码 ' + this.errorCode(error) + '）';
+      this.log('catalog', 'jump.fail', this.errorCode(error));
+    });
   }
 
   private async backToShelf(): Promise<void> {
     if (this.leaving) return;
     this.leaving = true;
-    this.showChapters = false;
-    this.showSettings = false;
-    this.showControls = false;
-    if (this.saveTimer !== -1) {
-      clearTimeout(this.saveTimer);
-      this.saveTimer = -1;
+    await this.saveCurrentLocation();
+    if (this.book !== null && this.progressStore !== null) {
+      await this.progressStore.saveLastBook(this.book.bookId);
     }
-    await this.saveOffset(this.currentOffset);
-    const book = this.book;
-    if (book !== null) {
-      try {
-        await this.getProgressStore().saveLastBook(book.bookId);
-      } catch (error) {
-        // 入口提示失败不影响返回。
-      }
-    }
-    // 先恢复书架固定的深色系统栏，再取消全屏布局，最后才返回；
-    // 这样路由转场期间不会把全屏布局泄漏给书架。
-    const context =
-      this.getUIContext().getHostContext() as common.UIAbilityContext;
-    await restoreShelfWindow(context);
     router.back();
   }
 
-  private changeFont(delta: number): void {
-    const next = Math.max(16, Math.min(32, this.fontSize + delta));
-    if (next === this.fontSize) return;
-    this.fontSize = next;
-    this.rescrollToCurrent();
+  private errorCode(error: Object): number {
+    const value = error as ErrorCodeCarrier;
+    return typeof value.code === 'number' && Number.isFinite(value.code) ?
+      value.code : 0;
   }
 
-  private changeSpacing(delta: number): void {
-    const next = Math.round((this.lineSpacing + delta) * 10) / 10;
-    const value = Math.max(1.2, Math.min(2.4, next));
-    if (value === this.lineSpacing) return;
-    this.lineSpacing = value;
-    this.rescrollToCurrent();
+  private failureStage(error: Object): string {
+    const code = this.errorCode(error);
+    if (code === 1017000003 || code === 1017010003) return 'format';
+    if (code === 1017010004) return 'file';
+    if (code >= 1017000000 && code < 1017020000) return 'parser';
+    if (code >= 1016900000 && code < 1016920000) return 'reader';
+    return 'open';
   }
 
-  private toggleTheme(): void {
-    this.darkTheme = !this.darkTheme;
-    setReaderWindowTheme(this.darkTheme);
-    this.rescrollToCurrent();
-  }
-
-  private openChapterPanel(): void {
-    const index = this.currentChapterIndex();
-    this.chapterPage = index >= 0 ?
-      Math.floor(index / CHAPTER_PAGE_SIZE) : 0;
-    this.showChapters = true;
-  }
-
-  private chapterSlice(): BookChapter[] {
-    const start = this.chapterPage * CHAPTER_PAGE_SIZE;
-    return this.chapters.slice(start, start + CHAPTER_PAGE_SIZE);
-  }
-
-  private chapterPageCount(): number {
-    return Math.max(1,
-      Math.ceil(this.chapters.length / CHAPTER_PAGE_SIZE));
-  }
-
-  private jumpChapter(index: number): void {
-    if (index < 0 || index >= this.chapters.length) return;
-    const chapter = this.chapters[index];
-    this.showChapters = false;
-    this.status = '正在跳转……';
-    this.loadWindowAt(chapter.offset, chapter.offset, true);
-  }
-
-  private previousChapter(): void {
-    const index = this.currentChapterIndex();
-    if (index > 0) this.jumpChapter(index - 1);
-  }
-
-  private nextChapter(): void {
-    const index = this.currentChapterIndex();
-    if (index >= 0 && index + 1 < this.chapters.length) {
-      this.jumpChapter(index + 1);
-    }
-  }
-
-  private pageBackground(): string {
-    return this.darkTheme ? '#101114' : '#f7f4ec';
-  }
-
-  private panelColor(): string {
-    return this.darkTheme ? '#20242c' : '#ffffff';
-  }
-
-  private textColor(): string {
-    return this.darkTheme ? '#e8eaf0' : '#1f2937';
-  }
-
-  private mutedColor(): string {
-    return this.darkTheme ? '#9ca3af' : '#6b7280';
+  private log(event: string, stage: string, code?: number): void {
+    recordReaderDiagnostic(this.context(), event, stage, code);
   }
 
   @Builder
-  topBar() {
-    Row() {
-      Button('返回')
-        .fontSize(13)
-        .height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .onClick(() => { this.backToShelf(); })
-      Column() {
-        Text(this.title).fontSize(17)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.textColor())
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-        Text(this.currentChapterTitle()).fontSize(12)
-          .fontColor(this.mutedColor())
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 2 })
+  topControls() {
+
+    Column() {
+      Row() {
+        Button('‹').fontSize(24).width(44).height(40)
+          .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+          .onClick(() => { this.backToShelf(); })
+        Column() {
+          Text(this.title).fontSize(16).fontColor(this.palette().text)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.chapterTitle).fontSize(12).fontColor(this.palette().secondaryText)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            .margin({ top: 2 })
+        }
+        .alignItems(HorizontalAlign.Start).layoutWeight(1)
+        .margin({ left: 12, right: 8 })
+        Button('目录').fontSize(13).height(36)
+          .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+          .onClick(() => { this.catalogVisible = true; })
+        Button('Aa').fontSize(13).height(36)
+          .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+          .margin({ left: 8 })
+          .onClick(() => { this.settingsVisible = !this.settingsVisible; })
       }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-      .margin({ left: 10, right: 8 })
-      Button('目录')
-        .fontSize(13)
-        .height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .onClick(() => { this.openChapterPanel(); })
-      Button('Aa')
-        .fontSize(13)
-        .height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .margin({ left: 8 })
-        .onClick(() => { this.showSettings = !this.showSettings; })
-    }
-    .width('100%')
-    .padding({ left: this.pagePadding + this.safeLeft,
-      right: this.pagePadding + this.safeRight,
-      top: this.safeTop + 8, bottom: 8 })
-    .backgroundColor(this.pageBackground())
-  }
+      .width('100%')
+      .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight,
+        top: this.safeTop + 8, bottom: 8 })
+      .backgroundColor(this.palette().overlay)
 
-  @Builder
-  settingsBar() {
-    Row() {
-      Button('A-').fontSize(13).height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .onClick(() => { this.changeFont(-2); })
-      Button('A+').fontSize(13).height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .margin({ left: 6 })
-        .onClick(() => { this.changeFont(2); })
-      Button('行距-').fontSize(12).height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .margin({ left: 6 })
-        .onClick(() => { this.changeSpacing(-0.1); })
-      Button('行距+').fontSize(12).height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .margin({ left: 6 })
-        .onClick(() => { this.changeSpacing(0.1); })
-      Button(this.darkTheme ? '浅色' : '深色')
-        .fontSize(12).height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .margin({ left: 6 })
-        .onClick(() => { this.toggleTheme(); })
-      Text(this.fontSize + ' / ' + this.lineSpacing.toFixed(1))
-        .fontSize(12).fontColor(this.mutedColor())
-        .margin({ left: 8 })
-    }
-    .width('100%')
-    .padding({ left: this.pagePadding + this.safeLeft,
-      right: this.pagePadding + this.safeRight,
-      top: 6, bottom: 6 })
-    .backgroundColor(this.pageBackground())
-  }
-
-  @Builder
-  statusRow() {
-    Row() {
-      Text(this.status).fontSize(12).fontColor(this.mutedColor())
-        .layoutWeight(1).maxLines(2)
-      if (this.status.indexOf('继续加载') >= 0) {
-        Button('继续加载').fontSize(12).height(28)
-          .backgroundColor(this.panelColor())
-          .fontColor(this.textColor())
-          .onClick(() => { this.continueFromHere(); })
-      }
-    }
-    .width('100%')
-    .padding({ left: this.pagePadding + this.safeLeft,
-      right: this.pagePadding + this.safeRight,
-      top: 4, bottom: 4 })
-    .backgroundColor(this.pageBackground())
-  }
-
-  @Builder
-  bottomBar() {
-    Row() {
-      Button('上一章')
-        .fontSize(12).height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .enabled(this.currentChapterIndex() > 0)
-        .onClick(() => { this.previousChapter(); })
-      Text(this.progressLabel)
-        .fontSize(12).fontColor(this.mutedColor())
-        .layoutWeight(1).textAlign(TextAlign.Center)
-        .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
-      Button('下一章')
-        .fontSize(12).height(30)
-        .backgroundColor(this.panelColor())
-        .fontColor(this.textColor())
-        .enabled(this.currentChapterIndex() >= 0 &&
-          this.currentChapterIndex() + 1 < this.chapters.length)
-        .onClick(() => { this.nextChapter(); })
-    }
-    .width('100%')
-    .padding({ left: this.pagePadding + this.safeLeft,
-      right: this.pagePadding + this.safeRight,
-      top: 8, bottom: this.safeBottom + 8 })
-    .backgroundColor(this.pageBackground())
-  }
-
-  // 控件收起时只保留一条轻量进度，不占正文高度、不绘制假导航条。
-  @Builder
-  progressHint() {
-    Row() {
-      Text(this.progressLabel)
-        .fontSize(10)
-        .fontColor(this.mutedColor())
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-    }
-    .width('100%')
-    .justifyContent(FlexAlign.End)
-    .padding({ left: this.pagePadding + this.safeLeft,
-      right: this.pagePadding + this.safeRight,
-      bottom: this.safeBottom + 4 })
-    .hitTestBehavior(HitTestMode.None)
-  }
-
-  @Builder
-  chapterOverlay() {
-    Stack({ alignContent: Alignment.Center }) {
-      Column()
+      if (this.settingsVisible) {
+        Column({ space: 6 }) {
+          Row() {
+            Button('A−').height(32)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+              .onClick(() => { this.changeFont(-2); })
+            Text('字号 ' + this.fontSize).fontSize(12)
+              .fontColor(this.palette().text).layoutWeight(1)
+              .textAlign(TextAlign.Center)
+            Button('A+').height(32)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+              .onClick(() => { this.changeFont(2); })
+          }
+          .width('100%')
+          Row() {
+            Text('行距').fontSize(12).fontColor(this.palette().secondaryText)
+              .layoutWeight(1)
+            Button('−').width(52).height(32)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+              .onClick(() => { this.changeLineHeight(-0.1); })
+            Text(this.lineHeight.toFixed(1)).fontSize(12)
+              .fontColor(this.palette().text).width(48).textAlign(TextAlign.Center)
+            Button('+').width(52).height(32)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+              .onClick(() => { this.changeLineHeight(0.1); })
+          }
+          .width('100%')
+          Row() {
+            Button(this.themeMode === 'system' ? '跟随系统' :
+              this.isDarkTheme() ? '深色主题' : '浅色主题')
+              .height(32).layoutWeight(1)
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+              .onClick(() => { this.toggleTheme(); })
+            Button(this.flipMode === '1' ? '横向滑页' : '仿真翻页')
+              .height(32).layoutWeight(1).margin({ left: 8 })
+              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+              .onClick(() => {
+                this.setFlipMode(this.flipMode === '1' ? '0' : '1');
+              })
+          }
+          .width('100%')
+        }
         .width('100%')
-        .height('100%')
-        .backgroundColor('#66000000')
-        .onClick(() => { this.showChapters = false; })
+        .padding({ left: 12 + this.safeLeft,
+          right: 12 + this.safeRight, top: 6, bottom: 8 })
+        .backgroundColor(this.palette().surface)
+      }
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+  }
+
+  @Builder
+  catalogPanel() {
+
+    Stack({ alignContent: Alignment.Center }) {
+      Column().width('100%').height('100%')
+        .backgroundColor(this.palette().overlay)
+        .onClick(() => { this.catalogVisible = false; })
       Column() {
         Row() {
-          Text('目录 · ' + this.chapters.length + ' 章')
-            .fontSize(18).fontWeight(FontWeight.Medium)
-            .fontColor(this.textColor()).layoutWeight(1)
-          Button('关闭').fontSize(12).height(30)
-            .backgroundColor(this.panelColor())
-            .fontColor(this.textColor())
-            .onClick(() => { this.showChapters = false; })
+          Text('目录').fontSize(19).fontWeight(FontWeight.Medium)
+            .fontColor(this.palette().text).layoutWeight(1)
+          Button('关闭').height(32)
+            .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+            .onClick(() => { this.catalogVisible = false; })
         }
-        .width('100%').padding({ bottom: 8 })
-        List() {
-          ForEach(this.chapterSlice(), (chapter: BookChapter,
-            index: number) => {
-            ListItem() {
-              Text((this.chapterPage * CHAPTER_PAGE_SIZE + index + 1) +
-                '. ' + chapter.title)
-                .fontSize(14)
-                .fontColor(this.textColor())
-                .width('100%')
-                .padding({ top: 9, bottom: 9 })
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .onClick(() => {
-                  this.jumpChapter(this.chapterPage * CHAPTER_PAGE_SIZE + index);
-                })
-            }
-          }, (chapter: BookChapter) => chapter.offset.toString())
+        .width('100%').padding({ bottom: 10 })
+        if (this.catalogs.length === 0) {
+          Text('这本书没有可用目录').fontSize(14)
+            .fontColor(this.palette().secondaryText).padding(20)
+        } else {
+          List() {
+            ForEach(this.catalogs, (item: bookParser.CatalogItem) => {
+              ListItem() {
+                Text(item.catalogName)
+                  .fontSize(14).maxLines(2)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .width('100%').padding({ top: 12, bottom: 12,
+                    left: Math.min(32, (item.catalogLevel || 0) * 12) })
+                  .onClick(() => { this.jumpToCatalog(item); })
+              }
+            }, (item: bookParser.CatalogItem) =>
+              item.catalogId.toString())
+          }
+          .width('100%').layoutWeight(1)
+          .divider({ strokeWidth: 1, color: this.palette().border })
         }
-        .layoutWeight(1).width('100%')
-        .divider({ strokeWidth: 1, color: this.mutedColor() })
-        Row() {
-          Button('上一页').fontSize(12).height(30)
-            .backgroundColor(this.panelColor())
-            .fontColor(this.textColor())
-            .enabled(this.chapterPage > 0)
-            .onClick(() => { this.chapterPage--; })
-          Text((this.chapterPage + 1) + ' / ' + this.chapterPageCount())
-            .fontSize(12).fontColor(this.mutedColor())
-            .layoutWeight(1).textAlign(TextAlign.Center)
-          Button('下一页').fontSize(12).height(30)
-            .backgroundColor(this.panelColor())
-            .fontColor(this.textColor())
-            .enabled(this.chapterPage + 1 < this.chapterPageCount())
-            .onClick(() => { this.chapterPage++; })
-        }
-        .width('100%').padding({ top: 8 })
       }
-      .width('90%')
-      .height('80%')
-      .constraintSize({ maxWidth: 560 })
-      .padding(16)
-      .backgroundColor(this.panelColor())
-      .borderRadius(18)
+      .width('90%').height('78%').constraintSize({ maxWidth: 620 })
+      .padding(18).backgroundColor(this.palette().surface).borderRadius(20)
     }
-    .width('100%')
-    .height('100%')
+    .width('100%').height('100%')
     .padding({ top: this.safeTop + 8, bottom: this.safeBottom + 8,
       left: this.safeLeft, right: this.safeRight })
   }
 
   build() {
-    Stack({ alignContent: Alignment.Bottom }) {
-      // 正文始终占满安全区；顶部/底部操作层以浮层出现，
-      // 显隐时不改变 List 高度，不会把当前阅读位置推走。
-      Stack({ alignContent: Alignment.Top }) {
-        Row() {
-          Column() {
-            if (this.loading) {
-              Column() {
-                Text('正在打开……').fontSize(15).fontColor(this.mutedColor())
-              }
-              .width('100%').height('100%')
-              .justifyContent(FlexAlign.Center)
-            } else if (this.segments.length === 0) {
-              Column({ space: 10 }) {
-                Text(this.status).fontSize(15).fontColor(this.mutedColor())
-                Button('返回书架')
-                  .backgroundColor(this.panelColor())
-                  .fontColor(this.textColor())
-                  .onClick(() => { this.backToShelf(); })
-              }
-              .width('100%').height('100%')
-              .justifyContent(FlexAlign.Center)
-            } else {
-              List({ space: 0, scroller: this.scroller }) {
-                ForEach(this.segments, (segment: ReaderSegment) => {
-                  ListItem() {
-                    Text(segment.text)
-                      .fontSize(this.fontSize)
-                      .lineHeight(this.fontSize * this.lineSpacing)
-                      .fontColor(this.textColor())
-                      .width('100%')
-                      .padding({ left: this.pagePadding, right: this.pagePadding,
-                        top: 6, bottom: 6 })
-                      .textAlign(TextAlign.Start)
-                  }
-                }, (segment: ReaderSegment) => segment.offset.toString())
-              }
-              .width('100%')
-              .height('100%')
-              .scrollBar(BarState.Auto)
-              .edgeEffect(EdgeEffect.Spring)
-              .onScrollIndex((start: number, end: number) => {
-                this.onScrollIndex(start, end);
-              })
+
+    Stack({ alignContent: Alignment.TopStart }) {
+      if (this.readerAvailable && this.book !== null) {
+        ReadPageComponent({
+          controller: this.controller,
+          readerCallback: (error, controller) => {
+            if (error) {
+              this.loading = false;
+              this.controlsVisible = true;
+              this.status = 'Reader Kit 组件初始化失败（错误码 ' +
+                this.errorCode(error) + '）';
+              this.log('reader', 'component.fail', this.errorCode(error));
+              return;
             }
+            this.initializeReader(controller);
           }
-          .width('100%')
-          .height('100%')
-          .constraintSize({ maxWidth: 920 })
+        })
+        .width('100%').height('100%')
+        .onClick(() => { this.toggleReaderControls(); })
+      } else {
+        Column() {
+          Text(this.status).fontSize(15).fontColor(this.palette().text)
+          Button('返回书架').margin({ top: 20 })
+            .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
+            .onClick(() => { this.backToShelf(); })
         }
-        .width('100%')
-        .height('100%')
-        .padding({ top: this.safeTop, bottom: this.safeBottom,
-          left: this.safeLeft, right: this.safeRight })
+        .width('100%').height('100%')
         .justifyContent(FlexAlign.Center)
-        .backgroundColor(this.pageBackground())
-        .onClick(() => { this.toggleControls(); })
+        .backgroundColor(this.palette().page)
+      }
 
-        if (this.showControls) {
-          Column() {
-            this.topBar()
-            if (this.showSettings) {
-              this.settingsBar()
+      if (this.loading) {
+        Column() {
+          Text('正在打开……').fontSize(14).fontColor(this.palette().text)
+        }
+        .width('100%').height('100%').justifyContent(FlexAlign.Center)
+        .backgroundColor(this.palette().overlay).hitTestBehavior(HitTestMode.None)
+      }
+
+      if (!this.loading && this.readerAvailable && this.controlsVisible) {
+        Column() {
+          this.topControls()
+          Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
+          if (this.status.length > 0 || this.pageFooter.length > 0) {
+            Column() {
+              if (this.status.length > 0) {
+                Text(this.status).fontSize(11).fontColor(this.palette().text)
+                  .maxLines(2).width('100%').textAlign(TextAlign.Center)
+              }
+              if (this.pageFooter.length > 0) {
+                Text(this.pageFooter).fontSize(11).fontColor(this.palette().secondaryText)
+                  .width('100%').textAlign(TextAlign.Center)
+              }
             }
+            .width('100%')
+            .padding({ left: 12 + this.safeLeft,
+              right: 12 + this.safeRight, top: 8,
+              bottom: 8 + this.safeBottom })
+            .backgroundColor(this.palette().overlay)
           }
-          .width('100%')
         }
+        .width('100%').height('100%')
+        .hitTestBehavior(HitTestMode.Transparent)
       }
-      .width('100%')
-      .height('100%')
 
-      Column() {
-        if (this.status.length > 0 && this.segments.length > 0) {
-          this.statusRow()
-        }
-        if (this.showControls) {
-          this.bottomBar()
-        } else if (this.segments.length > 0) {
-          this.progressHint()
-        }
-      }
-      .width('100%')
-
-      if (this.showChapters) {
-        this.chapterOverlay()
-      }
+      if (this.catalogVisible) this.catalogPanel()
     }
-    .width('100%')
-    .height('100%')
-    .backgroundColor(this.pageBackground())
-    .onAreaChange((oldValue: Area, newValue: Area) => {
-      const width = parseFloat(newValue.width.toString());
-      if (isFinite(width) && width > 0 &&
-          Math.abs(width - this.lastWidth) > 0.5) {
-        this.lastWidth = width;
-        const nextPadding = width >= 720 ? 36 : 16;
-        if (nextPadding !== this.pagePadding) {
-          this.pagePadding = nextPadding;
-        }
-        // 折叠/旋转/分屏后行宽变化，按当前 UTF-8 位置重新锚定。
-        this.rescrollToCurrent();
-      }
-      // 窗口尺寸变化后避让区可能同步变化；这里与
-      // avoidAreaChange 监听一起兜底。
-      refreshReaderWindowInsets();
+    .width('100%').height('100%').backgroundColor(this.palette().page)
+    .expandSafeArea([SafeAreaType.SYSTEM],
+      [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+    .onAreaChange((oldArea: Area, newArea: Area) => {
+      const width = parseFloat(newArea.width.toString());
+      const height = parseFloat(newArea.height.toString());
+      if (!Number.isFinite(width) || !Number.isFinite(height) ||
+          width <= 0 || height <= 0 ||
+          (Math.abs(width - this.viewportWidthVp) < 0.5 &&
+           Math.abs(height - this.viewportHeightVp) < 0.5)) return;
+      this.viewportWidthVp = width;
+      this.viewportHeightVp = height;
+      if (this.resizeTimer !== -1) clearTimeout(this.resizeTimer);
+      this.resizeTimer = setTimeout(() => {
+        this.resizeTimer = -1;
+        this.applyPageConfig(true);
+        refreshReaderWindowInsets();
+      }, 120);
     })
   }
 }

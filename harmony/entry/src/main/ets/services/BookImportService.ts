@@ -181,6 +181,11 @@ export async function importBook(context: common.UIAbilityContext,
     let title: string;
     let chapters: Array<{ title: string; offset: number; length: number }>;
     let normalized: Uint8Array;
+    let readerFilePath = '';
+    let readerSha256 = '';
+    let author = '';
+    let coverBytes: Uint8Array | undefined;
+    let coverExtension: 'jpg' | 'png' | 'webp' | undefined;
 
     if (ext === 'txt') {
       const decoded = decodeToText(raw);
@@ -197,14 +202,21 @@ export async function importBook(context: common.UIAbilityContext,
       normalized = packed.bytes;
       chapters = packed.offsets;
       title = epub.title;
+      author = epub.author || '';
+      coverBytes = epub.coverBytes;
+      coverExtension = epub.coverExtension;
     }
 
     // P0-4：摘要与 bookId 必须基于实际发送/落盘的
     // normalized 字节，而不是原始 TXT/EPUB 文件。
     const digest = await sha256Hex(normalized);
+    if (ext === 'epub') {
+      readerSha256 = await sha256Hex(raw);
+    }
     const bookId = newBookId(digest, title);
 
     const repository = new BookRepository(context);
+    const previous = repository.get(bookId);
     const booksDir = context.filesDir + '/books';
     // mkdirSync(path, true) 在目录已经存在时仍可能抛
     // 13900015 File exists（本机实测）。旧版本/上一本书已经创建过
@@ -218,6 +230,41 @@ export async function importBook(context: common.UIAbilityContext,
     }
     const filePath = booksDir + '/' + bookId + '.txt';
     writeNormalizedFile(filePath, normalized);
+
+    // Reader Kit 解析 EPUB 原文件；传手表仍读取规范化 UTF-8 正文。
+    // TXT 使用规范化副本，避免将原编码字节交给 Kit。
+    readerFilePath = filePath;
+    if (ext === 'epub') {
+      const originalDir = booksDir + '/original';
+      try {
+        fileIo.mkdirSync(originalDir, true);
+      } catch (e) {
+        if (!fileIo.accessSync(originalDir)) throw e;
+      }
+      readerFilePath = originalDir + '/' + bookId + '.epub';
+      writeNormalizedFile(readerFilePath, raw);
+      const original = readFileBytes(readerFilePath);
+      if (original.length !== raw.length ||
+          await sha256Hex(original) !== readerSha256) {
+        return { ok: false, reason: 'EPUB 原文件写入复核失败，未登记' };
+      }
+    }
+
+    let coverFilePath = '';
+    if (coverBytes && coverExtension) {
+      const coverDir = booksDir + '/covers';
+      try {
+        fileIo.mkdirSync(coverDir, true);
+      } catch (e) {
+        if (!fileIo.accessSync(coverDir)) throw e;
+      }
+      coverFilePath = coverDir + '/' + bookId + '.' + coverExtension;
+      try {
+        writeNormalizedFile(coverFilePath, coverBytes);
+      } catch (e) {
+        coverFilePath = '';
+      }
+    }
 
     // 写后复核：回读文件，确认字节数与摘要一致。
     const onDisk = readFileBytes(filePath);
@@ -237,8 +284,13 @@ export async function importBook(context: common.UIAbilityContext,
     const meta: BookMeta = {
       bookId,
       title,
+      author: author || undefined,
+      coverFilePath: coverFilePath || undefined,
       kind: ext === 'txt' ? BookKind.TXT : BookKind.EPUB,
       filePath,
+      readerFilePath,
+      readerSha256: ext === 'epub' ? readerSha256 : digest,
+      progressMapping: 'utf8_byte',
       bytes: normalized.length,
       sha256: digest,
       chapters,
@@ -249,6 +301,13 @@ export async function importBook(context: common.UIAbilityContext,
       status: BookStatus.READY
     };
     repository.register(meta);
+    if (previous?.coverFilePath && previous.coverFilePath !== coverFilePath) {
+      try {
+        fileIo.unlinkSync(previous.coverFilePath);
+      } catch (e) {
+        // A stale optional cover does not invalidate the imported book.
+      }
+    }
     return { ok: true, book: meta };
   } catch (e) {
     return { ok: false, reason: '导入失败：' + String(e) };

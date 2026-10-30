@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 手机阅读页 + 双向进度同步的静态契约；不调用 DevEco/SDK。
-// 真正的 ArkTS 编译由 tools/build_phone_hap.sh 单独验证。
+// Reader Kit phone flow + bidirectional byte-progress sync contracts.
+// Device Reader Kit behavior is verified separately on a real phone.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 
@@ -20,28 +20,50 @@ assert.ok(reader.includes('BookRepository') &&
 assert.ok(!reader.includes('filePath:') &&
   !reader.includes('params: { filePath'),
   'Reader must not accept a raw file URI');
-assert.ok(reader.includes('fileIo.readSync') &&
-  reader.includes('WINDOW_BYTES') &&
-  reader.includes('splitWindowSegments') &&
-  reader.includes('ReaderSegments'),
-  'Reader must use bounded byte windows and fine-grained segments');
-assert.ok(!reader.includes('CHUNK_BYTES = 6 * 1024'),
-  'Reader must not fall back to coarse 6 KiB reading-position chunks');
-assert.ok(reader.includes('onPageHide') &&
-  reader.includes('aboutToDisappear') &&
-  reader.includes('flushSave'),
-  'Reader must persist on hide/disappear');
-assert.ok(reader.includes('saveOffset(this.currentOffset)'),
-  'Reader must save the canonical byte offset');
-assert.ok(reader.includes('jumpChapter'),
-  'Reader must support chapter jumps');
-assert.ok(reader.includes('fontSize') &&
-  reader.includes('lineSpacing') &&
-  reader.includes('darkTheme'),
-  'Reader must expose font/line-spacing/theme controls');
-assert.ok(!reader.includes('offset = this.fontSize') &&
-  !reader.includes('offset = this.lineSpacing'),
-  'font/theme changes must not reset byte position');
+assert.ok(reader.includes("from '@kit.ReaderKit'") &&
+  reader.includes('ReadPageComponent'),
+  'phone reading must use the official Reader Kit component');
+assert.ok(reader.includes('this.readerAvailable && this.book !== null') &&
+  reader.includes('this.leaving || !this.readerAvailable'),
+  'missing source files must not mount or initialize Reader Kit');
+const initPosition = reader.indexOf('await this.controller.init(context)');
+const parserPosition = reader.indexOf('bookParser.getDefaultHandler');
+const registerPosition = reader.indexOf('registerBookParser(this.parser)');
+const configPosition = reader.indexOf('setPageConfig(this.pageConfig())');
+const startPosition = reader.indexOf('startPlay(this.currentResourceIndex');
+assert.ok(initPosition >= 0 && parserPosition > initPosition &&
+  registerPosition > parserPosition && configPosition > registerPosition &&
+  startPosition > configPosition,
+  'Reader Kit must init, parse, register, configure, then start playing');
+assert.ok(reader.indexOf('await this.settingsLoad') >= 0 &&
+  reader.indexOf('await this.settingsLoad') < configPosition,
+  'saved Reader Kit settings must load before the first page configuration');
+assert.ok(reader.includes('onPageShow') &&
+  reader.includes('pageShowListener') &&
+  reader.includes('saveCurrentLocation'),
+  'Reader Kit pageShow location must be persisted on device lifecycle');
+assert.ok(reader.includes('getDomPosByCatalogHref') &&
+  reader.includes('catalogs'),
+  'Reader Kit catalog entries must map to a spine resource and DOM position');
+assert.ok(reader.includes('viewPortWidth') &&
+  reader.includes('viewPortHeight') &&
+  reader.includes('scaledDensity') &&
+  reader.includes('onAreaChange'),
+  'Reader Kit page configuration must follow live viewport and display scale');
+assert.ok(!reader.includes('ReaderSegments') &&
+  !reader.includes('splitWindowSegments') &&
+  !reader.includes('WINDOW_BYTES') &&
+  !reader.includes('继续加载'),
+  'old byte-window reader and manual scrolling guards must be removed');
+assert.ok(reader.includes('flipMode') &&
+  reader.includes('changeFont') && reader.includes('changeLineHeight') &&
+  reader.includes('toggleTheme'),
+  'Reader Kit controls must expose flip mode, font, line height and theme');
+assert.ok(reader.includes("this.flipMode === '1' ? '横向滑页' : '仿真翻页'"),
+  'Reader Kit mode labels must match the sample API mode values');
+assert.ok(reader.includes("'readerkit_unmapped'") &&
+  !reader.includes('暂无法可靠换算'),
+  'Reader Kit DOM position must not be treated as a protocol byte offset');
 
 const progress = read(
   'harmony/entry/src/main/ets/services/ReadingProgressStore.ts');
@@ -102,9 +124,21 @@ const routePos = index.indexOf('syncService.onMessageFromWatch');
 const transferPos = index.indexOf('transferService.onMessageFromWatch');
 assert.ok(routePos >= 0 && transferPos > routePos,
   'progress messages must be offered to sync before transfer RESULT');
-assert.ok(index.includes("Button('同步阅读进度')") &&
+assert.ok(index.includes("Button('同步可映射书籍的阅读进度')") &&
   index.includes('syncReadingProgress'),
   'phone index must expose manual progress sync');
+assert.ok(index.includes("Text('书架')") && index.includes("Text('传书')") &&
+  index.includes('bottomTabs()'),
+  'phone home must expose only compact bookshelf and transfer tabs');
+assert.ok(index.includes("setShelfSortMode('manual')") &&
+  index.includes('setShelfManualOrder'),
+  'manual shelf ordering must persist');
+assert.ok(index.includes("chooseSort('title')") &&
+  index.includes("chooseSort('imported')") &&
+  index.includes("chooseSort('recent')"),
+  'shelf must support recent, title and import-time sorting');
+assert.ok(index.includes('exportReaderDiagnostics'),
+  'phone shelf must export bounded diagnostics');
 assert.ok(index.includes('getProgressStore().remove(book.bookId)'),
   'deleting a book must clear its progress');
 
@@ -171,33 +205,54 @@ assert.ok(protocol.includes('独立于传书') &&
   protocol.includes('4096'),
   'progress sync must be separate and bounded');
 
-const segmentsModel = read(
-  'harmony/entry/src/main/ets/model/ReaderSegments.js');
-assert.ok(segmentsModel.includes('safeWindowLength'),
-  'reader segments must expose UTF-8 window boundary helper');
-assert.ok(reader.includes('safeWindowLength') &&
-  reader.includes('raw.subarray(0, usable)'),
-  'Reader must clamp each file window to a UTF-8 boundary');
+const repository = read(
+  'harmony/entry/src/main/ets/services/BookRepository.ts');
+const importService = read(
+  'harmony/entry/src/main/ets/services/BookImportService.ts');
+assert.ok(repository.includes('markProgressMapping') &&
+  repository.includes('readerFilePath'),
+  'book metadata must retain Reader Kit source and mapping state');
+assert.ok(importService.includes("if (ext === 'epub')") &&
+  importService.includes("originalDir + '/' + bookId + '.epub'") &&
+  importService.includes('readerFilePath'),
+  'EPUB import must preserve original EPUB separately from transfer text');
+const epubImport = read(
+  'harmony/entry/src/main/ets/services/EpubImportService.ts');
+assert.ok(epubImport.includes('dc:creator') &&
+  epubImport.includes("'cover-image'") &&
+  epubImport.includes("image/jpeg") &&
+  epubImport.includes('coverBytes'),
+  'EPUB import must extract optional author and original raster cover data');
+assert.ok(importService.includes("booksDir + '/covers'") &&
+  importService.includes('coverFilePath') &&
+  repository.includes('target.coverFilePath'),
+  'EPUB cover images must live in the app library and be cleaned with the book');
+const readerState = read(
+  'harmony/entry/src/main/ets/services/ReaderKitStateStore.ts');
+assert.ok(readerState.includes('startDomPos') &&
+  readerState.includes('resourceIndex') &&
+  readerState.includes('PREF_NAME = \'suyue_reader_kit\''),
+  'phone must persist Kit-local locations separately from UTF-8 offsets');
+const diagnostics = read(
+  'harmony/entry/src/main/ets/services/ReaderDiagnostics.ts');
+assert.ok(diagnostics.includes('MAX_LINES') &&
+  diagnostics.includes('MAX_BYTES') &&
+  diagnostics.includes('fileSuffixChoices'),
+  'diagnostics must be bounded and export through the document picker');
 assert.ok(sync.includes('acceptApply') &&
   sync.includes('await this.progressStore.load(') &&
   sync.includes('decidePendingAction') &&
   sync.includes('conflictKeys.delete(key)'),
   'delayed APPLY must re-check local state and release conflict keys');
-assert.ok(index.includes('PROGRESS_SYNC_THROTTLE_MS') &&
-  index.includes('requestProgressSync') &&
-  index.includes('lastProgressSyncAt'),
-  'returning to shelf must trigger one throttled progress sync');
+assert.ok((sync.match(/progressMapping/g) || []).length >= 3 &&
+  sync.includes("book.progressMapping !== 'readerkit_unmapped'"),
+  'unmapped Reader Kit positions must stay out of the phone-watch byte protocol');
 assert.ok(store.includes('LAST_BOOK_AT_KEY') &&
   store.includes('clearProgress'),
   'watch last-read timestamp and delete cleanup must be present');
 assert.ok(sync.includes('emitReadingPrepare') &&
   sync.split('emitReadingPrepare').length - 1 >= 3,
   'sync must emit prepare before every remote apply');
-assert.ok(reader.includes('remotePrepare') &&
-  reader.includes('bumpWriteGeneration') &&
-  reader.includes('captureWriteGeneration') &&
-  reader.includes('saveOffset(offset, generation)'),
-  'Reader must cancel stale debounce and pass write generation');
 assert.ok(progress.includes('captureWriteGeneration') &&
   progress.includes('bumpWriteGeneration'),
   'progress store must enforce write generations');

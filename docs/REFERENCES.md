@@ -18,7 +18,7 @@
 ## 仅研究、未复制代码
 
 - [zengchen666/qingdu-reader](https://github.com/zengchen666/qingdu-reader)（Apache-2.0）：研究其 `ChapterTitleMatcher` / `TxtChapterSplitter` 的三阶段章节识别、密集目录去重和章节号 LIS 对齐思路；本项目用独立实现重写为 Harmony/Android/Python 三端同规则，**未复制其源码**。
-- 华为 [Reader Kit](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/reader-introduction)：确认它提供本地 TXT/EPUB 解析与目录能力，但属于 HarmonyOS NEXT 系统 Kit、有设备/地区/沙箱文件限制，且不能作为手表 Lite 与 Android 的跨端章节索引。本项目**未引入该 Kit 作为依赖**，也未声称华为阅读器使用与本项目相同的算法。
+- 华为 [Reader Kit](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/reader-introduction)：手机端现已通过 `@kit.ReaderKit` 使用官方 `bookParser` 与 `ReadPageComponent`。Kit 只处理当前应用沙箱内的本地文件；官方文档标注 HarmonyOS NEXT 5.0.4 及以上 Phone/PC/2in1/Tablet、仅中国大陆服务且不支持模拟器。Reader Kit 的 `resourceIndex`/`startDomPos` 不等于素阅协议的 UTF-8 字节偏移，未验证可靠映射前只作本机续读锚点，不作为手表同步位置。
 
 ## 许可证处理
 

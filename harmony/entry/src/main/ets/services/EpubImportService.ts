@@ -21,11 +21,15 @@ export interface EpubChapter {
 
 export interface EpubResult {
   title: string;
+  author?: string;
+  coverBytes?: Uint8Array;
+  coverExtension?: 'jpg' | 'png' | 'webp';
   chapters: EpubChapter[];
 }
 
 const MAX_EPUB_BYTES = 128 * 1024 * 1024;
 const MAX_ZIP_OUTPUT = 64 * 1024 * 1024;
+const MAX_COVER_BYTES = 5 * 1024 * 1024;
 
 function matchAll(text: string, regex: RegExp): RegExpMatchArray[] {
   const out: RegExpMatchArray[] = [];
@@ -117,20 +121,27 @@ export function importEpub(bytes: Uint8Array): EpubResult {
   const titleMatch = /<dc:title[^>]*>([\s\S]*?)<\/dc:title>/i.exec(opf);
   const title = titleMatch ? unescapeEntities(titleMatch[1]).trim() :
     '未命名书籍';
+  const authorMatch = /<dc:creator\b[^>]*>([\s\S]*?)<\/dc:creator>/i.exec(opf);
+  const author = authorMatch ? unescapeEntities(authorMatch[1]).trim() : '';
 
-  // manifest: id → href；spine: itemref order → id
+  // manifest: id → path/media/properties；spine: itemref order → id
   const manifest = new Map<string, string>();
+  const mediaItems = new Map<string, { path: string; mediaType: string }>();
   for (const m of matchAll(opf, /<item\s[^>]*>/gi)) {
     const tag = m[0];
     const id = attrValue(tag, 'id');
     const href = attrValue(tag, 'href');
     const media = attrValue(tag, 'media-type');
-    if (id && href &&
-        (media.includes('xhtml') || media.includes('html') ||
-         media === 'text/xml' || media === 'application/xml')) {
-      manifest.set(id, hrefJoin(opfPath, decodeURIComponent(href)));
+    if (!id || !href) continue;
+    const path = hrefJoin(opfPath, decodeURIComponent(href));
+    mediaItems.set(id, { path, mediaType: media });
+    if (media.includes('xhtml') || media.includes('html') ||
+        media === 'text/xml' || media === 'application/xml') {
+      manifest.set(id, path);
     }
   }
+
+  const cover = extractCover(zip, opf, mediaItems);
   const spineIds: string[] = [];
   for (const m of matchAll(opf, /<itemref[^>]*>/gi)) {
     const idref = attrValue(m[0], 'idref');
@@ -155,7 +166,45 @@ export function importEpub(bytes: Uint8Array): EpubResult {
   if (chapters.length === 0) {
     throw new Error('EPUB: 未解析到任何章节正文');
   }
-  return { title, chapters };
+  return {
+    title,
+    author: author || undefined,
+    coverBytes: cover?.bytes,
+    coverExtension: cover?.extension,
+    chapters
+  };
+}
+
+function extractCover(zip: ZipReaderInstance, opf: string,
+  mediaItems: Map<string, { path: string; mediaType: string }>):
+  { bytes: Uint8Array; extension: 'jpg' | 'png' | 'webp' } | null {
+  let coverId = '';
+  for (const match of matchAll(opf, /<item\s[^>]*>/gi)) {
+    const tag = match[0];
+    if (attrValue(tag, 'properties').split(/\s+/).indexOf('cover-image') >= 0) {
+      coverId = attrValue(tag, 'id');
+      break;
+    }
+  }
+  if (!coverId) {
+    const legacy = /<meta\b[^>]*name\s*=\s*(["'])cover\1[^>]*>/i.exec(opf);
+    if (legacy) coverId = attrValue(legacy[0], 'content');
+  }
+  const item = mediaItems.get(coverId);
+  if (!item || !zip.has(item.path)) return null;
+  let extension: 'jpg' | 'png' | 'webp';
+  if (item.mediaType === 'image/jpeg') extension = 'jpg';
+  else if (item.mediaType === 'image/png') extension = 'png';
+  else if (item.mediaType === 'image/webp') extension = 'webp';
+  else return null;
+  try {
+    const bytes = zip.read(item.path);
+    if (bytes.length === 0 || bytes.length > MAX_COVER_BYTES) return null;
+    return { bytes, extension };
+  } catch (error) {
+    // A missing or unsupported cover does not make readable EPUB text fail.
+    return null;
+  }
 }
 
 function basename(path: string): string {
