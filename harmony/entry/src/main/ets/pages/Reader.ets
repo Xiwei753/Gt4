@@ -298,17 +298,18 @@ struct Reader {
     return this.book !== null ? this.book.title : '';
   }
 
-  private saveCurrentLocation(): void {
+  private async saveCurrentLocation(): Promise<void> {
     const book = this.book;
     const state = this.readerState;
     if (book === null || state === null || this.currentResourceIndex < 0 ||
         this.currentDomPos.length > 4096) return;
-    state.saveLocation(book.bookId, this.readerSha256(book),
-      this.currentResourceIndex, this.currentDomPos).then(() => {
+    try {
+      await state.saveLocation(book.bookId, this.readerSha256(book),
+        this.currentResourceIndex, this.currentDomPos);
       this.log('pageShow', 'position.saved');
-    }).catch((error: Error) => {
+    } catch (error) {
       this.log('pageShow', 'position.save_fail', this.errorCode(error));
-    });
+    }
   }
 
   private pageConfig(): readerCore.ReaderSetting {
@@ -437,7 +438,7 @@ struct Reader {
   private async backToShelf(): Promise<void> {
     if (this.leaving) return;
     this.leaving = true;
-    this.saveCurrentLocation();
+    await this.saveCurrentLocation();
     if (this.book !== null && this.progressStore !== null) {
       await this.progressStore.saveLastBook(this.book.bookId);
     }
@@ -634,19 +635,23 @@ struct Reader {
         Column() {
           this.topControls()
           Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)
-          Column() {
-            if (this.status.length > 0) {
-              Text(this.status).fontSize(11).fontColor(this.palette().text)
-                .maxLines(2).width('100%').textAlign(TextAlign.Center)
+          if (this.status.length > 0 || this.pageFooter.length > 0) {
+            Column() {
+              if (this.status.length > 0) {
+                Text(this.status).fontSize(11).fontColor(this.palette().text)
+                  .maxLines(2).width('100%').textAlign(TextAlign.Center)
+              }
+              if (this.pageFooter.length > 0) {
+                Text(this.pageFooter).fontSize(11).fontColor(this.palette().secondaryText)
+                  .width('100%').textAlign(TextAlign.Center)
+              }
             }
-            Text(this.pageFooter).fontSize(11).fontColor(this.palette().secondaryText)
-              .width('100%').textAlign(TextAlign.Center)
+            .width('100%')
+            .padding({ left: 12 + this.safeLeft,
+              right: 12 + this.safeRight, top: 8,
+              bottom: 8 + this.safeBottom })
+            .backgroundColor(this.palette().overlay)
           }
-          .width('100%')
-          .padding({ left: 12 + this.safeLeft,
-            right: 12 + this.safeRight, top: 8,
-            bottom: 8 + this.safeBottom })
-          .backgroundColor(this.palette().overlay)
         }
         .width('100%').height('100%')
         .hitTestBehavior(HitTestMode.Transparent)
