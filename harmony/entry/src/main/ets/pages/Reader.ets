@@ -314,7 +314,7 @@ struct Reader {
   private setVolumeKeyPaging(enabled: boolean): void {
     this.volumeKeyPaging = enabled;
     this.syncVolumeKeyListeners();
-    this.persistSettings();
+    this.saveSettings();
   }
 
   private setCatalogVisible(visible: boolean): void {
@@ -538,7 +538,7 @@ struct Reader {
     }
   }
 
-  private persistSettings(): void {
+  private saveSettings(): void {
     const settings: ReaderKitSettings = {
       fontSize: this.fontSize,
       lineHeight: this.lineHeight,
@@ -551,19 +551,23 @@ struct Reader {
         this.log('settings', 'save', this.errorCode(error));
       });
     }
+  }
+
+  private persistSettingsAndApplyPageConfig(): void {
+    this.saveSettings();
     setAppWindowTheme(this.themeMode, this.isDarkTheme());
     this.applyPageConfig(true);
   }
 
   private changeFont(delta: number): void {
     this.fontSize = Math.min(34, Math.max(14, this.fontSize + delta));
-    this.persistSettings();
+    this.persistSettingsAndApplyPageConfig();
   }
 
   private changeLineHeight(delta: number): void {
     this.lineHeight = Math.min(2.4,
       Math.max(1.1, Math.round((this.lineHeight + delta) * 10) / 10));
-    this.persistSettings();
+    this.persistSettingsAndApplyPageConfig();
   }
 
   private toggleTheme(): void {
@@ -587,7 +591,7 @@ struct Reader {
   private setFlipMode(mode: string): void {
     if (mode !== '0' && mode !== '1') return;
     this.flipMode = mode;
-    this.persistSettings();
+    this.persistSettingsAndApplyPageConfig();
   }
 
   private jumpToCatalog(catalog: bookParser.CatalogItem): void {
@@ -735,7 +739,7 @@ struct Reader {
           .onClick(() => { this.toggleSettings(); })
       }
       .width('100%')
-      .padding({ left: 12 + this.safeLeft, right: 12 + this.safeRight,
+      .padding({ left: 12, right: 12,
         top: 8, bottom: 8 })
       .backgroundColor(this.palette().overlay)
 
@@ -791,8 +795,7 @@ struct Reader {
           .width('100%')
         }
         .width('100%')
-        .padding({ left: 12 + this.safeLeft,
-          right: 12 + this.safeRight, top: 6, bottom: 8 })
+        .padding({ left: 12, right: 12, top: 6, bottom: 8 })
         .backgroundColor(this.palette().surface)
       }
     }
