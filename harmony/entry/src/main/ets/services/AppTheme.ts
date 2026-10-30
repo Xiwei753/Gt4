@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Shared app appearance tokens for shelf, transfer, and Reader Kit pages.
+// Shared app appearance tokens for the shelf, transfer, and reader pages.
 export type AppThemeMode = 'system' | 'light' | 'dark';
 
 export const APP_THEME_MODE_KEY = 'suyue.appThemeMode';

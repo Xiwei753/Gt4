@@ -88,9 +88,6 @@ export class BookRepository {
       if (meta.readerFilePath) {
         books[idx].readerFilePath = meta.readerFilePath;
       }
-      if (meta.readerSha256) {
-        books[idx].readerSha256 = meta.readerSha256;
-      }
       this.writeIndex(books);
       return;
     }
@@ -141,8 +138,7 @@ export class BookRepository {
     this.writeIndex(books);
   }
 
-  markProgressMapping(bookId: string,
-    mapping: 'utf8_byte' | 'readerkit_unmapped'): void {
+  markProgressMapping(bookId: string, mapping: 'utf8_byte'): void {
     const books = this.readIndex();
     const target = books.find((book) => book.bookId === bookId);
     if (!target || target.progressMapping === mapping) return;

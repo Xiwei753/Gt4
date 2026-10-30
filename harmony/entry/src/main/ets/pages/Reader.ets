@@ -1,18 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 本机阅读页使用系统 Reader Kit；传手表仍由独立的规范化 UTF-8 正文驱动。
+// Native ArkUI text pager over the normalized UTF-8 body shared with the
+// bookshelf, transfer service and watch reading-progress protocol.
 import { common } from '@kit.AbilityKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
-import { fileIo } from '@kit.CoreFileKit';
-import { router, display } from '@kit.ArkUI';
+import { router } from '@kit.ArkUI';
 import { inputConsumer, KeyCode } from '@kit.InputKit';
-import { bookParser, ReadPageComponent, readerCore } from '@kit.ReaderKit';
-import { APP_SYSTEM_DARK_KEY, APP_THEME_MODE_KEY, AppThemePalette,
-  AppThemeMode, isDarkTheme, themePalette } from '../services/AppTheme';
-import { BookMeta } from '../model/BookModels';
+import { BookChapter, BookMeta } from '../model/BookModels';
+import { paginateBackward, paginateForward,
+  ReaderTextPage, recoverPreviousPageFromCheckpoint,
+  READER_CHECKPOINT_PAGE_INTERVAL }
+  from '../model/ReaderPagination';
 import { BookRepository } from '../services/BookRepository';
+import { NormalizedTextFile } from '../services/NormalizedTextFile';
 import { ReadingProgressStore } from '../services/ReadingProgressStore';
-import { ReaderKitLocation, ReaderKitSettings,
-  ReaderKitStateStore } from '../services/ReaderKitStateStore';
+import { ReaderSettings, ReaderSettingsStore }
+  from '../services/ReaderSettingsStore';
+import { AppThemePalette, AppThemeMode, APP_SYSTEM_DARK_KEY,
+  APP_THEME_MODE_KEY, isDarkTheme, themePalette }
+  from '../services/AppTheme';
 import { AppThemeStore, applyNativeThemeMode }
   from '../services/AppThemeStore';
 import { recordReaderDiagnostic } from '../services/ReaderDiagnostics';
@@ -42,25 +47,31 @@ interface ReaderHeaderLayout {
 }
 
 const READER_FOOTER_HEIGHT_VP = 18;
+const READER_WINDOW_BYTES = 64 * 1024;
+const READER_MAX_BACKWARD_WINDOW_BYTES = 512 * 1024;
+const READER_POSITION_HISTORY_LIMIT = 12;
+const READER_PAGINATION_CHECKPOINT_LIMIT = 32;
+const READER_TEXT_FONT = 'HarmonyOS Sans';
 
 @Entry
 @Component
 struct Reader {
   @State private title: string = '';
+  @State private pageText: string = '';
   @State private loading: boolean = true;
   @State private readerAvailable: boolean = false;
-  @State private status: string = '正在初始化 Reader Kit……';
+  @State private status: string = '正在准备正文……';
   @State private controlsVisible: boolean = true;
   @State private settingsVisible: boolean = false;
   @State private catalogVisible: boolean = false;
-  @State private catalogs: bookParser.CatalogItem[] = [];
+  @State private chapters: BookChapter[] = [];
   @State private fontSize: number = 20;
   @State private lineHeight: number = 1.6;
+  private flipMode: string = '1';
   @StorageLink(APP_THEME_MODE_KEY) @Watch('themeStateChanged')
   private themeMode: AppThemeMode = 'system';
   @StorageLink(APP_SYSTEM_DARK_KEY) @Watch('themeStateChanged')
   private systemDark: boolean = false;
-  @State private flipMode: string = '1';
   @State private chapterTitle: string = '';
   @State private safeTop: number = 0;
   @State private safeBottom: number = 0;
@@ -80,26 +91,20 @@ struct Reader {
   private book: BookMeta | null = null;
   private repository: BookRepository | null = null;
   private progressStore: ReadingProgressStore | null = null;
-  private readerState: ReaderKitStateStore | null = null;
-  private controller: readerCore.ReaderComponentController =
-    new readerCore.ReaderComponentController();
-  private parser: bookParser.BookParserHandler | null = null;
-  private spine: bookParser.SpineItem[] = [];
-  private currentResourceIndex: number = 0;
-  private currentDomPos: string = '';
-  private viewportXVp: number = 0;
-  private viewportYVp: number = 0;
-  private windowInsetsReady: boolean = false;
-  private viewportNeedsInsetsLayout: boolean = false;
-  private viewportAreaWaiters: Array<() => void> = [];
-  private lastPositionLogResourceIndex: number = -1;
-  private initialized: boolean = false;
+  private settingsStore: ReaderSettingsStore | null = null;
+  private textFile: NormalizedTextFile | null = null;
+  private currentPage: ReaderTextPage | null = null;
+  private settingsReady: boolean = false;
   private readerReady: boolean = false;
+  private initialized: boolean = false;
+  private initializing: boolean = false;
   private pageInForeground: boolean = false;
   private leaving: boolean = false;
-  private settingsLoad: Promise<void> = Promise.resolve();
+  private windowInsetsReady: boolean = false;
+  private viewportNeedsInsetsLayout: boolean = false;
   private resizeTimer: number = -1;
   private infoRefreshTimer: number = -1;
+  private pageRequestId: number = 0;
   private volumeUpRegistered: boolean = false;
   private volumeDownRegistered: boolean = false;
   private volumeUpListener = (): void => {
@@ -108,46 +113,16 @@ struct Reader {
   private volumeDownListener = (): void => {
     this.flipPageFromVolumeKey(true);
   };
+  private previousPageStarts: number[] = [];
+  private nextPageStarts: number[] = [];
+  private paginationAnchors: number[] = [];
+  private pagesSincePaginationAnchor: number = 0;
+  private touchActive: boolean = false;
+  private touchStartX: number = 0;
+  private touchStartY: number = 0;
+  private touchStartAt: number = 0;
   private onWindowInsets = (insets: ReaderWindowInsets): void => {
     this.applyWindowInsets(insets);
-  };
-  private applyWindowInsets(insets: ReaderWindowInsets): void {
-    const oldTop = this.readerContentTopInsetVp();
-    const oldBottom = this.readerContentBottomInsetVp();
-    const oldLeft = this.safeLeft;
-    const oldRight = this.safeRight;
-    this.safeTop = insets.top;
-    this.safeBottom = insets.bottom;
-    this.safeLeft = insets.left;
-    this.safeRight = insets.right;
-    this.statusBarHeight = insets.statusBarHeight > 0 ?
-      insets.statusBarHeight : insets.top;
-    const header = this.calculateHeaderLayout(insets);
-    this.headerTitleX = header.titleX;
-    this.headerTitleMaxWidthVp = header.titleWidth;
-    this.headerInfoX = header.infoX;
-    this.headerInfoWidth = header.infoWidth;
-    this.windowInsetsReady = true;
-    if (Math.abs(oldTop - this.readerContentTopInsetVp()) >= 0.5 ||
-        Math.abs(oldBottom - this.readerContentBottomInsetVp()) >= 0.5 ||
-        Math.abs(oldLeft - this.safeLeft) >= 0.5 ||
-        Math.abs(oldRight - this.safeRight) >= 0.5) {
-      this.viewportNeedsInsetsLayout = true;
-    }
-    this.resolveViewportAreaWaiters();
-  }
-  private pageShowListener = (info: readerCore.PageDataInfo): void => {
-    this.onReaderPageShow(info);
-  };
-  private resourceRequestListener = (path: string): ArrayBuffer => {
-    const parser = this.parser;
-    if (parser === null) return new ArrayBuffer(0);
-    try {
-      return parser.getResourceContent(this.currentResourceIndex, path);
-    } catch (error) {
-      this.log('resource', 'read', this.errorCode(error));
-      return new ArrayBuffer(0);
-    }
   };
 
   aboutToAppear(): void {
@@ -159,33 +134,40 @@ struct Reader {
       this.status = '缺少书籍参数，无法打开阅读页';
       return;
     }
+
     const context = this.context();
     this.repository = new BookRepository(context);
     this.progressStore = new ReadingProgressStore(context);
-    this.readerState = new ReaderKitStateStore(context);
+    this.settingsStore = new ReaderSettingsStore(context);
     this.book = this.repository.get(bookId);
     if (this.book === null) {
       this.loading = false;
-      this.status = '书籍不存在，或正文文件已被删除';
+      this.status = '书籍不存在，或规范化正文文件已被删除';
       return;
     }
+
     this.title = this.book.title;
-    const path = this.readerPath(this.book);
-    if (this.book.kind === 'epub' &&
-        (!this.book.readerFilePath ||
-         this.book.readerFilePath === this.book.filePath)) {
+    this.chapters = this.book.chapters.slice();
+    try {
+      this.textFile = new NormalizedTextFile(this.book.filePath);
+      if (this.textFile.byteLength !== this.book.bytes) {
+        throw new Error('正文长度与书库记录不一致');
+      }
+      this.readerAvailable = true;
+    } catch (error) {
       this.loading = false;
-      this.status = '这本 EPUB 是旧版导入记录，缺少原始 EPUB 文件。请重新导入原文件后再用 Reader Kit 阅读；现有书籍和手表数据已保留。';
+      this.status = '规范化正文不可用，请重新导入这本书；现有阅读进度会保留。';
+      this.log('reader', 'body_open_fail', this.errorCode(error));
       return;
     }
-    if (!fileIo.accessSync(path)) {
-      this.loading = false;
-      this.status = 'Reader Kit 输入文件不可用。请重新导入这本书；现有进度不会删除。';
-      return;
-    }
-    this.readerAvailable = true;
-    this.settingsLoad = this.loadSettings().catch((error: Error) => {
-      this.log('settings', 'load', this.errorCode(error));
+
+    this.loadSettings().then((): void => {
+      this.settingsReady = true;
+      this.tryInitializeReader();
+    }).catch((error: Error): void => {
+      this.log('settings', 'load_fail', this.errorCode(error));
+      this.settingsReady = true;
+      this.tryInitializeReader();
     });
   }
 
@@ -209,7 +191,7 @@ struct Reader {
     this.pageInForeground = false;
     this.clearInfoRefreshTimer();
     this.syncVolumeKeyListeners();
-    this.saveCurrentLocation();
+    this.saveCurrentOffset();
   }
 
   onBackPress(): boolean {
@@ -235,23 +217,14 @@ struct Reader {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = -1;
     }
-    this.saveCurrentLocation();
-    try {
-      this.controller.off('pageShow', this.pageShowListener);
-      this.controller.off('resourceRequest', this.resourceRequestListener);
-      this.controller.releaseBook();
-    } catch (error) {
-      this.log('reader', 'release', this.errorCode(error));
-    }
+    this.pageRequestId += 1;
+    this.saveCurrentOffset();
+    if (this.textFile !== null) this.textFile.close();
     exitReaderWindow();
   }
 
   private context(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
-  }
-
-  private readerPath(book: BookMeta): string {
-    return book.readerFilePath || book.filePath;
   }
 
   private formatTimePart(value: number): string {
@@ -274,9 +247,8 @@ struct Reader {
   private scheduleReaderInfoRefresh(): void {
     this.clearInfoRefreshTimer();
     if (!this.pageInForeground || this.leaving) return;
-    const now = Date.now();
-    const delay = 60000 - (now % 60000) + 50;
-    this.infoRefreshTimer = setTimeout(() => {
+    const delay = 60000 - (Date.now() % 60000) + 50;
+    this.infoRefreshTimer = setTimeout((): void => {
       this.infoRefreshTimer = -1;
       if (!this.pageInForeground || this.leaving) return;
       this.refreshReaderInfo();
@@ -348,17 +320,52 @@ struct Reader {
 
   private flipPageFromVolumeKey(isNext: boolean): void {
     if (!this.shouldConsumeVolumeKeys()) return;
-    try {
-      this.controller.flipPage(isNext);
-    } catch (error) {
-      this.log('volumeKey', 'flip_fail', this.errorCode(error));
-    }
+    if (isNext) this.nextPage();
+    else this.previousPage();
   }
 
   private setVolumeKeyPaging(enabled: boolean): void {
     this.volumeKeyPaging = enabled;
     this.syncVolumeKeyListeners();
     this.saveSettings();
+  }
+
+  private handleReaderTouch(event: TouchEvent): void {
+    if (this.loading || !this.readerReady || this.catalogVisible ||
+        this.leaving) return;
+    if (event.type === TouchType.Cancel) {
+      this.touchActive = false;
+      return;
+    }
+    const point = event.changedTouches.length > 0 ?
+      event.changedTouches[0] :
+      event.touches.length > 0 ? event.touches[0] : null;
+    if (point === null) return;
+    if (event.type === TouchType.Down) {
+      this.touchActive = true;
+      this.touchStartX = point.x;
+      this.touchStartY = point.y;
+      this.touchStartAt = Date.now();
+      return;
+    }
+    if (event.type !== TouchType.Up || !this.touchActive) return;
+    this.touchActive = false;
+    const deltaX = point.x - this.touchStartX;
+    const deltaY = point.y - this.touchStartY;
+    if (Math.abs(deltaX) >= 48 && Math.abs(deltaX) > Math.abs(deltaY)) {
+      if (deltaX < 0) this.nextPage();
+      else this.previousPage();
+      return;
+    }
+    if (Math.abs(deltaY) >= 48 || Date.now() - this.touchStartAt > 600) return;
+    const width = this.viewportWidthVp;
+    if (width > 0 && point.x < width * 0.34) {
+      this.previousPage();
+    } else if (width > 0 && point.x > width * 0.66) {
+      this.nextPage();
+    } else {
+      this.toggleReaderControls();
+    }
   }
 
   private setCatalogVisible(visible: boolean): void {
@@ -377,64 +384,352 @@ struct Reader {
         width <= 0 || height <= 0) return;
     const geometryChanged =
       Math.abs(width - this.viewportWidthVp) >= 0.5 ||
-      Math.abs(height - this.viewportHeightVp) >= 0.5 ||
-      Math.abs(x - this.viewportXVp) >= 0.5 ||
-      Math.abs(y - this.viewportYVp) >= 0.5;
+      Math.abs(height - this.viewportHeightVp) >= 0.5;
     if (!geometryChanged) {
       if (this.windowInsetsReady && this.viewportNeedsInsetsLayout) {
         this.viewportNeedsInsetsLayout = false;
-        this.resolveViewportAreaWaiters();
+        if (this.readerReady) this.scheduleReflow();
       }
       return;
     }
     this.viewportWidthVp = width;
     this.viewportHeightVp = height;
-    this.viewportXVp = Number.isFinite(x) ? x : 0;
-    this.viewportYVp = Number.isFinite(y) ? y : 0;
     if (this.windowInsetsReady) this.viewportNeedsInsetsLayout = false;
-    this.resolveViewportAreaWaiters();
-    this.logReaderViewport('area_changed');
+    this.logReaderViewport('area_changed', x, y);
+    if (this.initialized) this.scheduleReflow();
+    else this.tryInitializeReader();
+  }
+
+  private applyWindowInsets(insets: ReaderWindowInsets): void {
+    const oldTop = this.readerContentTopInsetVp();
+    const oldBottom = this.readerContentBottomInsetVp();
+    const oldLeft = this.safeLeft;
+    const oldRight = this.safeRight;
+    this.safeTop = insets.top;
+    this.safeBottom = insets.bottom;
+    this.safeLeft = insets.left;
+    this.safeRight = insets.right;
+    this.statusBarHeight = insets.statusBarHeight > 0 ?
+      insets.statusBarHeight : insets.top;
+    const header = this.calculateHeaderLayout(insets);
+    this.headerTitleX = header.titleX;
+    this.headerTitleMaxWidthVp = header.titleWidth;
+    this.headerInfoX = header.infoX;
+    this.headerInfoWidth = header.infoWidth;
+    this.windowInsetsReady = true;
+    if (Math.abs(oldTop - this.readerContentTopInsetVp()) >= 0.5 ||
+        Math.abs(oldBottom - this.readerContentBottomInsetVp()) >= 0.5 ||
+        Math.abs(oldLeft - this.safeLeft) >= 0.5 ||
+        Math.abs(oldRight - this.safeRight) >= 0.5) {
+      this.viewportNeedsInsetsLayout = true;
+      if (this.readerReady) this.scheduleReflow();
+    }
+    this.tryInitializeReader();
+  }
+
+  private tryInitializeReader(): void {
+    if (!this.readerAvailable || !this.settingsReady ||
+        !this.windowInsetsReady || this.viewportNeedsInsetsLayout ||
+        this.viewportWidthVp <= 0 || this.viewportHeightVp <= 0 ||
+        this.initialized || this.initializing || this.leaving) return;
+    this.initializeReader();
+  }
+
+  private async initializeReader(): Promise<void> {
+    if (this.initialized || this.initializing || this.leaving) return;
+    this.initializing = true;
+    const book = this.book;
+    const store = this.progressStore;
+    const repository = this.repository;
+    const textFile = this.textFile;
+    if (book === null || store === null || repository === null ||
+        textFile === null) {
+      this.initializing = false;
+      return;
+    }
+    try {
+      this.log('reader', 'initial_load.start');
+      const saved = await store.load(book.bookId, book.sha256);
+      let startByte = saved !== null ? saved.offset : 0;
+      let savedOffsetValid = startByte <= book.bytes &&
+        await textFile.isUtf8Boundary(startByte);
+      if (!savedOffsetValid) {
+        startByte = 0;
+        this.log('progress', 'saved_offset_invalid');
+      }
+      const pageLoaded = await this.loadPageAt(startByte, true);
+      if (!pageLoaded || this.leaving) return;
+      this.initialized = true;
+      this.readerReady = true;
+      this.paginationAnchors = [startByte];
+      this.pagesSincePaginationAnchor = 0;
+      this.loading = false;
+      this.status = '';
+      this.syncVolumeKeyListeners();
+      if (savedOffsetValid) {
+        repository.markProgressMapping(book.bookId, 'utf8_byte');
+        if (this.settingsStore !== null) {
+          await this.settingsStore.removeLegacyLocation(book.bookId);
+        }
+      }
+      if (saved === null) {
+        await store.save(book.bookId, book.sha256, startByte);
+      }
+      await store.saveLastBook(book.bookId);
+      this.log('reader', 'initial_load.ok');
+    } catch (error) {
+      this.loading = false;
+      this.controlsVisible = true;
+      this.status = '无法读取或分页这本书的正文，请重新打开书籍；现有正文和进度会保留。';
+      this.log('reader', 'initial_load.fail', this.errorCode(error));
+    } finally {
+      this.initializing = false;
+    }
+  }
+
+  private async createPageAt(startByte: number): Promise<ReaderTextPage> {
+    const textFile = this.textFile;
+    const book = this.book;
+    if (textFile === null || book === null) {
+      throw new Error('Reader body is unavailable');
+    }
+    const window = await textFile.readWindow(startByte, READER_WINDOW_BYTES);
+    if (window.text.length === 0 && startByte < book.bytes) {
+      throw new Error('The current UTF-8 text window is empty');
+    }
+    const heightPx = this.getUIContext().vp2px(this.viewportHeightVp);
+    const page = paginateForward(window.text, window.startByte,
+      Math.max(1, heightPx - 1), (text: string): number =>
+        this.measureTextHeightPx(text));
+    if (startByte < book.bytes && page.endByte <= startByte) {
+      throw new Error('Pagination did not advance through the text');
+    }
+    if (page.endByte > book.bytes) {
+      throw new Error('Pagination exceeded the normalized text length');
+    }
+    return page;
+  }
+
+  private async createPreviousPage(endByte: number):
+    Promise<ReaderTextPage | null> {
+    const textFile = this.textFile;
+    if (textFile === null || endByte <= 0) return null;
+    const heightPx = this.getUIContext().vp2px(this.viewportHeightVp);
+    let maxBytes = READER_WINDOW_BYTES;
+    for (;;) {
+      const window = await textFile.readWindowBefore(endByte, maxBytes);
+      const page = paginateBackward(window.text, window.startByte,
+        endByte, Math.max(1, heightPx - 1), (text: string): number =>
+          this.measureTextHeightPx(text));
+      if (page === null) return null;
+      if (page.startByte !== window.startByte || window.startByte === 0) {
+        return page;
+      }
+      if (maxBytes >= READER_MAX_BACKWARD_WINDOW_BYTES) return page;
+      maxBytes = Math.min(READER_MAX_BACKWARD_WINDOW_BYTES, maxBytes * 2);
+    }
+  }
+
+  private measureTextHeightPx(text: string): number {
+    const measured = this.getUIContext().getMeasureUtils().measureTextSize({
+      textContent: text,
+      constraintWidth: this.viewportWidthVp,
+      fontSize: this.fontSize,
+      fontWeight: FontWeight.Normal,
+      fontFamily: READER_TEXT_FONT,
+      lineHeight: this.fontSize * this.lineHeight,
+      letterSpacing: 0,
+      wordBreak: WordBreak.BREAK_WORD
+    });
+    const height = measured.height;
+    if (height === undefined) {
+      throw new Error('Text measurement did not return a height');
+    }
+    const value = typeof height === 'number' ? height :
+      parseFloat(height.toString());
+    if (!Number.isFinite(value)) throw new Error('Text measurement failed');
+    return value;
+  }
+
+  private async loadPageAt(startByte: number,
+    showLoading: boolean): Promise<boolean> {
+    const requestId = ++this.pageRequestId;
+    if (showLoading) this.loading = true;
+    try {
+      const page = await this.createPageAt(startByte);
+      if (requestId !== this.pageRequestId || this.leaving) return false;
+      this.currentPage = page;
+      this.pageText = page.text;
+      this.chapterTitle = this.chapterTitleFor(page.startByte);
+      this.logReaderViewport('page_measured');
+      return true;
+    } catch (error) {
+      if (requestId === this.pageRequestId && !this.leaving) {
+        this.status = '正文读取或分页失败（错误码 ' +
+          this.errorCode(error) + '）';
+        this.loading = false;
+        this.log('pagination', 'page_load_fail', this.errorCode(error));
+      }
+      return false;
+    }
+  }
+
+  private async nextPage(): Promise<void> {
+    const page = this.currentPage;
+    const book = this.book;
+    if (!this.readerReady || page === null || book === null ||
+        this.loading || this.leaving) return;
+    let nextStart = page.endByte;
+    const restoredForwardPage = this.nextPageStarts.length > 0;
+    if (this.nextPageStarts.length > 0) {
+      nextStart = this.nextPageStarts.pop()!;
+    } else if (nextStart >= book.bytes) {
+      this.status = '已经读到书末';
+      return;
+    }
+    this.previousPageStarts.push(page.startByte);
+    this.trimPositionHistory(this.previousPageStarts);
+    const loaded = await this.loadPageAt(nextStart, false);
+    if (!loaded) {
+      this.previousPageStarts.pop();
+      return;
+    }
+    if (!restoredForwardPage) this.recordPaginationCheckpoint();
+    this.status = '';
+    this.saveCurrentOffset();
+  }
+
+  private async previousPage(): Promise<void> {
+    const page = this.currentPage;
+    if (!this.readerReady || page === null || page.startByte <= 0 ||
+        this.loading || this.leaving) return;
+    const oldStart = page.startByte;
+    let previousStart = -1;
+    let cameFromHistory = false;
+    if (this.previousPageStarts.length > 0) {
+      previousStart = this.previousPageStarts.pop()!;
+      cameFromHistory = true;
+    } else {
+      const checkpoint = this.closestPaginationAnchorBefore(oldStart);
+      const previous = await recoverPreviousPageFromCheckpoint(oldStart,
+        checkpoint, (start: number): Promise<ReaderTextPage> =>
+          this.createPageAt(start), (target: number):
+          Promise<ReaderTextPage | null> => this.createPreviousPage(target));
+      if (previous === null) return;
+      previousStart = previous.startByte;
+    }
+    this.nextPageStarts.push(oldStart);
+    this.trimPositionHistory(this.nextPageStarts);
+    const loaded = await this.loadPageAt(previousStart, false);
+    if (!loaded) {
+      this.nextPageStarts.pop();
+      if (cameFromHistory) this.previousPageStarts.push(previousStart);
+      return;
+    }
+    this.status = '';
+    this.saveCurrentOffset();
+  }
+
+  private trimPositionHistory(history: number[]): void {
+    while (history.length > READER_POSITION_HISTORY_LIMIT) history.shift();
+  }
+
+  private recordPaginationCheckpoint(): void {
+    this.pagesSincePaginationAnchor += 1;
+    if (this.pagesSincePaginationAnchor <
+        READER_CHECKPOINT_PAGE_INTERVAL || this.currentPage === null) return;
+    this.paginationAnchors.push(this.currentPage.startByte);
+    while (this.paginationAnchors.length >
+        READER_PAGINATION_CHECKPOINT_LIMIT) this.paginationAnchors.shift();
+    this.pagesSincePaginationAnchor = 0;
+  }
+
+  private closestPaginationAnchorBefore(targetStartByte: number): number {
+    let closest = -1;
+    for (let i = 0; i < this.paginationAnchors.length; i++) {
+      const anchor = this.paginationAnchors[i];
+      if (anchor < targetStartByte && anchor > closest) closest = anchor;
+    }
+    return closest >= 0 ? closest : targetStartByte;
+  }
+
+  private resetPaginationHistory(anchorByte: number): void {
+    this.previousPageStarts = [];
+    this.nextPageStarts = [];
+    this.paginationAnchors = [anchorByte];
+    this.pagesSincePaginationAnchor = 0;
+  }
+
+  private scheduleReflow(): void {
     if (this.resizeTimer !== -1) clearTimeout(this.resizeTimer);
-    this.resizeTimer = setTimeout(() => {
+    this.resizeTimer = setTimeout((): void => {
       this.resizeTimer = -1;
-      if (this.readerReady) this.applyPageConfig(true);
+      this.viewportNeedsInsetsLayout = false;
+      if (this.readerReady && this.currentPage !== null && !this.leaving) {
+        this.resetPaginationHistory(this.currentPage.startByte);
+        this.loadPageAt(this.currentPage.startByte, false);
+      }
       refreshReaderWindowInsets();
     }, 120);
   }
 
-  private waitForViewportArea(): Promise<void> {
-    if (this.windowInsetsReady && !this.viewportNeedsInsetsLayout &&
-        this.viewportWidthVp > 0 && this.viewportHeightVp > 0) {
-      return Promise.resolve();
+  private async saveCurrentOffset(): Promise<void> {
+    const book = this.book;
+    const store = this.progressStore;
+    const repository = this.repository;
+    const page = this.currentPage;
+    if (book === null || store === null || page === null ||
+        page.startByte < 0 || page.startByte > book.bytes) return;
+    try {
+      await store.save(book.bookId, book.sha256, page.startByte);
+      if (repository !== null) {
+        repository.markProgressMapping(book.bookId, 'utf8_byte');
+      }
+      this.log('progress', 'position_saved');
+    } catch (error) {
+      this.log('progress', 'position_save_fail', this.errorCode(error));
     }
-    return new Promise<void>((resolve: () => void): void => {
-      this.viewportAreaWaiters.push(resolve);
-    });
   }
 
-  private resolveViewportAreaWaiters(): void {
-    if (!this.windowInsetsReady || this.viewportNeedsInsetsLayout ||
-        this.viewportWidthVp <= 0 || this.viewportHeightVp <= 0) return;
-    const waiters = this.viewportAreaWaiters.splice(0);
-    for (let i = 0; i < waiters.length; i++) waiters[i]();
+  private async saveLastBook(): Promise<void> {
+    if (this.book === null || this.progressStore === null) return;
+    try {
+      await this.progressStore.saveLastBook(this.book.bookId);
+    } catch (error) {
+      this.log('progress', 'last_book_save_fail', this.errorCode(error));
+    }
   }
 
-  private logReaderViewport(stage: string): void {
-    const ui = this.getUIContext();
-    const readerWidthPx = ui.vp2px(this.viewportWidthVp);
-    const readerHeightPx = ui.vp2px(this.viewportHeightVp);
-    recordReaderDiagnostic(this.context(), 'readerViewport', stage, 0, {
-      readerXVp: this.viewportXVp,
-      readerYVp: this.viewportYVp,
-      readerWidthVp: this.viewportWidthVp,
-      readerHeightVp: this.viewportHeightVp,
-      readerXPx: ui.vp2px(this.viewportXVp),
-      readerYPx: ui.vp2px(this.viewportYVp),
-      readerWidthPx: readerWidthPx,
-      readerHeightPx: readerHeightPx,
-      pageViewportWidthPx: Math.max(1, Math.round(readerWidthPx)),
-      pageViewportHeightPx: Math.max(1, Math.round(readerHeightPx))
-    });
+  private chapterTitleFor(offset: number): string {
+    for (let i = 0; i < this.chapters.length; i++) {
+      const chapter = this.chapters[i];
+      if (offset >= chapter.offset && offset < chapter.offset + chapter.length) {
+        return chapter.title;
+      }
+    }
+    if (offset > 0 && this.chapters.length > 0) {
+      const last = this.chapters[this.chapters.length - 1];
+      if (offset === last.offset + last.length) return last.title;
+    }
+    return '';
+  }
+
+  private async jumpToChapter(chapter: BookChapter): Promise<void> {
+    if (chapter.offset < 0 || chapter.offset > (this.book?.bytes || 0)) {
+      this.status = '目录位置超出正文范围';
+      return;
+    }
+    const textFile = this.textFile;
+    if (textFile === null || !await textFile.isUtf8Boundary(chapter.offset)) {
+      this.status = '目录位置不是有效的 UTF-8 字节边界';
+      return;
+    }
+    this.setCatalogVisible(false);
+    this.resetPaginationHistory(chapter.offset);
+    if (await this.loadPageAt(chapter.offset, false)) {
+      this.status = '';
+      this.saveCurrentOffset();
+    }
   }
 
   private toggleSettings(): void {
@@ -443,8 +738,13 @@ struct Reader {
   }
 
   private async loadSettings(): Promise<void> {
-    if (this.readerState === null) return;
-    const settings = await this.readerState.loadSettings();
+    const store = this.settingsStore;
+    if (store === null) return;
+    const settings = await store.load();
+    this.applySettings(settings);
+  }
+
+  private applySettings(settings: ReaderSettings): void {
     this.fontSize = settings.fontSize;
     this.lineHeight = settings.lineHeight;
     this.flipMode = settings.flipMode;
@@ -461,116 +761,82 @@ struct Reader {
   }
 
   private themeStateChanged(): void {
-    const dark = this.isDarkTheme();
-    setAppWindowTheme(this.themeMode, dark);
-    this.applyPageConfig(true);
+    setAppWindowTheme(this.themeMode, this.isDarkTheme());
   }
 
   private setThemeMode(mode: AppThemeMode): void {
     this.themeMode = mode;
     const context = this.context();
-    new AppThemeStore(context).save(mode).catch((error: Error) => {
+    new AppThemeStore(context).save(mode).catch((error: Error): void => {
       this.log('theme', 'save_fail', this.errorCode(error));
     });
     applyNativeThemeMode(context, mode);
     setAppWindowTheme(mode, isDarkTheme(mode, this.systemDark));
-    this.applyPageConfig(true);
   }
 
-  private async initializeReader(
-    componentController: readerCore.ReaderComponentController): Promise<void> {
-    if (this.initialized || this.leaving || !this.readerAvailable) return;
-    this.initialized = true;
-    this.controller = componentController;
-    const book = this.book;
-    const state = this.readerState;
-    const repository = this.repository;
-    if (book === null || state === null || repository === null) return;
-    const context = this.context();
-    try {
-      this.status = '正在初始化 Reader Kit……';
-      this.log('reader', 'init.start');
-      await this.controller.init(context);
-      this.log('reader', 'init.ok');
+  private currentSettings(): ReaderSettings {
+    return {
+      fontSize: this.fontSize,
+      lineHeight: this.lineHeight,
+      nightMode: this.isDarkTheme(),
+      flipMode: this.flipMode,
+      volumeKeyPaging: this.volumeKeyPaging
+    };
+  }
 
-      // getDefaultHandler 依赖 controller.init(context) 已成功完成。
-      this.log('parser', 'create.start');
-      this.parser = await bookParser.getDefaultHandler(this.readerPath(book));
-      this.log('parser', 'create.ok');
-      this.controller.registerBookParser(this.parser);
-      this.log('parser', 'register.ok');
+  private saveSettings(): void {
+    const store = this.settingsStore;
+    if (store === null) return;
+    store.save(this.currentSettings()).catch((error: Error): void => {
+      this.log('settings', 'save_fail', this.errorCode(error));
+    });
+  }
 
-      this.spine = this.parser.getSpineList();
-      this.catalogs = this.parser.getCatalogList();
-      await this.settingsLoad;
-      repository.markProgressMapping(book.bookId, 'readerkit_unmapped');
-      if (this.progressStore !== null) {
-        await this.progressStore.saveLastBook(book.bookId);
-      }
+  private changeFont(delta: number): void {
+    this.fontSize = Math.min(34, Math.max(14, this.fontSize + delta));
+    this.saveSettings();
+    this.reflowCurrentPage();
+  }
 
-      this.controller.on('pageShow', this.pageShowListener);
-      this.controller.on('resourceRequest', this.resourceRequestListener);
-      const saved = await state.loadLocation(book.bookId,
-        this.readerSha256(book));
-      const start = this.validLocation(saved) ? saved! : null;
-      this.currentResourceIndex = start !== null ?
-        start.resourceIndex : 0;
-      this.currentDomPos = start !== null ? start.startDomPos : '';
-      this.log('readerViewport', 'initial_measure_wait');
-      await this.waitForViewportArea();
-      if (this.leaving) return;
-      this.controller.setPageConfig(this.pageConfig());
-      this.status = '正在打开书籍……';
-      this.log('reader', 'startPlay.start');
-      await this.controller.startPlay(this.currentResourceIndex,
-        this.currentDomPos);
-      this.log('reader', 'startPlay.ok');
-      this.readerReady = true;
-      this.loading = false;
-      this.status = '';
+  private changeLineHeight(delta: number): void {
+    this.lineHeight = Math.min(2.4,
+      Math.max(1.1, Math.round((this.lineHeight + delta) * 10) / 10));
+    this.saveSettings();
+    this.reflowCurrentPage();
+  }
+
+  private reflowCurrentPage(): void {
+    const page = this.currentPage;
+    if (!this.readerReady || page === null || this.leaving) return;
+    this.resetPaginationHistory(page.startByte);
+    this.loadPageAt(page.startByte, false);
+  }
+
+  private toggleTheme(): void {
+    this.setThemeMode(this.isDarkTheme() ? 'light' : 'dark');
+  }
+
+  private toggleReaderControls(): void {
+    if (this.loading || this.catalogVisible) return;
+    if (this.settingsVisible) {
+      this.settingsVisible = false;
       this.syncVolumeKeyListeners();
-    } catch (error) {
-      this.readerReady = false;
-      this.syncVolumeKeyListeners();
-      const code = this.errorCode(error);
-      this.log(this.failureStage(error), 'fail', code);
-      this.loading = false;
-      this.controlsVisible = true;
-      this.status = 'Reader Kit 打开失败（错误码 ' + code + '）。请检查 Reader Kit 服务、文件格式和设备系统版本；诊断日志不含书名或路径。';
+      return;
     }
+    this.controlsVisible = !this.controlsVisible;
   }
 
-  private validLocation(location: ReaderKitLocation | null): boolean {
-    return location !== null && this.spine.length > 0 &&
-      location.resourceIndex < this.spine.length;
+  private openCatalog(): void {
+    this.setCatalogVisible(true);
   }
 
-  private readerSha256(book: BookMeta): string {
-    return book.readerSha256 || book.sha256;
-  }
-
-  private onReaderPageShow(info: readerCore.PageDataInfo): void {
-    if (info.state !== readerCore.PageState.PAGE_ON_SHOW) return;
-    if (!Number.isInteger(info.resourceIndex) || info.resourceIndex < 0 ||
-        info.resourceIndex >= this.spine.length) return;
-    this.currentResourceIndex = info.resourceIndex;
-    this.currentDomPos = info.startDomPos;
-    // Reader Kit's pageFooterContent has not been verified as progress and
-    // may contain book metadata. Do not present it as a page number.
-    this.chapterTitle = this.catalogTitleFor(info.resourceIndex);
-    this.saveCurrentLocation();
-  }
-
-  private catalogTitleFor(resourceIndex: number): string {
-    for (let i = 0; i < this.spine.length; i++) {
-      if (this.spine[i].index !== resourceIndex) continue;
-      for (let j = 0; j < this.catalogs.length; j++) {
-        if (this.catalogs[j].idRef === this.spine[i].idRef) {
-          return this.catalogs[j].catalogName;
-        }
-      }
-    }
-    return '';
+  private async backToShelf(): Promise<void> {
+    if (this.leaving) return;
+    this.leaving = true;
+    this.syncVolumeKeyListeners();
+    await this.saveCurrentOffset();
+    await this.saveLastBook();
+    router.back();
   }
 
   private calculateHeaderLayout(insets: ReaderWindowInsets): ReaderHeaderLayout {
@@ -608,7 +874,6 @@ struct Reader {
       return { titleX: contentLeft, titleWidth: 0,
         infoX: contentLeft, infoWidth: 0 };
     }
-
     const minimumInfoWidth = 100;
     let infoIntervalIndex = -1;
     for (let i = intervals.length - 1; i >= 0; i--) {
@@ -645,195 +910,34 @@ struct Reader {
   }
 
   private readerFooterHeightVp(): number {
-    return this.chapterTitle.length > 0 ?
-      READER_FOOTER_HEIGHT_VP : 0;
+    return this.chapterTitle.length > 0 ? READER_FOOTER_HEIGHT_VP : 0;
   }
 
   private readerContentBottomInsetVp(): number {
     return this.safeBottom + this.readerFooterHeightVp();
   }
 
-  private async saveCurrentLocation(): Promise<void> {
-    const book = this.book;
-    const state = this.readerState;
-    const resourceIndex = this.currentResourceIndex;
-    const domPos = this.currentDomPos;
-    if (book === null || state === null || resourceIndex < 0 ||
-        domPos.length > 4096) return;
-    try {
-      await state.saveLocation(book.bookId, this.readerSha256(book),
-        resourceIndex, domPos);
-      this.logLocationSavedAtResourceBoundary(resourceIndex);
-    } catch (error) {
-      this.log('pageShow', 'position.save_fail', this.errorCode(error));
-    }
-  }
-
-  // Position persistence still runs for every page, but sync log I/O only
-  // records the first successful save for each Reader Kit resource.
-  private logLocationSavedAtResourceBoundary(resourceIndex: number): void {
-    if (resourceIndex === this.lastPositionLogResourceIndex) return;
-    this.lastPositionLogResourceIndex = resourceIndex;
-    this.log('pageShow', 'position.saved');
-  }
-
-  private pageConfig(): readerCore.ReaderSetting {
-    const displayInfo = display.getDefaultDisplaySync();
-    const scale = displayInfo.scaledDensity > 0 ?
-      displayInfo.scaledDensity : 1;
-    const widthPx = this.getUIContext().vp2px(this.viewportWidthVp);
-    const heightPx = this.getUIContext().vp2px(this.viewportHeightVp);
-    this.logReaderViewport('page_config');
-    return {
-      fontName: 'HarmonyOS Sans',
-      fontSize: this.fontSize,
-      fontWeight: 400,
-      fontColor: this.isDarkTheme() ? '#E8EAF0' : '#1F2937',
-      fontPath: '',
-      lineHeight: this.lineHeight,
-      nightMode: this.isDarkTheme(),
-      themeColor: this.palette().readerPage,
-      themeBgImg: '',
-      flipMode: this.flipMode,
-      scaledDensity: scale,
-      viewPortWidth: Math.max(1, Math.round(widthPx)),
-      viewPortHeight: Math.max(1, Math.round(heightPx))
-    };
-  }
-
-  private applyPageConfig(restorePosition: boolean): void {
-    if (this.parser === null || this.leaving || !this.readerReady ||
-        this.viewportWidthVp <= 0 || this.viewportHeightVp <= 0) return;
-    try {
-      this.controller.setPageConfig(this.pageConfig());
-      this.log('pageConfig', 'updated');
-      if (restorePosition && this.currentDomPos.length > 0) {
-        this.controller.startPlay(this.currentResourceIndex,
-          this.currentDomPos).catch((error: Error) => {
-          this.log('pageConfig', 'restore_fail', this.errorCode(error));
-        });
-      }
-    } catch (error) {
-      this.status = '更新阅读排版失败（错误码 ' +
-        this.errorCode(error) + '）';
-      this.log('pageConfig', 'update_fail', this.errorCode(error));
-    }
-  }
-
-  private saveSettings(): void {
-    const settings: ReaderKitSettings = {
-      fontSize: this.fontSize,
-      lineHeight: this.lineHeight,
-      nightMode: this.isDarkTheme(),
-      flipMode: this.flipMode,
-      volumeKeyPaging: this.volumeKeyPaging
-    };
-    if (this.readerState !== null) {
-      this.readerState.saveSettings(settings).catch((error: Error) => {
-        this.log('settings', 'save', this.errorCode(error));
-      });
-    }
-  }
-
-  private persistSettingsAndApplyPageConfig(): void {
-    this.saveSettings();
-    setAppWindowTheme(this.themeMode, this.isDarkTheme());
-    this.applyPageConfig(true);
-  }
-
-  private changeFont(delta: number): void {
-    this.fontSize = Math.min(34, Math.max(14, this.fontSize + delta));
-    this.persistSettingsAndApplyPageConfig();
-  }
-
-  private changeLineHeight(delta: number): void {
-    this.lineHeight = Math.min(2.4,
-      Math.max(1.1, Math.round((this.lineHeight + delta) * 10) / 10));
-    this.persistSettingsAndApplyPageConfig();
-  }
-
-  private toggleTheme(): void {
-    this.setThemeMode(this.isDarkTheme() ? 'light' : 'dark');
-  }
-
-  private toggleReaderControls(): void {
-    if (this.loading || this.catalogVisible) return;
-    if (this.settingsVisible) {
-      this.settingsVisible = false;
-      this.syncVolumeKeyListeners();
-      return;
-    }
-    this.controlsVisible = !this.controlsVisible;
-  }
-
-  private openCatalog(): void {
-    this.setCatalogVisible(true);
-  }
-
-  private setFlipMode(mode: string): void {
-    if (mode !== '0' && mode !== '1') return;
-    this.flipMode = mode;
-    this.persistSettingsAndApplyPageConfig();
-  }
-
-  private jumpToCatalog(catalog: bookParser.CatalogItem): void {
-    const parser = this.parser;
-    if (parser === null) return;
-    let resourceIndex = -1;
-    for (let i = 0; i < this.spine.length; i++) {
-      if (catalog.idRef && this.spine[i].idRef === catalog.idRef) {
-        resourceIndex = this.spine[i].index;
-        break;
-      }
-    }
-    if (resourceIndex < 0) {
-      this.status = '目录项没有对应的正文资源';
-      return;
-    }
-    let domPos = '';
-    try {
-      if (catalog.href) domPos = parser.getDomPosByCatalogHref(catalog.href);
-    } catch (error) {
-      this.status = '获取目录位置失败（错误码 ' +
-        this.errorCode(error) + '）';
-      this.log('catalog', 'resolve_fail', this.errorCode(error));
-      return;
-    }
-    this.setCatalogVisible(false);
-    this.currentResourceIndex = resourceIndex;
-    this.currentDomPos = domPos;
-    this.controller.startPlay(resourceIndex, domPos).then(() => {
-      this.log('catalog', 'jump.ok');
-    }).catch((error: Error) => {
-      this.status = '目录跳转失败（错误码 ' + this.errorCode(error) + '）';
-      this.log('catalog', 'jump.fail', this.errorCode(error));
+  private logReaderViewport(stage: string, x?: number, y?: number): void {
+    const ui = this.getUIContext();
+    const readerWidthPx = ui.vp2px(this.viewportWidthVp);
+    const readerHeightPx = ui.vp2px(this.viewportHeightVp);
+    recordReaderDiagnostic(this.context(), 'readerViewport', stage, 0, {
+      readerXVp: x !== undefined ? x : 0,
+      readerYVp: y !== undefined ? y : 0,
+      readerWidthVp: this.viewportWidthVp,
+      readerHeightVp: this.viewportHeightVp,
+      readerXPx: ui.vp2px(x !== undefined ? x : 0),
+      readerYPx: ui.vp2px(y !== undefined ? y : 0),
+      readerWidthPx: readerWidthPx,
+      readerHeightPx: readerHeightPx,
+      pageViewportWidthPx: Math.max(1, Math.round(readerWidthPx)),
+      pageViewportHeightPx: Math.max(1, Math.round(readerHeightPx))
     });
-  }
-
-  private async backToShelf(): Promise<void> {
-    if (this.leaving) return;
-    this.leaving = true;
-    this.syncVolumeKeyListeners();
-    await this.saveCurrentLocation();
-    if (this.book !== null && this.progressStore !== null) {
-      await this.progressStore.saveLastBook(this.book.bookId);
-    }
-    router.back();
   }
 
   private errorCode(error: Object): number {
     const value = error as ErrorCodeCarrier;
-    return typeof value.code === 'number' && Number.isFinite(value.code) ?
-      value.code : 0;
-  }
-
-  private failureStage(error: Object): string {
-    const code = this.errorCode(error);
-    if (code === 1017000003 || code === 1017010003) return 'format';
-    if (code === 1017010004) return 'file';
-    if (code >= 1017000000 && code < 1017020000) return 'parser';
-    if (code >= 1016900000 && code < 1016920000) return 'reader';
-    return 'open';
+    return typeof value.code === 'number' ? value.code : 0;
   }
 
   private log(event: string, stage: string, code?: number): void {
@@ -853,7 +957,6 @@ struct Reader {
       .height('100%')
       .alignItems(VerticalAlign.Center)
       .position({ x: this.headerTitleX, y: 0 })
-
       Row() {
         Text(this.timeText).fontSize(12).width(34)
           .textAlign(TextAlign.End).fontColor(this.palette().secondaryText)
@@ -905,7 +1008,6 @@ struct Reader {
 
   @Builder
   topControls() {
-
     Column() {
       Row() {
         Button('‹').fontSize(24).width(44).height(40)
@@ -920,9 +1022,7 @@ struct Reader {
           .margin({ left: 8 })
           .onClick(() => { this.toggleSettings(); })
       }
-      .width('100%')
-      .padding({ left: 12, right: 12,
-        top: 8, bottom: 8 })
+      .width('100%').padding({ left: 12, right: 12, top: 8, bottom: 8 })
       .backgroundColor(this.palette().overlay)
 
       if (this.settingsVisible) {
@@ -958,12 +1058,7 @@ struct Reader {
               .height(32).layoutWeight(1)
               .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
               .onClick(() => { this.toggleTheme(); })
-            Button(this.flipMode === '1' ? '横向滑页' : '仿真翻页')
-              .height(32).layoutWeight(1).margin({ left: 8 })
-              .backgroundColor(this.palette().surfaceRaised).fontColor(this.palette().text)
-              .onClick(() => {
-                this.setFlipMode(this.flipMode === '1' ? '0' : '1');
-              })
+            Blank().layoutWeight(1).margin({ left: 8 })
           }
           .width('100%')
           Row() {
@@ -976,8 +1071,7 @@ struct Reader {
           }
           .width('100%')
         }
-        .width('100%')
-        .padding({ left: 12, right: 12, top: 6, bottom: 8 })
+        .width('100%').padding({ left: 12, right: 12, top: 6, bottom: 8 })
         .backgroundColor(this.palette().surface)
       }
     }
@@ -987,7 +1081,6 @@ struct Reader {
 
   @Builder
   catalogPanel() {
-
     Stack({ alignContent: Alignment.Center }) {
       Column().width('100%').height('100%')
         .backgroundColor(this.palette().overlay)
@@ -1001,22 +1094,21 @@ struct Reader {
             .onClick(() => { this.setCatalogVisible(false); })
         }
         .width('100%').padding({ bottom: 10 })
-        if (this.catalogs.length === 0) {
+        if (this.chapters.length === 0) {
           Text('这本书没有可用目录').fontSize(14)
             .fontColor(this.palette().secondaryText).padding(20)
         } else {
           List() {
-            ForEach(this.catalogs, (item: bookParser.CatalogItem) => {
+            ForEach(this.chapters, (item: BookChapter) => {
               ListItem() {
-                Text(item.catalogName)
+                Text(item.title)
                   .fontSize(14).maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .width('100%').padding({ top: 12, bottom: 12,
-                    left: Math.min(32, (item.catalogLevel || 0) * 12) })
-                  .onClick(() => { this.jumpToCatalog(item); })
+                    left: 12 })
+                  .onClick(() => { this.jumpToChapter(item); })
               }
-            }, (item: bookParser.CatalogItem) =>
-              item.catalogId.toString())
+            }, (item: BookChapter) => item.offset.toString())
           }
           .width('100%').layoutWeight(1)
           .divider({ strokeWidth: 1, color: this.palette().border })
@@ -1027,43 +1119,32 @@ struct Reader {
     }
     .width('100%').height('100%')
     .padding({ top: this.readerContentTopInsetVp() + 8,
-      bottom: this.safeBottom + 8,
-      left: this.safeLeft, right: this.safeRight })
+      bottom: this.safeBottom + 8, left: this.safeLeft, right: this.safeRight })
   }
 
   build() {
-
     Stack({ alignContent: Alignment.TopStart }) {
       if (this.readerAvailable && this.book !== null) {
         Column() {
-          ReadPageComponent({
-            controller: this.controller,
-            readerCallback: (error, controller) => {
-              if (error) {
-                this.readerReady = false;
-                this.loading = false;
-                this.controlsVisible = true;
-                this.status = 'Reader Kit 组件初始化失败（错误码 ' +
-                  this.errorCode(error) + '）';
-                this.log('reader', 'component.fail', this.errorCode(error));
-                this.syncVolumeKeyListeners();
-                return;
-              }
-              this.initializeReader(controller);
-            }
-          })
-          .width('100%').layoutWeight(1)
-          .onClick(() => { this.toggleReaderControls(); })
-          .onAreaChange((oldArea: Area, newArea: Area) => {
-            this.readerAreaChanged(newArea);
-          })
+          Text(this.pageText)
+            .fontSize(this.fontSize)
+            .fontWeight(FontWeight.Normal)
+            .fontFamily(READER_TEXT_FONT)
+            .fontColor(this.isDarkTheme() ? '#E8EAF0' : '#1F2937')
+            .lineHeight(this.fontSize * this.lineHeight)
+            .letterSpacing(0)
+            .wordBreak(WordBreak.BREAK_WORD)
+            .textAlign(TextAlign.Start)
+            .width('100%').height('100%')
+            .onTouch((event: TouchEvent) => { this.handleReaderTouch(event); })
+            .onAreaChange((oldArea: Area, newArea: Area) => {
+              this.readerAreaChanged(newArea);
+            })
         }
         .width('100%').height('100%')
-        // The window layout is already fullscreen; do not reserve its bottom
-        // navigation safe area in the Reader Kit viewport. Controls and the
-        // optional footer keep their own inset in the overlays below.
         .padding({ left: this.safeLeft, right: this.safeRight,
-          top: this.readerContentTopInsetVp() })
+          top: this.readerContentTopInsetVp(),
+          bottom: this.readerContentBottomInsetVp() })
 
         if (!this.loading && this.controlsVisible) {
           Column() {
@@ -1115,7 +1196,6 @@ struct Reader {
         .width('100%').height('100%').justifyContent(FlexAlign.Center)
         .backgroundColor(this.palette().overlay).hitTestBehavior(HitTestMode.None)
       }
-
       if (this.catalogVisible) this.catalogPanel()
     }
     .width('100%').height('100%').backgroundColor(this.palette().readerPage)

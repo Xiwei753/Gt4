@@ -181,8 +181,8 @@ export async function importBook(context: common.UIAbilityContext,
     let title: string;
     let chapters: Array<{ title: string; offset: number; length: number }>;
     let normalized: Uint8Array;
-    let readerFilePath = '';
-    let readerSha256 = '';
+    let readerFilePath: string | undefined;
+    let sourceSha256 = '';
     let author = '';
     let coverBytes: Uint8Array | undefined;
     let coverExtension: 'jpg' | 'png' | 'webp' | undefined;
@@ -210,9 +210,6 @@ export async function importBook(context: common.UIAbilityContext,
     // P0-4：摘要与 bookId 必须基于实际发送/落盘的
     // normalized 字节，而不是原始 TXT/EPUB 文件。
     const digest = await sha256Hex(normalized);
-    if (ext === 'epub') {
-      readerSha256 = await sha256Hex(raw);
-    }
     const bookId = newBookId(digest, title);
 
     const repository = new BookRepository(context);
@@ -231,9 +228,10 @@ export async function importBook(context: common.UIAbilityContext,
     const filePath = booksDir + '/' + bookId + '.txt';
     writeNormalizedFile(filePath, normalized);
 
-    // Reader Kit 解析 EPUB 原文件；传手表仍读取规范化 UTF-8 正文。
-    // TXT 使用规范化副本，避免将原编码字节交给 Kit。
-    readerFilePath = filePath;
+    if (ext === 'epub') sourceSha256 = await sha256Hex(raw);
+
+    // Retain the original EPUB package for the library's existing metadata
+    // and cleanup behavior. The phone reader and watch both use filePath.
     if (ext === 'epub') {
       const originalDir = booksDir + '/original';
       try {
@@ -245,7 +243,7 @@ export async function importBook(context: common.UIAbilityContext,
       writeNormalizedFile(readerFilePath, raw);
       const original = readFileBytes(readerFilePath);
       if (original.length !== raw.length ||
-          await sha256Hex(original) !== readerSha256) {
+          await sha256Hex(original) !== sourceSha256) {
         return { ok: false, reason: 'EPUB 原文件写入复核失败，未登记' };
       }
     }
@@ -289,7 +287,6 @@ export async function importBook(context: common.UIAbilityContext,
       kind: ext === 'txt' ? BookKind.TXT : BookKind.EPUB,
       filePath,
       readerFilePath,
-      readerSha256: ext === 'epub' ? readerSha256 : digest,
       progressMapping: 'utf8_byte',
       bytes: normalized.length,
       sha256: digest,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 有界脱敏 Reader Kit 诊断记录：仅写事件阶段和错误码，不写书籍或设备信息。
+// Bounded, privacy-preserving reader diagnostics; no book or device data.
 import { common } from '@kit.AbilityKit';
 import { fileIo, picker } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';

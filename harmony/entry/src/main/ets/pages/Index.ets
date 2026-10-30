@@ -21,7 +21,6 @@ import { importBook } from '../services/BookImportService';
 import { BookRepository, ShelfSortMode } from '../services/BookRepository';
 import { ReadingProgressStore, ReadingSummary }
   from '../services/ReadingProgressStore';
-import { ReaderKitStateStore } from '../services/ReaderKitStateStore';
 import { AppThemeStore, applyNativeThemeMode }
   from '../services/AppThemeStore';
 import { exportReaderDiagnostics, recordReaderDiagnostic }
@@ -507,9 +506,6 @@ struct Index {
       if (result.index === 1) {
         this.getRepository().remove(book.bookId);
         await this.getProgressStore().remove(book.bookId);
-        await new ReaderKitStateStore(
-          this.getUIContext().getHostContext() as common.UIAbilityContext)
-          .removeLocation(book.bookId);
         this.refresh();
         this.refreshProgress();
         this.pickStatus = '已删除《' + book.title + '》';
@@ -929,7 +925,7 @@ struct Index {
           if (this.findBook(this.selectedTransferBookId) !== null &&
               this.findBook(this.selectedTransferBookId)!.progressMapping ===
                 'readerkit_unmapped') {
-            Text('所选书籍的 Reader Kit 位置暂不能换算为 UTF-8 字节偏移。这本书的进度同步会跳过，旧进度仍保留。')
+            Text('这本书的旧阅读位置尚未验证为 UTF-8 字节偏移，进度同步会暂时跳过。')
               .fontSize(12).fontColor(this.palette().warningText).width('100%')
           }
           Button('同步可映射书籍的阅读进度')

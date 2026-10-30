@@ -87,7 +87,7 @@ class ReaderWindowAppearanceService {
       this.logWindowState(page + '_shown', 0);
       setTimeout((): void => {
         if (generation !== this.generation || this.mainWindow !== win) return;
-        // Reader Kit and page transition work may settle after onPageShow.
+        // Page transition work may settle after onPageShow.
         // Reconcile only when the observed window state differs from target.
         this.enqueue(async (): Promise<void> => {
           if (generation !== this.generation || this.mainWindow !== win) return;

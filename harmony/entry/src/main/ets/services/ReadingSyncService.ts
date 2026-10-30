@@ -185,8 +185,8 @@ export class ReadingSyncService {
   }
 
   private async sendState(requestId?: string): Promise<void> {
-    // Reader Kit 的 spine/domPos 不能当成协议中的 UTF-8 字节偏移。
-    // 映射未经验证的书籍不参与位置同步，避免把旧字节游标伪装成当前页。
+    // Older records may contain an unverified pre-pager location. Keep those
+    // books out of sync until the native pager validates a UTF-8 byte offset.
     const books = this.repository.list().filter((book) =>
       book.progressMapping !== 'readerkit_unmapped');
     const summaries = await this.progressStore.list(books);
@@ -390,7 +390,7 @@ export class ReadingSyncService {
     const unmappedCount = this.repository.list().filter((book) =>
       book.progressMapping === 'readerkit_unmapped').length;
     const skipped = unmappedCount > 0 ?
-      '；Reader Kit 位置暂未换算为字节偏移，跳过 ' +
+      '；跳过尚未验证的位置 ' +
         unmappedCount + ' 本' : '';
     this.status((applied > 0 ?
       '进度同步：已采用手表进度 ' + applied + ' 本' :
