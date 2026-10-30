@@ -17,8 +17,8 @@ const builderSection = (name, nextName) => {
     `expected ${name} builder before ${nextName}`);
   return reader.slice(start, end);
 };
-const infoBar = builderSection('readerInfoBar', 'readerFooter');
-const footer = builderSection('readerFooter', 'topControls');
+const infoBar = builderSection('readerInfoBar', 'readerChapterLabel');
+const chapterLabel = builderSection('readerChapterLabel', 'topControls');
 const controls = builderSection('topControls', 'catalogPanel');
 const buildStart = reader.indexOf('\n  build() {');
 assert.ok(buildStart >= 0);
@@ -51,9 +51,16 @@ assert.ok(build.includes('readerContentTopInsetVp()') &&
   'the body must fill the measured safe area and reflow after geometry changes');
 assert.ok(infoBar.includes('.height(this.statusBarHeight)') &&
   infoBar.includes('this.headerTitleMaxWidthVp') &&
-  footer.includes('height(READER_FOOTER_HEIGHT_VP)') &&
-  !footer.includes('this.safeBottom'),
-  'the header and one-line chapter footer must stay inside the existing system insets');
+  chapterLabel.includes('this.chapterLabelWidthVp()') &&
+  chapterLabel.includes('this.chapterLabelTopVp()') &&
+  chapterLabel.includes('.hitTestBehavior(HitTestMode.None)') &&
+  reader.includes('this.navigationIndicatorLeftVp -') &&
+  reader.includes('this.navigationIndicatorTopVp +'),
+  'the chapter label must sit left of the real system gesture indicator without intercepting it');
+assert.ok(reader.includes('private readerContentBottomInsetVp(): number {\n    return this.safeBottom;') &&
+  !reader.includes('READER_FOOTER_HEIGHT_VP') &&
+  appearance.includes('navigationIndicatorRectVp: insets?.navigationIndicator'),
+  'the text area must reserve only the measured system bottom inset and no separate footer row');
 assert.ok(reader.includes('calculateHeaderLayout') &&
   reader.includes('ReaderWindowCutout') &&
   reader.includes('this.headerInfoX'),
@@ -65,14 +72,16 @@ assert.ok(reader.includes('this.scheduleReflow()') &&
 
 assert.ok(reader.includes('event.type === TouchType.Down') &&
   reader.includes('Math.abs(deltaX) >= 48') &&
-  reader.includes('this.nextPage()') &&
-  reader.includes('this.previousPage()') &&
+  reader.includes("this.requestPageFlip('tap_right', true)") &&
+  reader.includes("this.requestPageFlip('tap_left', false)") &&
+  reader.includes("this.requestPageFlip('swipe_left', true)") &&
+  reader.includes("this.requestPageFlip('swipe_right', false)") &&
   reader.includes('this.toggleReaderControls()'),
   'tap and horizontal swipe must route to page navigation without vertical-scroll behavior');
 assert.ok(reader.includes('KeyCode.KEYCODE_VOLUME_UP') &&
   reader.includes('KeyCode.KEYCODE_VOLUME_DOWN') &&
-  reader.includes('this.flipPageFromVolumeKey(false)') &&
-  reader.includes('this.flipPageFromVolumeKey(true)') &&
+  reader.includes("this.flipPageFromVolumeKey(false, 'volume_up')") &&
+  reader.includes("this.flipPageFromVolumeKey(true, 'volume_down')") &&
   reader.includes("inputConsumer.off('keyPressed'"),
   'volume up remains previous, volume down remains next, with lifecycle cleanup');
 assert.ok(reader.includes('!this.catalogVisible && !this.settingsVisible') &&
@@ -89,11 +98,19 @@ assert.ok(settings.includes("PREF_NAME = 'suyue_reader_kit'") &&
   settings.includes("SETTINGS_KEY = 'settings'") &&
   settings.includes('volumeKeyPaging'),
   'existing reader settings retain their Preferences storage identity');
-assert.ok(reader.includes('this.readerFooter()') &&
-  reader.includes('this.chapterTitle.length > 0') &&
+assert.ok(reader.includes('this.readerChapterLabel()') &&
+  reader.includes('page_load_superseded') &&
+  reader.includes('page_load_ok') &&
+  reader.includes('pageTextChanged: oldText !== page.text') &&
+  reader.includes('touch_down') && reader.includes('touch_up') &&
+  reader.includes("'readerFlip', 'attempt'") &&
+  reader.includes('reason: blockedReason.length > 0 ? blockedReason') &&
+  reader.includes('this.showInputFeedback(') &&
+  reader.includes('.position({ x: 0, y: this.readerContentTopInsetVp() })') &&
+  !reader.includes('Blank().layoutWeight(1).hitTestBehavior(HitTestMode.None)') &&
   reader.includes('Text(this.status)') &&
   !reader.includes('this.pageFooter'),
-  'only a single chapter label may occupy the bottom reading line');
+  'input and page-load diagnostics must identify each attempt without logging book text');
 assert.ok(index.includes('showShelfWindow') &&
   index.includes("@StorageLink(APP_THEME_MODE_KEY)") &&
   index.includes("chooseTheme('system')"),

@@ -14,6 +14,7 @@ export interface ReaderWindowInsets {
   statusBarHeight: number;
   windowWidth: number;
   windowHeight: number;
+  navigationIndicator: ReaderWindowCutout;
   cutoutGeometryAvailable: boolean;
   cutouts: ReaderWindowCutout[];
 }
@@ -331,6 +332,8 @@ class ReaderWindowAppearanceService {
           this.insetsListener !== listener) return;
       const key = [insets.top, insets.bottom, insets.left, insets.right,
         insets.statusBarHeight, insets.windowWidth, insets.windowHeight,
+        insets.navigationIndicator.left, insets.navigationIndicator.top,
+        insets.navigationIndicator.right, insets.navigationIndicator.bottom,
         insets.cutouts.map((rect: ReaderWindowCutout) =>
           [rect.left, rect.top, rect.right, rect.bottom].join(',')).join(';')]
         .join(':');
@@ -383,6 +386,7 @@ class ReaderWindowAppearanceService {
       statusBarHeightVp: insets?.statusBarHeight,
       cutoutCount: insets?.cutouts.length,
       cutoutGeometryAvailable: insets?.cutoutGeometryAvailable,
+      navigationIndicatorRectVp: insets?.navigationIndicator,
       cutoutRectsVp: insets?.cutouts
     };
     recordReaderDiagnostic(context, 'window', stage, code, details);
@@ -488,6 +492,10 @@ class ReaderWindowAppearanceService {
         contentTopInsetVp = Math.max(contentTopInsetVp, rect.bottom);
       }
     }
+    const navigationIndicator = indicator !== null && indicator.visible ?
+      this.localRect(indicator.bottomRect, windowLeftPx, windowTopPx,
+        windowWidthPx, windowHeightPx, densityPixels) :
+      { left: 0, top: 0, right: 0, bottom: 0 };
     return {
       top: contentTopInsetVp,
       bottom: this.pxToVp(bottomPx, densityPixels),
@@ -496,6 +504,7 @@ class ReaderWindowAppearanceService {
       statusBarHeight: statusBarHeightVp,
       windowWidth: this.pxToVp(windowWidthPx, densityPixels),
       windowHeight: this.pxToVp(windowHeightPx, densityPixels),
+      navigationIndicator: navigationIndicator,
       cutoutGeometryAvailable: cutoutGeometryAvailable,
       cutouts: cutouts
     };
@@ -533,6 +542,27 @@ class ReaderWindowAppearanceService {
 
   private rightEdge(area: window.AvoidArea | null): number {
     return area === null ? 0 : area.rightRect.width;
+  }
+
+  private localRect(rect: { left: number; top: number; width: number;
+    height: number }, windowLeftPx: number, windowTopPx: number,
+    windowWidthPx: number, windowHeightPx: number,
+    densityPixels: number): ReaderWindowCutout {
+    const leftPx = Math.max(0, rect.left - windowLeftPx);
+    const topPx = Math.max(0, rect.top - windowTopPx);
+    const rightPx = Math.min(windowWidthPx,
+      rect.left + rect.width - windowLeftPx);
+    const bottomPx = Math.min(windowHeightPx,
+      rect.top + rect.height - windowTopPx);
+    if (rightPx <= leftPx || bottomPx <= topPx) {
+      return { left: 0, top: 0, right: 0, bottom: 0 };
+    }
+    return {
+      left: this.pxToVp(leftPx, densityPixels),
+      top: this.pxToVp(topPx, densityPixels),
+      right: this.pxToVp(rightPx, densityPixels),
+      bottom: this.pxToVp(bottomPx, densityPixels)
+    };
   }
 
   private pxToVp(value: number, densityPixels: number): number {

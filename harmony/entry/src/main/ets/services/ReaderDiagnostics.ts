@@ -43,6 +43,30 @@ export interface DiagnosticDetails {
   readerHeightPx?: number;
   pageViewportWidthPx?: number;
   pageViewportHeightPx?: number;
+  source?: string;
+  reason?: string;
+  hitRegion?: string;
+  inputXVp?: number;
+  inputYVp?: number;
+  deltaXVp?: number;
+  deltaYVp?: number;
+  pageInForeground?: boolean;
+  readerReady?: boolean;
+  loading?: boolean;
+  leaving?: boolean;
+  catalogVisible?: boolean;
+  settingsVisible?: boolean;
+  volumeKeyPaging?: boolean;
+  volumeUpRegistered?: boolean;
+  volumeDownRegistered?: boolean;
+  startByte?: number;
+  endByte?: number;
+  nextStartByte?: number;
+  pageRequestId?: number;
+  pageRequestCurrent?: boolean;
+  pageTextChanged?: boolean;
+  navigationIndicatorRectVp?: { left: number; top: number;
+    right: number; bottom: number };
 }
 
 export function recordReaderDiagnostic(context: common.UIAbilityContext,
@@ -139,6 +163,58 @@ function safeDetails(details: DiagnosticDetails | undefined):
   if (isSafeMetric(details.pageViewportHeightPx)) {
     out.pageViewportHeightPx = roundMetric(details.pageViewportHeightPx);
   }
+  if (isSafeLabel(details.source)) out.source = details.source;
+  if (isSafeLabel(details.reason)) out.reason = details.reason;
+  if (isSafeLabel(details.hitRegion)) out.hitRegion = details.hitRegion;
+  if (isSafeMetric(details.inputXVp)) out.inputXVp = roundMetric(details.inputXVp);
+  if (isSafeMetric(details.inputYVp)) out.inputYVp = roundMetric(details.inputYVp);
+  if (isSafeMetric(details.deltaXVp)) out.deltaXVp = roundMetric(details.deltaXVp);
+  if (isSafeMetric(details.deltaYVp)) out.deltaYVp = roundMetric(details.deltaYVp);
+  if (typeof details.pageInForeground === 'boolean') {
+    out.pageInForeground = details.pageInForeground;
+  }
+  if (typeof details.readerReady === 'boolean') out.readerReady = details.readerReady;
+  if (typeof details.loading === 'boolean') out.loading = details.loading;
+  if (typeof details.leaving === 'boolean') out.leaving = details.leaving;
+  if (typeof details.catalogVisible === 'boolean') {
+    out.catalogVisible = details.catalogVisible;
+  }
+  if (typeof details.settingsVisible === 'boolean') {
+    out.settingsVisible = details.settingsVisible;
+  }
+  if (typeof details.volumeKeyPaging === 'boolean') {
+    out.volumeKeyPaging = details.volumeKeyPaging;
+  }
+  if (typeof details.volumeUpRegistered === 'boolean') {
+    out.volumeUpRegistered = details.volumeUpRegistered;
+  }
+  if (typeof details.volumeDownRegistered === 'boolean') {
+    out.volumeDownRegistered = details.volumeDownRegistered;
+  }
+  if (isSafeByteOffset(details.startByte)) out.startByte = details.startByte;
+  if (isSafeByteOffset(details.endByte)) out.endByte = details.endByte;
+  if (isSafeByteOffset(details.nextStartByte)) {
+    out.nextStartByte = details.nextStartByte;
+  }
+  if (isSafeByteOffset(details.pageRequestId)) {
+    out.pageRequestId = details.pageRequestId;
+  }
+  if (typeof details.pageRequestCurrent === 'boolean') {
+    out.pageRequestCurrent = details.pageRequestCurrent;
+  }
+  if (typeof details.pageTextChanged === 'boolean') {
+    out.pageTextChanged = details.pageTextChanged;
+  }
+  if (details.navigationIndicatorRectVp !== undefined) {
+    const rect = details.navigationIndicatorRectVp;
+    if (isSafeMetric(rect.left) && isSafeMetric(rect.top) &&
+        isSafeMetric(rect.right) && isSafeMetric(rect.bottom)) {
+      out.navigationIndicatorRectVp = {
+        left: roundMetric(rect.left), top: roundMetric(rect.top),
+        right: roundMetric(rect.right), bottom: roundMetric(rect.bottom)
+      };
+    }
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -153,6 +229,14 @@ function isSafeInset(value: number | undefined): value is number {
 function isSafeMetric(value: number | undefined): value is number {
   return typeof value === 'number' && Number.isFinite(value) &&
     Math.abs(value) <= 100000;
+}
+
+function isSafeByteOffset(value: number | undefined): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSafeLabel(value: string | undefined): value is string {
+  return typeof value === 'string' && /^[a-zA-Z0-9._-]{1,48}$/.test(value);
 }
 
 function roundMetric(value: number): number {
