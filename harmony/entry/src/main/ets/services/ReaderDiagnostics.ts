@@ -27,6 +27,22 @@ export interface DiagnosticDetails {
   bottomInsetVp?: number;
   leftInsetVp?: number;
   rightInsetVp?: number;
+  windowWidthVp?: number;
+  windowHeightVp?: number;
+  statusBarHeightVp?: number;
+  cutoutCount?: number;
+  cutoutGeometryAvailable?: boolean;
+  cutoutRectsVp?: Array<{ left: number; top: number; right: number; bottom: number }>;
+  readerXVp?: number;
+  readerYVp?: number;
+  readerWidthVp?: number;
+  readerHeightVp?: number;
+  readerXPx?: number;
+  readerYPx?: number;
+  readerWidthPx?: number;
+  readerHeightPx?: number;
+  pageViewportWidthPx?: number;
+  pageViewportHeightPx?: number;
 }
 
 export function recordReaderDiagnostic(context: common.UIAbilityContext,
@@ -88,6 +104,41 @@ function safeDetails(details: DiagnosticDetails | undefined):
   if (isSafeInset(details.rightInsetVp)) {
     out.rightInsetVp = Math.round(details.rightInsetVp * 10) / 10;
   }
+  if (isSafeMetric(details.windowWidthVp)) out.windowWidthVp = roundMetric(details.windowWidthVp);
+  if (isSafeMetric(details.windowHeightVp)) out.windowHeightVp = roundMetric(details.windowHeightVp);
+  if (isSafeMetric(details.statusBarHeightVp)) out.statusBarHeightVp = roundMetric(details.statusBarHeightVp);
+  if (typeof details.cutoutCount === 'number' &&
+      Number.isInteger(details.cutoutCount) && details.cutoutCount >= 0) {
+    out.cutoutCount = details.cutoutCount;
+  }
+  if (typeof details.cutoutGeometryAvailable === 'boolean') {
+    out.cutoutGeometryAvailable = details.cutoutGeometryAvailable;
+  }
+  if (details.cutoutRectsVp !== undefined) {
+    const rects: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+    for (let i = 0; i < details.cutoutRectsVp.length && i < 12; i++) {
+      const rect = details.cutoutRectsVp[i];
+      if (!isSafeMetric(rect.left) || !isSafeMetric(rect.top) ||
+          !isSafeMetric(rect.right) || !isSafeMetric(rect.bottom)) continue;
+      rects.push({ left: roundMetric(rect.left), top: roundMetric(rect.top),
+        right: roundMetric(rect.right), bottom: roundMetric(rect.bottom) });
+    }
+    out.cutoutRectsVp = rects;
+  }
+  if (isSafeMetric(details.readerXVp)) out.readerXVp = roundMetric(details.readerXVp);
+  if (isSafeMetric(details.readerYVp)) out.readerYVp = roundMetric(details.readerYVp);
+  if (isSafeMetric(details.readerWidthVp)) out.readerWidthVp = roundMetric(details.readerWidthVp);
+  if (isSafeMetric(details.readerHeightVp)) out.readerHeightVp = roundMetric(details.readerHeightVp);
+  if (isSafeMetric(details.readerXPx)) out.readerXPx = roundMetric(details.readerXPx);
+  if (isSafeMetric(details.readerYPx)) out.readerYPx = roundMetric(details.readerYPx);
+  if (isSafeMetric(details.readerWidthPx)) out.readerWidthPx = roundMetric(details.readerWidthPx);
+  if (isSafeMetric(details.readerHeightPx)) out.readerHeightPx = roundMetric(details.readerHeightPx);
+  if (isSafeMetric(details.pageViewportWidthPx)) {
+    out.pageViewportWidthPx = roundMetric(details.pageViewportWidthPx);
+  }
+  if (isSafeMetric(details.pageViewportHeightPx)) {
+    out.pageViewportHeightPx = roundMetric(details.pageViewportHeightPx);
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -97,6 +148,15 @@ function isSafeColor(value: string | undefined): boolean {
 
 function isSafeInset(value: number | undefined): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function isSafeMetric(value: number | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value) &&
+    Math.abs(value) <= 100000;
+}
+
+function roundMetric(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 export async function exportReaderDiagnostics(

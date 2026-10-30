@@ -7,6 +7,7 @@ export const APP_SYSTEM_DARK_KEY = 'suyue.systemDark';
 
 export interface AppThemePalette {
   page: string;
+  readerPage: string;
   surface: string;
   surfaceRaised: string;
   surfaceSelected: string;
@@ -41,6 +42,7 @@ export function themePalette(mode: string,
   if (isDark) {
     return {
       page: '#101114',
+      readerPage: '#08090D',
       surface: '#191B20',
       surfaceRaised: '#22252C',
       surfaceSelected: '#29384B',
@@ -60,6 +62,7 @@ export function themePalette(mode: string,
   }
   return {
     page: '#F5F3EE',
+    readerPage: '#F7F4EC',
     surface: '#FFFEFB',
     surfaceRaised: '#EEECE6',
     surfaceSelected: '#E3EAF2',
