@@ -22,6 +22,8 @@ export interface TransferProgress {
   percent: number;
   message: string;
   error?: string;
+  phase?: string;
+  sdkCode?: number;
 }
 
 export interface TargetDevice {
@@ -31,7 +33,8 @@ export interface TargetDevice {
   name: string;
 }
 
-export const MAX_RETRY = 3;
+// One user tap means one transmission attempt. Another tap is required after failure.
+export const MAX_RETRY = 0;
 // 回执超时：上传完成后等待手表 RESULT 的时间
 // （第二轮 P0-3：不再把上传时长计入）。
 export const RESULT_TIMEOUT_MS = 60000;
