@@ -89,6 +89,12 @@ assert.ok(textFile.includes('readWindow') &&
   textFile.includes('fileIo.lseek') &&
   !textFile.includes('MAX_BACKWARD_ALIGNMENT_BYTES'),
   'long books must be read through bounded random-access UTF-8 windows');
+const positionedRead = textFile.match(
+  /const count = await fileIo\.read\(fd, buffer,\s*\{([^}]+)\}\);/);
+assert.ok(positionedRead !== null &&
+  !/\boffset\s*:/.test(positionedRead[1]) &&
+  positionedRead[1].includes('length: length'),
+  'fileIo.read must preserve the position set by lseek, not silently reread byte 0');
 assert.ok(reader.includes('ReadingProgressStore') &&
   reader.includes('store.load(book.bookId, book.sha256)') &&
   reader.includes('store.save(book.bookId, book.sha256, page.startByte, undefined') &&
