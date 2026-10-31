@@ -285,8 +285,8 @@ export class BookTransferService {
   // peer 必须是对端（手表）身份，不能是本机身份。
   async sendBook(book: BookMeta, device: TargetDevice,
     peer: { bundleName: string; fingerprint: string },
-    callbacks: TransferCallbacks,
-    retry: number = MAX_RETRY): Promise<boolean> {
+    callbacks: TransferCallbacks): Promise<boolean> {
+    const retry = MAX_RETRY; // 0: no automatic retransmission.
     // 单本互斥：手表侧第二本会回 E_BUSY，
     // 手机侧也不允许并发发送。
     if (this.inFlight !== null) {
@@ -308,6 +308,7 @@ export class BookTransferService {
       title: book.title,
       state: TransferState.CONNECTING,
       percent: 0,
+      phase: 'PEER_CHECK',
       message: '正在连接 ' + device.name
     };
     this.update(callbacks, progress);
@@ -319,6 +320,10 @@ export class BookTransferService {
         .isRemoteAppInstalled(device, peer.bundleName);
     } catch (e) {
       installed = false;
+      const failure = e as { code?: number };
+      if (typeof failure.code === 'number') {
+        progress.sdkCode = failure.code;
+      }
     }
     if (!installed) {
       progress.state = TransferState.FAILED;
@@ -353,6 +358,7 @@ export class BookTransferService {
       try {
         // HELLO
         progress.state = TransferState.CONNECTING;
+        progress.phase = 'HELLO';
         progress.message = '握手（HELLO）';
         this.update(callbacks, progress);
         await this.sendMessage(device, appParam, {
@@ -415,11 +421,13 @@ export class BookTransferService {
             chapterGroups.length;
         }
         progress.state = TransferState.SENDING;
+        progress.phase = 'BOOK_META';
         progress.message = '发送书籍元数据';
         this.update(callbacks, progress);
         await this.sendMessage(device, appParam, metaPayload, 'BOOK_META');
 
         for (let i = 0; i < chapterGroups.length; i++) {
+          progress.phase = 'CHAPTERS';
           progress.message = '发送章节索引 ' + (i + 1) +
             '/' + chapterGroups.length;
           this.update(callbacks, progress);
@@ -432,6 +440,7 @@ export class BookTransferService {
         }
 
         // 文件通道：整本规范化文件。
+        progress.phase = 'TRANSFER_FILE';
         progress.message = '通过文件通道传输正文';
         this.update(callbacks, progress);
         await this.transferFile(device, appParam,
@@ -444,6 +453,7 @@ export class BookTransferService {
         // 回执计时从现在开始（大文件不误超时）。
         this.waiters.markUploaded(transferId);
         progress.state = TransferState.WAITING_RESULT;
+        progress.phase = 'RESULT';
         progress.message = '等待手表校验回执';
         progress.percent = 100;
         this.update(callbacks, progress);
@@ -484,7 +494,8 @@ export class BookTransferService {
           this.finishTransfer(transferId);
           progress.state = TransferState.FAILED;
           progress.error = reason;
-          progress.message = '重试耗尽：' + reason;
+          progress.message = '手表返回失败（' +
+            (progress.phase || 'RESULT') + '）：' + reason;
           this.update(callbacks, progress);
           return false;
         }
@@ -494,12 +505,28 @@ export class BookTransferService {
           attempt,
           error instanceof Error ? error.message : String(error));
         this.waiters.fail(transferId, 'E_PEER_UNAVAILABLE');
+        if (this.cancelled.has(transferId)) {
+          this.finishTransfer(transferId);
+          progress.state = TransferState.CANCELLED;
+          progress.message = '已取消';
+          this.update(callbacks, progress);
+          return false;
+        }
+        const rawFailure = error instanceof Error ? error.message :
+          String(error);
+        const sdkError = error as { code?: number };
+        const codeFromMessage = /(?:code|failed:)\s*(\d+)/i.exec(rawFailure);
+        if (typeof sdkError.code === 'number') {
+          progress.sdkCode = sdkError.code;
+        } else if (codeFromMessage !== null) {
+          progress.sdkCode = Number(codeFromMessage[1]);
+        }
         if (attempt > retry) {
           this.finishTransfer(transferId);
           progress.state = TransferState.FAILED;
           progress.error = 'E_PEER_UNAVAILABLE';
-          progress.message = '传输失败：' +
-            (error && error.message);
+          progress.message = '传输失败（' +
+            (progress.phase || 'UNKNOWN') + '）：' + rawFailure;
           this.update(callbacks, progress);
           return false;
         }
