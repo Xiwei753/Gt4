@@ -34,6 +34,10 @@ import { deviceNotice, runDeviceRefresh } from '../services/WearAuthPolicy';
 import { ReaderWindowInsets, setAppWindowTheme, showShelfWindow }
   from '../services/ReaderWindowAppearance';
 
+interface SdkCodeCarrier {
+  code?: number;
+}
+
 // 双端身份严格分离（issue #13）：
 //   WATCH_PEER：对端 GT 4 Lite 身份，手机发送/注册回执时
 //     使用 con.xiwei.suyue.gt4_Base64(原始 EC 公钥点)；
@@ -411,7 +415,7 @@ struct Index {
       this.receiverReady = true;
       return true;
     } catch (error) {
-      const failure = error as { code?: number };
+      const failure = error as SdkCodeCarrier;
       const code = typeof failure.code === 'number' ? failure.code : 0;
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       recordReaderDiagnostic(context, 'device', 'receiver_register_fail',
@@ -530,7 +534,7 @@ struct Index {
     let lastFailure = '手表未确认入库';
     let lastPhase = 'PEER_CHECK';
     let lastError = 'E_UNKNOWN';
-    let lastState: TransferState = TransferState.CONNECTING;
+    let wasCancelled = false;
     let lastSdkCode = 0;
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     recordReaderDiagnostic(context, 'transfer', 'start');
@@ -538,7 +542,7 @@ struct Index {
       book, device, WATCH_PEER,
       {
         onProgress: (progress: TransferProgress) => {
-          lastState = progress.state;
+          wasCancelled = progress.state === TransferState.CANCELLED;
           if (progress.transferId) {
             this.activeTransferId = progress.transferId;
           }
@@ -567,7 +571,7 @@ struct Index {
       this.transferText = '《' + book.title + '》手表已确认入库';
       this.getRepository().markStatus(book.bookId,
         BookStatus.SENT);
-    } else if (lastState === TransferState.CANCELLED) {
+    } else if (wasCancelled) {
       recordReaderDiagnostic(context, 'transfer', 'cancelled', 0,
         { source: lastPhase, reason: 'E_CANCELLED' });
       this.transferText = '已取消传书';
