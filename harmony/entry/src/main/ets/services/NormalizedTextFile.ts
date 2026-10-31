@@ -149,8 +149,9 @@ export class NormalizedTextFile {
     const readTask = this.ioQueue.then(async (): Promise<Uint8Array> => {
       fileIo.lseek(fd, startByte, fileIo.WhenceType.SEEK_SET);
       const buffer = new ArrayBuffer(length);
-      const count = await fileIo.read(fd, buffer,
-        { offset: 0, length: length });
+      // read() defaults to the file's current offset set by lseek().
+      // Explicit offset: 0 would re-read the start of the book on every page.
+      const count = await fileIo.read(fd, buffer, { length: length });
       return new Uint8Array(buffer, 0, count).slice();
     });
     this.ioQueue = readTask.then((): void => {}, (): void => {});
