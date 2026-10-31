@@ -122,6 +122,7 @@ struct Reader {
   private initializing: boolean = false;
   private pageInForeground: boolean = false;
   private leaving: boolean = false;
+  private windowPageToken: number = 0;
   private windowInsetsReady: boolean = false;
   private viewportNeedsInsetsLayout: boolean = false;
   private resizeTimer: number = -1;
@@ -202,9 +203,10 @@ struct Reader {
     if (this.readerAvailable && this.book !== null) {
       this.refreshReaderInfo();
       this.scheduleReaderInfoRefresh();
-      enterReaderWindow(context, this.themeMode, this.isDarkTheme(),
-        this.onWindowInsets);
+      this.windowPageToken = enterReaderWindow(context, this.themeMode,
+        this.isDarkTheme(), this.onWindowInsets);
     } else {
+      this.windowPageToken = 0;
       showShelfWindow(context, this.themeMode, this.isDarkTheme(),
         this.onWindowInsets);
     }
@@ -247,7 +249,9 @@ struct Reader {
     this.pageRequestId += 1;
     this.saveCurrentOffset();
     if (this.textFile !== null) this.textFile.close();
-    exitReaderWindow();
+    const pageToken = this.windowPageToken;
+    this.windowPageToken = 0;
+    exitReaderWindow(pageToken);
   }
 
   private context(): common.UIAbilityContext {
@@ -1754,6 +1758,7 @@ struct Reader {
             .letterSpacing(0)
             .wordBreak(WordBreak.BREAK_WORD)
             .textAlign(TextAlign.Start)
+            .align(Alignment.TopStart)
             .width('100%').height('100%')
             .onAreaChange((oldArea: Area, newArea: Area) => {
               this.readerAreaChanged(newArea);

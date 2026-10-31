@@ -44,6 +44,7 @@ class ReaderWindowAppearanceService {
   private windowDisplayChangeCallback: ((displayId: number) => void) | null = null;
   private windowDisplayChangeWindow: window.Window | null = null;
   private activePage: ActivePage = 'none';
+  private activePageToken: number = 0;
   private themeMode: AppThemeMode = 'system';
   private darkTheme: boolean = false;
   private generation: number = 0;
@@ -58,13 +59,13 @@ class ReaderWindowAppearanceService {
   }
 
   enterReader(context: common.UIAbilityContext, mode: AppThemeMode,
-    dark: boolean, listener: ReaderWindowInsetsListener): void {
-    this.showPage(context, 'reader', mode, dark, listener);
+    dark: boolean, listener: ReaderWindowInsetsListener): number {
+    return this.showPage(context, 'reader', mode, dark, listener);
   }
 
   private showPage(context: common.UIAbilityContext, page: ActivePage,
     mode: AppThemeMode, dark: boolean,
-    listener: ReaderWindowInsetsListener): void {
+    listener: ReaderWindowInsetsListener): number {
     this.abilityContext = context;
     this.activePage = page;
     this.themeMode = mode;
@@ -72,6 +73,7 @@ class ReaderWindowAppearanceService {
     this.insetsListener = listener;
     this.insetsReadGeneration++;
     const generation = ++this.generation;
+    this.activePageToken = generation;
     this.enqueue(async (): Promise<void> => {
       if (generation !== this.generation) return;
       const win = await this.obtainWindow(context);
@@ -102,6 +104,7 @@ class ReaderWindowAppearanceService {
         });
       }, 120);
     });
+    return generation;
   }
 
   setTheme(mode: AppThemeMode, dark: boolean): void {
@@ -126,9 +129,11 @@ class ReaderWindowAppearanceService {
     this.publishInsets(this.mainWindow, false);
   }
 
-  exitReader(): void {
-    if (this.activePage !== 'reader') return;
+  exitReader(pageToken: number): void {
+    if (this.activePage !== 'reader' ||
+        pageToken !== this.activePageToken) return;
     this.activePage = 'none';
+    this.activePageToken = 0;
     this.insetsListener = null;
     this.insetsReadGeneration++;
     this.detachAvoidAreaListener();
@@ -190,13 +195,16 @@ class ReaderWindowAppearanceService {
 
   private async setStatusBarVisible(win: window.Window,
     visible: boolean): Promise<void> {
+    let code = 0;
     try {
       await win.setSpecificSystemBarEnabled('status', visible, false);
     } catch (error) {
-      this.logWindowState(visible ? 'status_bar_show_fail' :
-        'status_bar_hide_fail', this.errorCode(error));
+      code = this.errorCode(error);
       console.error('ReaderWindowAppearance: status bar visibility change failed');
     }
+    const stage = code === 0 ? 'status_bar_visibility_applied' :
+      visible ? 'status_bar_show_fail' : 'status_bar_hide_fail';
+    this.logWindowState(stage, code, undefined, visible);
   }
 
   private sameSystemBarState(current: window.SystemBarProperties,
@@ -348,7 +356,8 @@ class ReaderWindowAppearanceService {
   }
 
   private logWindowState(stage: string, code: number,
-    insets?: ReaderWindowInsets): void {
+    insets?: ReaderWindowInsets,
+    statusBarTargetVisible?: boolean): void {
     const context = this.abilityContext;
     if (context === null) return;
     let fullScreen = false;
@@ -356,6 +365,10 @@ class ReaderWindowAppearanceService {
     let navigationBarColor = TRANSPARENT;
     let statusBarLightIcon = this.darkTheme;
     let navigationBarLightIcon = this.darkTheme;
+    let statusBarVisible = false;
+    let statusBarVisibilityKnown = false;
+    let systemAvoidAreaVisible = false;
+    let statusBarTopRectHeightPx = 0;
     try {
       const win = this.mainWindow;
       if (win !== null) {
@@ -365,6 +378,15 @@ class ReaderWindowAppearanceService {
         navigationBarColor = bars.navigationBarColor || '';
         statusBarLightIcon = bars.isStatusBarLightIcon === true;
         navigationBarLightIcon = bars.isNavigationBarLightIcon === true;
+        const systemArea = this.safeAvoidArea(win,
+          window.AvoidAreaType.TYPE_SYSTEM);
+        if (systemArea !== null) {
+          statusBarVisibilityKnown = true;
+          systemAvoidAreaVisible = systemArea.visible;
+          statusBarTopRectHeightPx = systemArea.topRect.height;
+          statusBarVisible = systemArea.visible &&
+            systemArea.topRect.height > 0;
+        }
       }
     } catch (error) {
       // Preserve the operation's original code; the failure stage remains
@@ -377,6 +399,11 @@ class ReaderWindowAppearanceService {
       navigationBarColor: navigationBarColor,
       statusBarLightIcon: statusBarLightIcon,
       navigationBarLightIcon: navigationBarLightIcon,
+      statusBarTargetVisible: statusBarTargetVisible,
+      statusBarVisible: statusBarVisible,
+      statusBarVisibilityKnown: statusBarVisibilityKnown,
+      systemAvoidAreaVisible: systemAvoidAreaVisible,
+      statusBarTopRectHeightPx: statusBarTopRectHeightPx,
       topInsetVp: insets?.top,
       bottomInsetVp: insets?.bottom,
       leftInsetVp: insets?.left,
@@ -582,8 +609,8 @@ export function showShelfWindow(context: common.UIAbilityContext,
 
 export function enterReaderWindow(context: common.UIAbilityContext,
   mode: AppThemeMode, dark: boolean,
-  listener: ReaderWindowInsetsListener): void {
-  readerWindowAppearance.enterReader(context, mode, dark, listener);
+  listener: ReaderWindowInsetsListener): number {
+  return readerWindowAppearance.enterReader(context, mode, dark, listener);
 }
 
 export function setAppWindowTheme(mode: AppThemeMode, dark: boolean): void {
@@ -594,6 +621,6 @@ export function refreshReaderWindowInsets(): void {
   readerWindowAppearance.refreshInsets();
 }
 
-export function exitReaderWindow(): void {
-  readerWindowAppearance.exitReader();
+export function exitReaderWindow(pageToken: number): void {
+  readerWindowAppearance.exitReader(pageToken);
 }
