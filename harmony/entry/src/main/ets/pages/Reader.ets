@@ -5,6 +5,7 @@ import { common } from '@kit.AbilityKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
 import { router } from '@kit.ArkUI';
 import { inputConsumer, KeyCode, KeyEvent } from '@kit.InputKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BookChapter, BookMeta } from '../model/BookModels';
 import { paginateBackward, paginateForward,
   ReaderTextPage, recoverPreviousPageFromCheckpoint,
@@ -56,6 +57,7 @@ const READER_CHAPTER_LABEL_HEIGHT_VP = 18;
 const READER_CHAPTER_LABEL_GAP_VP = 8;
 const READER_GESTURE_SAFE_REGION_RATIO = 0.36;
 const READER_INPUT_FEEDBACK_MS = 1600;
+const READER_INPUT_HILOG_TAG = 'suyue/ReaderInput';
 
 @Entry
 @Component
@@ -283,6 +285,8 @@ struct Reader {
     if (this.shouldConsumeVolumeKeys()) {
       if (!this.volumeUpRegistered) {
         try {
+          this.logReaderHilog('volume_listener_register_attempt',
+            'volume_up');
           inputConsumer.on('keyPressed', {
             key: KeyCode.KEYCODE_VOLUME_UP,
             action: 1,
@@ -290,14 +294,20 @@ struct Reader {
           }, this.volumeUpListener);
           this.volumeUpRegistered = true;
           this.logReaderInput('volume_listener_registered', 'volume_up');
+          this.logReaderHilog('volume_listener_registered', 'volume_up');
         } catch (error) {
-          this.log('volumeKey', 'up_register_fail', this.errorCode(error));
+          const code = this.errorCode(error);
+          this.log('volumeKey', 'up_register_fail', code);
           this.logReaderInput('volume_listener_register_fail', 'volume_up',
-            'error_' + this.errorCode(error).toString());
+            'error_' + code.toString());
+          this.logReaderHilog('volume_listener_register_fail', 'volume_up',
+            'register', code, true);
         }
       }
       if (!this.volumeDownRegistered) {
         try {
+          this.logReaderHilog('volume_listener_register_attempt',
+            'volume_down');
           inputConsumer.on('keyPressed', {
             key: KeyCode.KEYCODE_VOLUME_DOWN,
             action: 1,
@@ -305,10 +315,14 @@ struct Reader {
           }, this.volumeDownListener);
           this.volumeDownRegistered = true;
           this.logReaderInput('volume_listener_registered', 'volume_down');
+          this.logReaderHilog('volume_listener_registered', 'volume_down');
         } catch (error) {
-          this.log('volumeKey', 'down_register_fail', this.errorCode(error));
+          const code = this.errorCode(error);
+          this.log('volumeKey', 'down_register_fail', code);
           this.logReaderInput('volume_listener_register_fail', 'volume_down',
-            'error_' + this.errorCode(error).toString());
+            'error_' + code.toString());
+          this.logReaderHilog('volume_listener_register_fail', 'volume_down',
+            'register', code, true);
         }
       }
       return;
@@ -322,8 +336,12 @@ struct Reader {
         inputConsumer.off('keyPressed', this.volumeUpListener);
         this.volumeUpRegistered = false;
         this.logReaderInput('volume_listener_unregistered', 'volume_up');
+        this.logReaderHilog('volume_listener_unregistered', 'volume_up');
       } catch (error) {
-        this.log('volumeKey', 'up_unregister_fail', this.errorCode(error));
+        const code = this.errorCode(error);
+        this.log('volumeKey', 'up_unregister_fail', code);
+        this.logReaderHilog('volume_listener_unregister_fail', 'volume_up',
+          'unregister', code, true);
       }
     }
     if (this.volumeDownRegistered) {
@@ -331,13 +349,19 @@ struct Reader {
         inputConsumer.off('keyPressed', this.volumeDownListener);
         this.volumeDownRegistered = false;
         this.logReaderInput('volume_listener_unregistered', 'volume_down');
+        this.logReaderHilog('volume_listener_unregistered', 'volume_down');
       } catch (error) {
-        this.log('volumeKey', 'down_unregister_fail', this.errorCode(error));
+        const code = this.errorCode(error);
+        this.log('volumeKey', 'down_unregister_fail', code);
+        this.logReaderHilog('volume_listener_unregister_fail', 'volume_down',
+          'unregister', code, true);
       }
     }
   }
 
   private flipPageFromVolumeKey(isNext: boolean, source: string): void {
+    this.logReaderInput('volume_key_callback', source);
+    this.logReaderHilog('volume_key_callback', source);
     this.requestPageFlip(source, isNext);
   }
 
@@ -349,7 +373,10 @@ struct Reader {
 
   private handleReaderTouch(event: TouchEvent): void {
     if (event.type === TouchType.Cancel) {
-      if (this.touchActive) this.logReaderInput('touch_cancel', 'touch');
+      if (this.touchActive) {
+        this.logReaderInput('touch_cancel', 'touch');
+        this.logReaderHilog('touch_cancel', 'touch');
+      }
       this.touchActive = false;
       return;
     }
@@ -357,8 +384,10 @@ struct Reader {
       event.changedTouches[0] :
       event.touches.length > 0 ? event.touches[0] : null;
     if (point === null) {
-      this.logReaderInput(event.type === TouchType.Down ?
-        'touch_down_missing_point' : 'touch_up_missing_point', 'touch');
+      const stage = event.type === TouchType.Down ?
+        'touch_down_missing_point' : 'touch_up_missing_point';
+      this.logReaderInput(stage, 'touch');
+      this.logReaderHilog(stage, 'touch', 'missing_point');
       return;
     }
     if (event.type === TouchType.Down) {
@@ -366,24 +395,42 @@ struct Reader {
       this.touchStartX = point.x;
       this.touchStartY = point.y;
       this.touchStartAt = Date.now();
+      const region = this.touchRegion(point.x);
+      this.logReaderInput('touch_down', 'touch', '', point.x, point.y,
+        region);
+      this.logReaderHilog('touch_down', 'touch', region);
       return;
     }
     if (event.type !== TouchType.Up) return;
     if (!this.touchActive) {
       this.logReaderInput('touch_up_without_down', 'touch', '', point.x,
         point.y, this.touchRegion(point.x));
+      this.logReaderHilog('touch_up_without_down', 'touch',
+        this.touchRegion(point.x));
       return;
     }
     this.touchActive = false;
     const deltaX = point.x - this.touchStartX;
     const deltaY = point.y - this.touchStartY;
     const region = this.touchRegion(point.x);
+    this.logReaderInput('touch_up', 'touch', '', point.x, point.y,
+      region, deltaX, deltaY);
+    this.logReaderHilog('touch_up', 'touch', region);
     if (Math.abs(deltaX) >= 48 && Math.abs(deltaX) > Math.abs(deltaY)) {
       if (deltaX < 0) this.requestPageFlip('swipe_left', true);
       else this.requestPageFlip('swipe_right', false);
       return;
     }
-    if (Math.abs(deltaY) >= 48 || Date.now() - this.touchStartAt > 600) return;
+    if (Math.abs(deltaY) >= 48) {
+      this.logReaderInput('touch_ignored', 'touch', 'vertical_swipe',
+        point.x, point.y, region, deltaX, deltaY);
+      return;
+    }
+    if (Date.now() - this.touchStartAt > 600) {
+      this.logReaderInput('touch_ignored', 'touch', 'long_press',
+        point.x, point.y, region, deltaX, deltaY);
+      return;
+    }
     if (region === 'left') {
       this.requestPageFlip('tap_left', false);
     } else if (region === 'right') {
@@ -396,8 +443,9 @@ struct Reader {
   private touchRegion(x: number): string {
     const width = this.viewportWidthVp;
     if (width <= 0) return 'unknown';
-    if (x < width * 0.34) return 'left';
-    if (x > width * 0.66) return 'right';
+    const contentLeft = this.safeLeft;
+    if (x < contentLeft + width * 0.34) return 'left';
+    if (x > contentLeft + width * 0.66) return 'right';
     return 'center';
   }
 
@@ -425,6 +473,31 @@ struct Reader {
     recordReaderDiagnostic(this.context(), 'readerInput', stage, 0, details);
   }
 
+  private logReaderHilog(stage: string, source: string, reason: string = '',
+    code: number = 0, isError: boolean = false,
+    page: ReaderTextPage | null | undefined = undefined,
+    nextStartByte: number = -1, requestId: number = -1): void {
+    const current = page === undefined ? this.currentPage : page;
+    const startByte = current !== null ? current.startByte : -1;
+    const endByte = current !== null ? current.endByte : -1;
+    const actualRequestId = requestId >= 0 ? requestId : this.pageRequestId;
+    const message = 'stage=' + stage + ' source=' + source +
+      ' reason=' + reason + ' code=' + code +
+      ' start=' + startByte + ' end=' + endByte +
+      ' next=' + nextStartByte + ' request=' + actualRequestId +
+      ' foreground=' + (this.pageInForeground ? 1 : 0) +
+      ' ready=' + (this.readerReady ? 1 : 0) +
+      ' loading=' + (this.loading ? 1 : 0) +
+      ' leaving=' + (this.leaving ? 1 : 0) +
+      ' catalog=' + (this.catalogVisible ? 1 : 0) +
+      ' settings=' + (this.settingsVisible ? 1 : 0) +
+      ' volumePaging=' + (this.volumeKeyPaging ? 1 : 0) +
+      ' upRegistered=' + (this.volumeUpRegistered ? 1 : 0) +
+      ' downRegistered=' + (this.volumeDownRegistered ? 1 : 0);
+    if (isError) hilog.error(0x0000, READER_INPUT_HILOG_TAG, message);
+    else hilog.info(0x0000, READER_INPUT_HILOG_TAG, message);
+  }
+
   private pageFlipBlockReason(source: string): string {
     if (!this.pageInForeground) return 'page_hidden';
     if (this.leaving) return 'leaving';
@@ -443,6 +516,9 @@ struct Reader {
     isNext: boolean): Promise<void> {
     const page = this.currentPage;
     const blockedReason = this.pageFlipBlockReason(source);
+    this.logReaderHilog(blockedReason.length > 0 ? 'flip_blocked' :
+      'flip_attempt', source, blockedReason, 0, blockedReason.length > 0,
+      page, page !== null && isNext ? page.endByte : -1);
     const details: DiagnosticDetails = {
       source: source,
       reason: blockedReason.length > 0 ? blockedReason : undefined,
@@ -491,6 +567,8 @@ struct Reader {
           catalogVisible: this.catalogVisible,
           settingsVisible: this.settingsVisible
         });
+      this.logReaderHilog('request_fail', source, 'page_request',
+        this.errorCode(error), true, failedPage);
       this.showInputFeedback('翻页失败，请再试一次');
     } finally {
       this.pageFlipInProgress = false;
@@ -729,6 +807,9 @@ struct Reader {
               catalogVisible: this.catalogVisible,
               settingsVisible: this.settingsVisible
             });
+          this.logReaderHilog('page_load_superseded', flipSource,
+            this.leaving ? 'leaving' : 'newer_request', 0, true,
+            this.currentPage, startByte, requestId);
         }
         return false;
       }
@@ -737,6 +818,7 @@ struct Reader {
       this.chapterTitle = this.chapterTitleFor(page.startByte);
       this.logReaderViewport('page_measured');
       if (flipSource !== undefined) {
+        const pageTextChanged = oldText !== page.text;
         recordReaderDiagnostic(this.context(), 'readerFlip',
           'page_load_ok', 0, {
             source: flipSource,
@@ -745,7 +827,7 @@ struct Reader {
             nextStartByte: page.startByte,
             pageRequestId: requestId,
             pageRequestCurrent: true,
-            pageTextChanged: oldText !== page.text,
+            pageTextChanged: pageTextChanged,
             pageInForeground: this.pageInForeground,
             readerReady: this.readerReady,
             loading: this.loading,
@@ -753,6 +835,9 @@ struct Reader {
             catalogVisible: this.catalogVisible,
             settingsVisible: this.settingsVisible
           });
+        this.logReaderHilog('page_load_ok', flipSource,
+          pageTextChanged ? 'text_changed' : 'text_unchanged', 0,
+          !pageTextChanged, page, page.startByte, requestId);
       }
       return true;
     } catch (error) {
@@ -777,6 +862,9 @@ struct Reader {
               catalogVisible: this.catalogVisible,
               settingsVisible: this.settingsVisible
             });
+          this.logReaderHilog('page_load_fail', flipSource,
+            'read_or_paginate', this.errorCode(error), true,
+            this.currentPage, startByte, requestId);
         }
         if (flipSource !== undefined) {
           this.showInputFeedback('正文分页失败，请稍后重试');
@@ -799,6 +887,8 @@ struct Reader {
       recordReaderDiagnostic(this.context(), 'readerFlip', 'end_of_book', 0,
         { source: source, startByte: page.startByte, endByte: page.endByte,
           nextStartByte: nextStart, pageRequestId: this.pageRequestId });
+      this.logReaderHilog('end_of_book', source, 'no_next_page', 0, false,
+        page, nextStart);
       return;
     }
     this.previousPageStarts.push(page.startByte);
@@ -823,6 +913,8 @@ struct Reader {
           'start_of_book', 0, { source: source,
             startByte: page.startByte, endByte: page.endByte,
             pageRequestId: this.pageRequestId });
+        this.logReaderHilog('start_of_book', source, 'no_previous_page',
+          0, false, page, page.startByte);
       }
       return;
     }
@@ -1416,7 +1508,6 @@ struct Reader {
             .wordBreak(WordBreak.BREAK_WORD)
             .textAlign(TextAlign.Start)
             .width('100%').height('100%')
-            .onTouch((event: TouchEvent) => { this.handleReaderTouch(event); })
             .onAreaChange((oldArea: Area, newArea: Area) => {
               this.readerAreaChanged(newArea);
             })
@@ -1425,6 +1516,8 @@ struct Reader {
         .padding({ left: this.safeLeft, right: this.safeRight,
           top: this.readerContentTopInsetVp(),
           bottom: this.readerContentBottomInsetVp() })
+        .onTouch((event: TouchEvent) => { this.handleReaderTouch(event); })
+        .hitTestBehavior(HitTestMode.Default)
 
         if (!this.loading && this.controlsVisible) {
           Column() {

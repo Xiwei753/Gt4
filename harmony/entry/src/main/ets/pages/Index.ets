@@ -9,6 +9,7 @@ import { common } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { wearEngine } from '@kit.WearEngine';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { APP_SYSTEM_DARK_KEY, APP_THEME_MODE_KEY, AppThemePalette,
   AppThemeMode, isDarkTheme, themePalette } from '../services/AppTheme';
 import { BookMeta, BookStatus } from '../model/BookModels';
@@ -23,7 +24,8 @@ import { ReadingProgressStore, ReadingSummary }
   from '../services/ReadingProgressStore';
 import { AppThemeStore, applyNativeThemeMode }
   from '../services/AppThemeStore';
-import { exportReaderDiagnostics, recordReaderDiagnostic }
+import { exportReaderDiagnostics, ReaderDiagnosticsExportError,
+  recordReaderDiagnostic }
   from '../services/ReaderDiagnostics';
 import { WearDeviceService, WearDeviceListResult } from '../services/WearDeviceService';
 import { BookTransferService } from '../services/BookTransferService';
@@ -986,8 +988,20 @@ struct Index {
       const saved = await exportReaderDiagnostics(context);
       this.diagnosticsText = saved ? '诊断日志已导出。' : '已取消导出。';
     } catch (error) {
-      recordReaderDiagnostic(context, 'diagnostics', 'export_fail');
-      this.diagnosticsText = '导出失败，请重试。';
+      const failure = error instanceof ReaderDiagnosticsExportError ?
+        error : null;
+      const stage = failure !== null ? failure.stage : 'unknown';
+      const code = failure !== null ? failure.code : 0;
+      hilog.error(0x0000, 'suyue/Diagnostics',
+        'export_fail stage=' + stage + ' code=' + code);
+      recordReaderDiagnostic(context, 'diagnostics', 'export_fail', code,
+        { reason: 'stage_' + stage });
+      let stageLabel = '未知阶段';
+      if (stage === 'picker') stageLabel = '文件选择器';
+      else if (stage === 'open') stageLabel = '打开文件';
+      else if (stage === 'write') stageLabel = '写入文件';
+      else if (stage === 'close') stageLabel = '关闭文件';
+      this.diagnosticsText = '导出失败：' + stageLabel + '，错误码 ' + code;
     }
   }
 

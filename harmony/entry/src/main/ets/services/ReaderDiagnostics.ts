@@ -28,6 +28,24 @@ interface DiagnosticRecord {
   details?: DiagnosticDetails;
 }
 
+interface DiagnosticExportErrorCode {
+  code?: number;
+}
+
+export type ReaderDiagnosticsExportStage =
+  'picker' | 'open' | 'write' | 'close' | 'unknown';
+
+export class ReaderDiagnosticsExportError extends Error {
+  stage: ReaderDiagnosticsExportStage;
+  code: number;
+
+  constructor(stage: ReaderDiagnosticsExportStage, code: number) {
+    super('Reader diagnostics export failed');
+    this.stage = stage;
+    this.code = code;
+  }
+}
+
 export interface DiagnosticDetails {
   fullScreen?: boolean;
   theme?: string;
@@ -358,17 +376,51 @@ export async function exportReaderDiagnostics(
   const pickerView = new picker.DocumentViewPicker(context);
   const options = new picker.DocumentSaveOptions();
   options.newFileNames = ['suyue-reader-diagnostics.jsonl'];
-  options.fileSuffixChoices = ['JSON Lines|jsonl'];
-  const uris = await pickerView.save(options);
-  if (uris.length === 0) return false;
-  const file = fileIo.openSync(uris[0], fileIo.OpenMode.READ_WRITE |
-    fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
+  let uris: string[];
   try {
-    fileIo.writeSync(file.fd, new util.TextEncoder().encode(content).buffer);
-  } finally {
-    fileIo.closeSync(file.fd);
+    uris = await pickerView.save(options);
+  } catch (error) {
+    throw new ReaderDiagnosticsExportError('picker', exportErrorCode(error));
   }
+  if (uris.length === 0) return false;
+
+  let file: fileIo.File;
+  try {
+    file = fileIo.openSync(uris[0], fileIo.OpenMode.READ_WRITE);
+  } catch (error) {
+    throw new ReaderDiagnosticsExportError('open', exportErrorCode(error));
+  }
+
+  let writeFailure: ReaderDiagnosticsExportError | null = null;
+  const expectedBytes = byteLength(content);
+  try {
+    if (expectedBytes > 0) {
+      const written = fileIo.writeSync(file.fd, content);
+      if (written !== expectedBytes) {
+        writeFailure = new ReaderDiagnosticsExportError('write', 0);
+      }
+    }
+  } catch (error) {
+    writeFailure = new ReaderDiagnosticsExportError('write',
+      exportErrorCode(error));
+  }
+
+  let closeFailure: ReaderDiagnosticsExportError | null = null;
+  try {
+    fileIo.closeSync(file.fd);
+  } catch (error) {
+    closeFailure = new ReaderDiagnosticsExportError('close',
+      exportErrorCode(error));
+  }
+  if (writeFailure !== null) throw writeFailure;
+  if (closeFailure !== null) throw closeFailure;
   return true;
+}
+
+function exportErrorCode(error: Object): number {
+  const value = error as DiagnosticExportErrorCode;
+  return typeof value.code === 'number' && Number.isFinite(value.code) ?
+    Math.trunc(value.code) : 0;
 }
 
 function safeLabel(value: string): string {
