@@ -14,8 +14,6 @@ interface DecodedText {
   byteLength: number;
 }
 
-const MAX_BACKWARD_ALIGNMENT_BYTES = 3;
-
 function isContinuation(value: number): boolean {
   return (value & 0xc0) === 0x80;
 }
@@ -88,8 +86,7 @@ export class NormalizedTextFile {
         startByte > this.byteLength || maxBytes < 1) {
       throw new Error('Invalid text window range');
     }
-    const bytesToRead = Math.min(this.byteLength - startByte,
-      maxBytes + MAX_BACKWARD_ALIGNMENT_BYTES);
+    const bytesToRead = Math.min(this.byteLength - startByte, maxBytes);
     const bytes = await this.readBytesAt(startByte, bytesToRead);
     const decoded = decodeUtf8(bytes, 0, maxBytes);
     return {
@@ -97,34 +94,6 @@ export class NormalizedTextFile {
       endByte: startByte + decoded.byteLength,
       text: decoded.text
     };
-  }
-
-  async readWindowBefore(endByte: number, maxBytes: number):
-    Promise<TextWindow> {
-    if (!Number.isInteger(endByte) || endByte < 0 ||
-        endByte > this.byteLength || maxBytes < 1) {
-      throw new Error('Invalid preceding text window range');
-    }
-    const proposedStart = Math.max(0, endByte - maxBytes -
-      MAX_BACKWARD_ALIGNMENT_BYTES);
-    const raw = await this.readBytesAt(proposedStart,
-      endByte - proposedStart);
-    let skip = 0;
-    while (skip < raw.length && isContinuation(raw[skip]) &&
-        skip <= MAX_BACKWARD_ALIGNMENT_BYTES) {
-      skip += 1;
-    }
-    if (skip > MAX_BACKWARD_ALIGNMENT_BYTES) {
-      throw new Error('Could not align UTF-8 text window');
-    }
-    const decoded = decodeUtf8(raw, skip, raw.length - skip);
-    const startByte = proposedStart + skip;
-    const actualEndByte = startByte + decoded.byteLength;
-    if (actualEndByte !== endByte) {
-      throw new Error('The requested text position is not a UTF-8 boundary');
-    }
-    return { startByte: startByte, endByte: actualEndByte,
-      text: decoded.text };
   }
 
   close(): void {

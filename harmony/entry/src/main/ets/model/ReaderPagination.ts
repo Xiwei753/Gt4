@@ -21,10 +21,6 @@ export interface ReaderPageLoader {
   (startByte: number): Promise<ReaderTextPage>;
 }
 
-export interface ReaderPreviousPageFallback {
-  (targetStartByte: number): Promise<ReaderTextPage | null>;
-}
-
 export const READER_CHECKPOINT_PAGE_INTERVAL = 8;
 
 interface TextBoundaries {
@@ -114,68 +110,51 @@ export function paginateForward(text: string, startByte: number,
 }
 
 /**
- * Recovers the largest fitting suffix that ends at a known forward page
- * boundary. The caller may enlarge its bounded read window when this returns
- * the window start and more source text exists before it.
+ * Replays the forward pager from a known page boundary and returns the page
+ * boundary at or immediately before targetByte. This also aligns a saved
+ * byte offset to the page containing it after a layout change.
  */
-export function paginateBackward(text: string, windowStartByte: number,
-  targetEndByte: number, maxHeightPx: number,
-  measureHeightPx: ReaderTextMeasure): ReaderTextPage | null {
-  const boundaries = textBoundaries(text);
-  const targetByte = targetEndByte - windowStartByte;
-  let targetUnit = -1;
-  for (let i = 0; i < boundaries.bytes.length; i++) {
-    if (boundaries.bytes[i] === targetByte) {
-      targetUnit = i;
-      break;
+export async function findForwardPageStart(targetByte: number,
+  loadPageAt: ReaderPageLoader,
+  onCheckpoint?: (byteOffset: number) => void,
+  anchorByte: number = 0): Promise<number | null> {
+  if (!Number.isInteger(targetByte) || targetByte < 0 ||
+      !Number.isInteger(anchorByte) || anchorByte < 0 ||
+      anchorByte > targetByte) return null;
+  if (targetByte === anchorByte) return targetByte;
+
+  let cursor = anchorByte;
+  let pages = 0;
+  while (cursor < targetByte) {
+    const page = await loadPageAt(cursor);
+    if (page.startByte !== cursor || page.endByte <= cursor) return null;
+    if (page.endByte >= targetByte) {
+      return page.endByte === targetByte ? targetByte : cursor;
+    }
+    cursor = page.endByte;
+    pages += 1;
+    if (pages % READER_CHECKPOINT_PAGE_INTERVAL === 0) {
+      onCheckpoint?.(cursor);
     }
   }
-  if (targetUnit <= 0) return null;
-
-  let low = 0;
-  let high = targetUnit;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    const candidate = text.slice(boundaries.chars[middle],
-      boundaries.chars[targetUnit]);
-    if (heightFits(candidate, maxHeightPx, measureHeightPx)) {
-      high = middle;
-    } else {
-      low = middle + 1;
-    }
-  }
-
-  const startUnit = Math.min(targetUnit - 1, low);
-  const charStart = boundaries.chars[startUnit];
-  const charEnd = boundaries.chars[targetUnit];
-  return {
-    startByte: windowStartByte + boundaries.bytes[startUnit],
-    endByte: targetEndByte,
-    text: text.slice(charStart, charEnd)
-  };
+  return cursor === targetByte ? cursor : null;
 }
 
-/**
- * Replays forward from a nearby page checkpoint to recover an exact previous
- * page boundary. The replay bound matches the checkpoint interval; older
- * anchors fall back to the measured suffix search.
- */
+/** Replays only forward page boundaries to recover the exact prior page. */
 export async function recoverPreviousPageFromCheckpoint(
   targetStartByte: number, checkpointByte: number,
-  loadPageAt: ReaderPageLoader,
-  fallback: ReaderPreviousPageFallback): Promise<ReaderTextPage | null> {
+  loadPageAt: ReaderPageLoader): Promise<ReaderTextPage | null> {
+  if (!Number.isInteger(targetStartByte) || !Number.isInteger(checkpointByte) ||
+      checkpointByte < 0 || checkpointByte >= targetStartByte) return null;
   let cursor = checkpointByte;
-  let pages = 0;
-  while (cursor < targetStartByte &&
-      pages < READER_CHECKPOINT_PAGE_INTERVAL) {
+  while (cursor < targetStartByte) {
     const page = await loadPageAt(cursor);
     if (page.startByte !== cursor || page.endByte <= cursor) break;
     if (page.endByte === targetStartByte) return page;
     if (page.endByte > targetStartByte) break;
     cursor = page.endByte;
-    pages += 1;
   }
-  return fallback(targetStartByte);
+  return null;
 }
 
 /** Returns true when byteOffset is a UTF-8 boundary in a decoded text window. */

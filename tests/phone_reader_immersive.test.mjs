@@ -103,7 +103,8 @@ assert.ok(settings.includes("PREF_NAME = 'suyue_reader_kit'") &&
 assert.ok(reader.includes('this.readerChapterLabel()') &&
   reader.includes('page_load_superseded') &&
   reader.includes('page_load_ok') &&
-  reader.includes('pageTextChanged: oldText !== page.text') &&
+  reader.includes('const pageTextChanged = oldText !== page.text') &&
+  reader.includes('pageTextChanged: pageTextChanged') &&
   reader.includes('touch_up_without_down') &&
   reader.includes("'readerFlip', 'blocked'") &&
   !reader.includes("'readerFlip', 'attempt'") &&

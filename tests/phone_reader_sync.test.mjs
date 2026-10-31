@@ -38,14 +38,16 @@ const pagination = read(
 const textFile = read(
   'harmony/entry/src/main/ets/services/NormalizedTextFile.ts');
 assert.ok(pagination.includes('paginateForward') &&
-  pagination.includes('paginateBackward') &&
+  pagination.includes('recoverPreviousPageFromCheckpoint') &&
+  pagination.includes('findForwardPageStart') &&
+  !pagination.includes('paginateBackward') &&
   pagination.includes('codePointAt') &&
   pagination.includes('scalarWidth'),
-  'page boundaries must use UTF-8 byte lengths and Unicode scalar boundaries');
+  'forward page recovery must use UTF-8 byte lengths and Unicode scalar boundaries');
 assert.ok(textFile.includes('readWindow') &&
-  textFile.includes('readWindowBefore') &&
+  !textFile.includes('readWindowBefore') &&
   textFile.includes('fileIo.lseek') &&
-  textFile.includes('MAX_BACKWARD_ALIGNMENT_BYTES'),
+  !textFile.includes('MAX_BACKWARD_ALIGNMENT_BYTES'),
   'long books must be read through bounded random-access UTF-8 windows');
 assert.ok(reader.includes('ReadingProgressStore') &&
   reader.includes('store.load(book.bookId, book.sha256)') &&
@@ -233,8 +235,15 @@ const diagnostics = read(
   'harmony/entry/src/main/ets/services/ReaderDiagnostics.ts');
 assert.ok(diagnostics.includes('MAX_LINES') &&
   diagnostics.includes('MAX_BYTES') &&
-  diagnostics.includes('fileSuffixChoices'),
-  'diagnostics must be bounded and export through the document picker');
+  diagnostics.includes('new picker.DocumentViewPicker(context)') &&
+  diagnostics.includes('await pickerView.save(options)') &&
+  diagnostics.includes('fileIo.OpenMode.READ_WRITE') &&
+  diagnostics.includes("ReaderDiagnosticsExportError('empty'") &&
+  diagnostics.includes("ReaderDiagnosticsExportError('picker'") &&
+  diagnostics.includes("ReaderDiagnosticsExportError('open'") &&
+  diagnostics.includes("ReaderDiagnosticsExportError('write'") &&
+  diagnostics.includes("ReaderDiagnosticsExportError('close'"),
+  'diagnostics must export non-empty JSONL through the READ_WRITE document picker path');
 assert.ok(sync.includes('acceptApply') &&
   sync.includes('await this.progressStore.load(') &&
   sync.includes('decidePendingAction') &&
