@@ -83,6 +83,10 @@ export class BookRepository {
     const idx = books.findIndex((b) => b.bookId === meta.bookId);
     if (idx >= 0 && books[idx].sha256 === meta.sha256) {
       books[idx].updatedAt = meta.updatedAt;
+      // Re-importing the same normalized body refreshes derived chapter
+      // metadata on books imported by older builds. Progress remains keyed by
+      // bookId + sha256 and is not touched here.
+      books[idx].chapters = meta.chapters.slice();
       if (meta.author) books[idx].author = meta.author;
       if (meta.coverFilePath) books[idx].coverFilePath = meta.coverFilePath;
       if (meta.readerFilePath) {

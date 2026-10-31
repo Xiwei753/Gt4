@@ -8,7 +8,7 @@ import { inputConsumer, KeyCode, KeyEvent } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BookChapter, BookMeta } from '../model/BookModels';
 import { paginateForward, paginatePreviousToBoundary, ReaderTextPage,
-  recoverPreviousPageFromCheckpoint,
+  formatReaderParagraphs, recoverPreviousPageFromCheckpoint,
   READER_CHECKPOINT_PAGE_INTERVAL }
   from '../model/ReaderPagination';
 import { BookRepository } from '../services/BookRepository';
@@ -46,6 +46,11 @@ interface ReaderHeaderLayout {
   titleWidth: number;
   infoX: number;
   infoWidth: number;
+}
+
+interface ReaderBodyTopLayout {
+  topInsetVp: number;
+  firstLineIndentVp: number;
 }
 
 interface ReaderPaginationCheckpointState {
@@ -88,6 +93,8 @@ struct Reader {
   @State private safeLeft: number = 0;
   @State private safeRight: number = 0;
   @State private statusBarHeight: number = 0;
+  @State private readerBodyTopInsetVp: number = 0;
+  @State private readerBodyFirstLineIndentVp: number = 0;
   @State private navigationIndicatorTopVp: number = 0;
   @State private navigationIndicatorBottomVp: number = 0;
   @State private headerTitleX: number = 12;
@@ -106,6 +113,8 @@ struct Reader {
   private settingsStore: ReaderSettingsStore | null = null;
   private textFile: NormalizedTextFile | null = null;
   private currentPage: ReaderTextPage | null = null;
+  private cachedReaderIndentFontSize: number = -1;
+  private cachedReaderIndentSpaceWidthVp: number = 0;
   private settingsReady: boolean = false;
   private readerReady: boolean = false;
   private initialized: boolean = false;
@@ -638,6 +647,8 @@ struct Reader {
   private applyWindowInsets(insets: ReaderWindowInsets): void {
     const oldTop = this.readerContentTopInsetVp();
     const oldBottom = this.readerContentBottomInsetVp();
+    const oldBodyTop = this.readerBodyTopInsetVp;
+    const oldBodyIndent = this.readerBodyFirstLineIndentVp;
     const oldLeft = this.safeLeft;
     const oldRight = this.safeRight;
     this.safeTop = insets.top;
@@ -646,6 +657,9 @@ struct Reader {
     this.safeRight = insets.right;
     this.statusBarHeight = insets.statusBarHeight > 0 ?
       insets.statusBarHeight : insets.top;
+    const bodyTop = this.calculateReaderBodyTopLayout(insets);
+    this.readerBodyTopInsetVp = bodyTop.topInsetVp;
+    this.readerBodyFirstLineIndentVp = bodyTop.firstLineIndentVp;
     this.navigationIndicatorTopVp = insets.navigationIndicator.top;
     this.navigationIndicatorBottomVp = insets.navigationIndicator.bottom;
     const header = this.calculateHeaderLayout(insets);
@@ -654,12 +668,19 @@ struct Reader {
     this.headerInfoX = header.infoX;
     this.headerInfoWidth = header.infoWidth;
     this.windowInsetsReady = true;
-    if (Math.abs(oldTop - this.readerContentTopInsetVp()) >= 0.5 ||
+    const indentChanged =
+      Math.abs(oldBodyIndent - this.readerBodyFirstLineIndentVp) >= 0.5;
+    const geometryChanged =
+        Math.abs(oldTop - this.readerContentTopInsetVp()) >= 0.5 ||
         Math.abs(oldBottom - this.readerContentBottomInsetVp()) >= 0.5 ||
+        Math.abs(oldBodyTop - this.readerBodyTopInsetVp) >= 0.5 ||
         Math.abs(oldLeft - this.safeLeft) >= 0.5 ||
-        Math.abs(oldRight - this.safeRight) >= 0.5) {
+        Math.abs(oldRight - this.safeRight) >= 0.5;
+    if (geometryChanged) {
       this.viewportNeedsInsetsLayout = true;
       if (this.readerReady) this.scheduleReflow();
+    } else if (indentChanged && this.readerReady) {
+      this.scheduleReflow();
     }
     this.tryInitializeReader();
   }
@@ -813,7 +834,7 @@ struct Reader {
 
   private measureTextHeightPx(text: string): number {
     const measured = this.getUIContext().getMeasureUtils().measureTextSize({
-      textContent: text,
+      textContent: this.readerDisplayText(text),
       constraintWidth: this.viewportWidthVp,
       fontSize: this.fontSize,
       fontWeight: FontWeight.Normal,
@@ -1057,9 +1078,11 @@ struct Reader {
 
   private paginationLayoutKey(): string {
     return JSON.stringify([
-      'native-reader-v2',
+      'native-reader-v3-paragraph-spacing',
       Math.round(this.viewportWidthVp * 100) / 100,
       Math.round(this.viewportHeightVp * 100) / 100,
+      Math.round(this.readerBodyTopInsetVp * 100) / 100,
+      Math.round(this.readerBodyFirstLineIndentVp * 100) / 100,
       this.fontSize,
       this.lineHeight,
       READER_TEXT_FONT,
@@ -1381,6 +1404,102 @@ struct Reader {
     return Math.max(this.safeTop, this.statusBarHeight);
   }
 
+  private calculateReaderBodyTopLayout(
+    insets: ReaderWindowInsets): ReaderBodyTopLayout {
+    const safeTop = Math.max(insets.top, insets.statusBarHeight);
+    if (insets.statusBarHeight <= 0 ||
+        safeTop <= insets.statusBarHeight + 0.5 ||
+        !insets.cutoutGeometryAvailable) {
+      return { topInsetVp: safeTop, firstLineIndentVp: 0 };
+    }
+
+    const contentLeft = insets.left;
+    const contentRight = insets.windowWidth - insets.right;
+    if (contentRight <= contentLeft) {
+      return { topInsetVp: safeTop, firstLineIndentVp: 0 };
+    }
+
+    let hasTopCutout = false;
+    let needsFirstLineIndent = false;
+    let rightmostCutoutVp = contentLeft;
+    let deepestTopCutoutVp = insets.statusBarHeight;
+    const contentMidpoint = (contentLeft + contentRight) / 2;
+    for (let i = 0; i < insets.cutouts.length; i++) {
+      const cutout = insets.cutouts[i];
+      if (cutout.top > insets.statusBarHeight ||
+          cutout.bottom <= insets.statusBarHeight) continue;
+      hasTopCutout = true;
+      deepestTopCutoutVp = Math.max(deepestTopCutoutVp, cutout.bottom);
+      // Existing horizontal safe-area padding already clears edge cutouts.
+      if (cutout.right <= contentLeft || cutout.left >= contentRight) continue;
+      // Keep the full inset for a right-side cutout; indentation from the left
+      // cannot clear it safely.
+      if (cutout.left >= contentMidpoint) {
+        return { topInsetVp: safeTop, firstLineIndentVp: 0 };
+      }
+      needsFirstLineIndent = true;
+      rightmostCutoutVp = Math.max(rightmostCutoutVp, cutout.right);
+    }
+    if (!hasTopCutout) {
+      return { topInsetVp: safeTop, firstLineIndentVp: 0 };
+    }
+    if (!needsFirstLineIndent) {
+      return { topInsetVp: insets.statusBarHeight, firstLineIndentVp: 0 };
+    }
+    if (deepestTopCutoutVp - insets.statusBarHeight >
+        this.fontSize * this.lineHeight) {
+      return { topInsetVp: safeTop, firstLineIndentVp: 0 };
+    }
+
+    const contentWidth = contentRight - contentLeft;
+    const indentVp = rightmostCutoutVp - contentLeft +
+      Math.max(2, contentWidth * 0.008);
+    if (contentWidth - indentVp < Math.max(64, this.fontSize * 2)) {
+      return { topInsetVp: safeTop, firstLineIndentVp: 0 };
+    }
+    return { topInsetVp: insets.statusBarHeight,
+      firstLineIndentVp: indentVp };
+  }
+
+  private readerDisplayText(sourceText: string): string {
+    if (sourceText.length === 0) return '';
+    const spacedText = formatReaderParagraphs(sourceText);
+    if (this.readerBodyFirstLineIndentVp <= 0) return spacedText;
+    const spaceCount = Math.ceil(this.readerBodyFirstLineIndentVp /
+      Math.max(1, this.readerIndentSpaceWidthVp()));
+    let indent = '';
+    for (let i = 0; i < spaceCount; i++) indent += '\u3000';
+    return indent + spacedText;
+  }
+
+  private readerIndentSpaceWidthVp(): number {
+    if (this.cachedReaderIndentFontSize === this.fontSize &&
+        this.cachedReaderIndentSpaceWidthVp > 0) {
+      return this.cachedReaderIndentSpaceWidthVp;
+    }
+    const ui = this.getUIContext();
+    const measured = ui.getMeasureUtils().measureTextSize({
+      textContent: '\u3000',
+      constraintWidth: Math.max(1, this.viewportWidthVp),
+      fontSize: this.fontSize,
+      fontWeight: FontWeight.Normal,
+      fontFamily: READER_TEXT_FONT,
+      lineHeight: this.fontSize * this.lineHeight,
+      letterSpacing: 0,
+      wordBreak: WordBreak.BREAK_WORD
+    });
+    const width = measured.width;
+    const widthPx = width === undefined ? 0 : typeof width === 'number' ?
+      width : parseFloat(width.toString());
+    const pixelPerVp = ui.vp2px(1);
+    const widthVp = Number.isFinite(widthPx) && widthPx > 0 &&
+      Number.isFinite(pixelPerVp) && pixelPerVp > 0 ?
+      widthPx / pixelPerVp : Math.max(1, this.fontSize);
+    this.cachedReaderIndentFontSize = this.fontSize;
+    this.cachedReaderIndentSpaceWidthVp = widthVp;
+    return widthVp;
+  }
+
   private readerContentBottomInsetVp(): number {
     return this.safeBottom;
   }
@@ -1625,7 +1744,7 @@ struct Reader {
     Stack({ alignContent: Alignment.TopStart }) {
       if (this.readerAvailable && this.book !== null) {
         Column() {
-          Text(this.pageText)
+          Text(this.readerDisplayText(this.pageText))
             .fontSize(this.fontSize)
             .fontWeight(FontWeight.Normal)
             .fontFamily(READER_TEXT_FONT)
@@ -1641,7 +1760,7 @@ struct Reader {
         }
         .width('100%').height('100%')
         .padding({ left: this.safeLeft, right: this.safeRight,
-          top: this.readerContentTopInsetVp(),
+          top: this.readerBodyTopInsetVp,
           bottom: this.readerContentBottomInsetVp() })
         .onTouch((event: TouchEvent) => { this.handleReaderTouch(event); })
         .hitTestBehavior(HitTestMode.Default)

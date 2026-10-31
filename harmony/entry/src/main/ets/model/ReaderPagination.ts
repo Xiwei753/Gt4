@@ -23,6 +23,13 @@ export interface ReaderPageLoader {
 
 export const READER_CHECKPOINT_PAGE_INTERVAL = 8;
 
+/** Add a display-only blank line after single line breaks in TXT paragraphs. */
+export function formatReaderParagraphs(text: string): string {
+  return text.replace(/(^|[^\r\n])(\r\n|\r|\n)(?=[^\r\n]|$)/g,
+    (_match: string, previous: string, lineBreak: string): string =>
+      previous + lineBreak + '\n');
+}
+
 interface TextBoundaries {
   bytes: number[];
   chars: number[];
