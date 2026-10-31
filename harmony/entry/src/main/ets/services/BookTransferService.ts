@@ -9,12 +9,10 @@
 //   - 目标设备由用户选择，不默认第一台；
 //   - 同一时刻只允许一本在途（手表侧单本
 //     互斥，第二个 META 返回 E_BUSY）；
-//   - waiter 生命周期绑定重试轮次：每轮
-//     重新注册，上传阶段与回执阶段分开计时
-//     （第二轮 P0-3）；
+//   - 每次发送建立一次 waiter，上传与 RESULT 分开计时；
 //   - 取消接真实 SDK：cancelFileTransfer +
 //     向手表发 ERROR/E_CANCELLED（第二轮 P1-7）；
-//   - 重试只针对可恢复错误，摘要类错误不重试。
+//   - 任一阶段失败就终止，重发必须由用户再次点击。
 // API 形状以华为 Wear Engine 指南为准，
 // 当前未在真机验证（待验证）。
 import { wearEngine } from '@kit.WearEngine';
@@ -24,7 +22,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
 import { BookMeta } from '../model/BookModels';
 import { TransferProgress, TransferState,
-  TargetDevice, MAX_RETRY, RESULT_TIMEOUT_MS,
+  TargetDevice, RESULT_TIMEOUT_MS,
   UPLOAD_TIMEOUT_MS,
   newTransferId } from '../model/TransferModels';
 import { WearDeviceService } from './WearDeviceService';
@@ -281,12 +279,11 @@ export class BookTransferService {
     }
   }
 
-  // 发送一本书。重试只包裹可恢复阶段（超时/对端不可用）。
+  // 发送一本书：一轮操作只尝试一次，失败不自动重发。
   // peer 必须是对端（手表）身份，不能是本机身份。
   async sendBook(book: BookMeta, device: TargetDevice,
     peer: { bundleName: string; fingerprint: string },
     callbacks: TransferCallbacks): Promise<boolean> {
-    const retry = MAX_RETRY; // 0: no automatic retransmission.
     // 单本互斥：手表侧第二本会回 E_BUSY，
     // 手机侧也不允许并发发送。
     if (this.inFlight !== null) {
@@ -341,21 +338,16 @@ export class BookTransferService {
       p2pFile: null
     };
 
-    let attempt = 0;
-    while (attempt <= retry) {
-      if (this.cancelled.has(transferId)) {
-        this.finishTransfer(transferId);
-        progress.state = TransferState.CANCELLED;
-        progress.message = '已取消';
-        this.update(callbacks, progress);
-        return false;
-      }
-      attempt += 1;
-      // P0-3：每个重试轮次注册全新 waiter；
-      // 上传阶段与回执阶段分开计时。
-      const resultPromise =
-        this.waiters.beginAttempt(transferId);
-      try {
+    // One user action sends the book once. Retry needs another user tap.
+    if (this.cancelled.has(transferId)) {
+      this.finishTransfer(transferId);
+      progress.state = TransferState.CANCELLED;
+      progress.message = '已取消';
+      this.update(callbacks, progress);
+      return false;
+    }
+    const resultPromise = this.waiters.beginAttempt(transferId);
+    try {
         // HELLO
         progress.state = TransferState.CONNECTING;
         progress.phase = 'HELLO';
@@ -472,37 +464,18 @@ export class BookTransferService {
           this.update(callbacks, progress);
           return true;
         }
-        // 摘要/缺块/忙碌类错误不可通过重试解决。
         const reason = result.reason || 'E_PROTOCOL';
-        if (reason === 'E_DIGEST_MISMATCH' ||
-            reason === 'E_MISSING_CHUNKS' ||
-            reason === 'E_UNSUPPORTED_FORMAT' ||
-            reason === 'E_DECODE' ||
-            reason === 'E_BUSY') {
-          this.finishTransfer(transferId);
-          progress.state = TransferState.FAILED;
-          progress.error = reason;
-          progress.message = '手表拒绝：' + reason;
-          this.update(callbacks, progress);
-          return false;
-        }
-        // 可恢复错误（超时等）走重试。
-        progress.message = '可恢复失败（' + reason +
-          '），重试 ' + attempt + '/' + retry;
+        this.finishTransfer(transferId);
+        progress.state = TransferState.FAILED;
+        progress.error = reason;
+        progress.message = '手表返回失败（' +
+          (progress.phase || 'RESULT') + '）：' + reason;
         this.update(callbacks, progress);
-        if (attempt > retry) {
-          this.finishTransfer(transferId);
-          progress.state = TransferState.FAILED;
-          progress.error = reason;
-          progress.message = '手表返回失败（' +
-            (progress.phase || 'RESULT') + '）：' + reason;
-          this.update(callbacks, progress);
-          return false;
-        }
+        return false;
       } catch (error) {
         hilog.error(0x0000, TAG,
-          'sendBook attempt %{public}d failed: %{public}s',
-          attempt,
+          'sendBook failed at %{public}s: %{public}s',
+          progress.phase || 'UNKNOWN',
           error instanceof Error ? error.message : String(error));
         this.waiters.fail(transferId, 'E_PEER_UNAVAILABLE');
         if (this.cancelled.has(transferId)) {
@@ -521,25 +494,13 @@ export class BookTransferService {
         } else if (codeFromMessage !== null) {
           progress.sdkCode = Number(codeFromMessage[1]);
         }
-        if (attempt > retry) {
-          this.finishTransfer(transferId);
-          progress.state = TransferState.FAILED;
-          progress.error = 'E_PEER_UNAVAILABLE';
-          progress.message = '传输失败（' +
-            (progress.phase || 'UNKNOWN') + '）：' + rawFailure;
-          this.update(callbacks, progress);
-          return false;
-        }
-        progress.message = '传输异常，重试 ' + attempt +
-          '/' + retry;
+        this.finishTransfer(transferId);
+        progress.state = TransferState.FAILED;
+        progress.error = 'E_PEER_UNAVAILABLE';
+        progress.message = '传输失败（' +
+          (progress.phase || 'UNKNOWN') + '）：' + rawFailure;
         this.update(callbacks, progress);
-      }
+        return false;
     }
-    this.finishTransfer(transferId);
-    progress.state = TransferState.FAILED;
-    progress.error = 'E_TIMEOUT';
-    progress.message = '超过最大重试次数';
-    this.update(callbacks, progress);
-    return false;
   }
 }
