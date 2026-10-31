@@ -33,7 +33,7 @@ interface DiagnosticExportErrorCode {
 }
 
 export type ReaderDiagnosticsExportStage =
-  'picker' | 'open' | 'write' | 'close' | 'unknown';
+  'empty' | 'picker' | 'open' | 'write' | 'close' | 'unknown';
 
 export class ReaderDiagnosticsExportError extends Error {
   stage: ReaderDiagnosticsExportStage;
@@ -369,9 +369,22 @@ export async function exportReaderDiagnostics(
   }
   let content = '';
   try {
-    content = serializeLines((await readStoredLines(source)).lines);
+    const lines = (await readStoredLines(source)).lines;
+    const validLines: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      try {
+        JSON.parse(lines[i]);
+        validLines.push(lines[i]);
+      } catch (error) {
+        // Do not include malformed records in an exported JSONL file.
+      }
+    }
+    content = serializeLines(validLines);
   } catch (error) {
-    // Export an empty diagnostic file if the log is not available.
+    // Report unavailable diagnostics below instead of writing an empty file.
+  }
+  if (content.length === 0) {
+    throw new ReaderDiagnosticsExportError('empty', 0);
   }
   const pickerView = new picker.DocumentViewPicker(context);
   const options = new picker.DocumentSaveOptions();

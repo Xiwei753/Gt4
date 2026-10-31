@@ -997,6 +997,10 @@ struct Index {
       recordReaderDiagnostic(context, 'diagnostics', 'export_fail', code,
         { reason: 'stage_' + stage });
       let stageLabel = '未知阶段';
+      if (stage === 'empty') {
+        this.diagnosticsText = '没有可导出的诊断记录，请先操作阅读页后重试。';
+        return;
+      }
       if (stage === 'picker') stageLabel = '文件选择器';
       else if (stage === 'open') stageLabel = '打开文件';
       else if (stage === 'write') stageLabel = '写入文件';

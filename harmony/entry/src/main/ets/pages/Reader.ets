@@ -502,7 +502,9 @@ struct Reader {
     if (!this.pageInForeground) return 'page_hidden';
     if (this.leaving) return 'leaving';
     if (this.catalogVisible) return 'catalog_open';
-    if (this.settingsVisible) return 'settings_open';
+    if (this.settingsVisible && source !== 'debug_next') {
+      return 'settings_open';
+    }
     if (this.loading) return 'loading';
     if (!this.readerReady) return 'reader_not_ready';
     if (this.pageFlipInProgress) return 'flip_in_progress';
@@ -1439,6 +1441,17 @@ struct Reader {
             Toggle({ type: ToggleType.Switch, isOn: this.volumeKeyPaging })
               .onChange((enabled: boolean) => {
                 this.setVolumeKeyPaging(enabled);
+              })
+          }
+          .width('100%')
+          Row() {
+            Text('分页调试').fontSize(12)
+              .fontColor(this.palette().text).layoutWeight(1)
+            Button('调试下一页').height(32)
+              .backgroundColor(this.palette().surfaceRaised)
+              .fontColor(this.palette().text)
+              .onClick(() => {
+                this.requestPageFlip('debug_next', true);
               })
           }
           .width('100%')
