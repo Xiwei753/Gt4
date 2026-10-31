@@ -344,6 +344,11 @@ struct Index {
           this.devices = result.ok ? result.devices : [];
           const notice = deviceNotice(result);
           this.deviceStatus = notice.text;
+          if (!result.ok) {
+            const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+            recordReaderDiagnostic(context, 'device', 'discover_fail',
+              result.code, { source: result.stage, reason: notice.kind });
+          }
           let restored = -1;
           if (result.ok && wanted) {
             for (let i = 0; i < this.devices.length; i++) {
@@ -406,7 +411,12 @@ struct Index {
       this.receiverReady = true;
       return true;
     } catch (error) {
-      this.deviceStatus += '；消息接收注册失败';
+      const failure = error as { code?: number };
+      const code = typeof failure.code === 'number' ? failure.code : 0;
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      recordReaderDiagnostic(context, 'device', 'receiver_register_fail',
+        code, { source: 'registerMessageReceiver' });
+      this.deviceStatus += '；消息接收注册失败（' + code + '）';
       return false;
     }
   }
@@ -520,6 +530,7 @@ struct Index {
     let lastFailure = '手表未确认入库';
     let lastPhase = 'PEER_CHECK';
     let lastError = 'E_UNKNOWN';
+    let lastState: TransferState = TransferState.CONNECTING;
     let lastSdkCode = 0;
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     recordReaderDiagnostic(context, 'transfer', 'start');
@@ -527,6 +538,7 @@ struct Index {
       book, device, WATCH_PEER,
       {
         onProgress: (progress: TransferProgress) => {
+          lastState = progress.state;
           if (progress.transferId) {
             this.activeTransferId = progress.transferId;
           }
@@ -555,6 +567,10 @@ struct Index {
       this.transferText = '《' + book.title + '》手表已确认入库';
       this.getRepository().markStatus(book.bookId,
         BookStatus.SENT);
+    } else if (lastState === TransferState.CANCELLED) {
+      recordReaderDiagnostic(context, 'transfer', 'cancelled', 0,
+        { source: lastPhase, reason: 'E_CANCELLED' });
+      this.transferText = '已取消传书';
     } else {
       recordReaderDiagnostic(context, 'transfer', 'fail', lastSdkCode,
         { source: lastPhase, reason: lastError });
