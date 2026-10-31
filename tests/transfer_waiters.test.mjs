@@ -20,6 +20,26 @@ const modPath = join(tmp, 'TransferWaiters.mjs');
 writeFileSync(modPath, src);
 const { createWaiterRegistry } = await import(modPath);
 
+// Phone UI book transfer must be explicitly one-shot. The waiter registry
+// itself remains able to handle late RESULT, but BookTransferService never
+// schedules a second HELLO/file upload after a failed attempt.
+const senderSrc = readFileSync(
+  'harmony/entry/src/main/ets/services/BookTransferService.ts', 'utf8');
+const phoneSrc = readFileSync(
+  'harmony/entry/src/main/ets/pages/Index.ets', 'utf8');
+assert.ok(senderSrc.includes('this.waiters.beginAttempt(transferId)') &&
+  !senderSrc.includes('while (attempt <= retry)') &&
+  !senderSrc.includes('retry: number =') &&
+  !senderSrc.includes('重试耗尽') &&
+  senderSrc.includes("progress.phase = 'HELLO'") &&
+  senderSrc.includes("progress.phase = 'TRANSFER_FILE'") &&
+  senderSrc.includes("progress.sdkCode = Number(codeFromMessage[1])"),
+  'one user book-send action must have one attempt and retain failure stage/code');
+assert.ok(phoneSrc.includes("recordReaderDiagnostic(context, 'transfer', 'fail', lastSdkCode") &&
+  phoneSrc.includes("recordReaderDiagnostic(context, 'device', 'discover_fail'") &&
+  !phoneSrc.includes('planRetry('),
+  'phone diagnostics must preserve transfer/device failure details and never auto-retry discovery');
+
 function makeClock() {
   let now = 0;
   let seq = 0;
