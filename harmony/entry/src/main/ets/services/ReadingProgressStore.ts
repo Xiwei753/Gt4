@@ -17,6 +17,12 @@ const PREF_NAME = 'suyue_reading_progress';
 const KEY_PREFIX = 'p.';
 const LAST_KEY = 'last';
 const UNKNOWN_BASELINE = -1;
+const MAX_PAGINATION_ANCHORS = 32;
+
+export interface PaginationCheckpointState {
+  layoutKey: string;
+  anchors: number[];
+}
 
 export interface ReadingRecord {
   bookId: string;
@@ -25,6 +31,8 @@ export interface ReadingRecord {
   updatedAt: number;
   syncedOffset: number;
   pendingOffset: number;
+  paginationLayoutKey?: string;
+  paginationAnchors?: number[];
 }
 
 export interface ReadingSummary {
@@ -47,6 +55,8 @@ interface StoredRecord {
   updatedAt: number;
   syncedOffset?: number;
   pendingOffset?: number;
+  paginationLayoutKey?: string;
+  paginationAnchors?: number[];
 }
 
 interface StoredLast {
@@ -73,6 +83,25 @@ export class ReadingProgressStore {
     return KEY_PREFIX + bookId;
   }
 
+  private normalizePaginationState(state: PaginationCheckpointState | undefined):
+    PaginationCheckpointState | null {
+    if (state === undefined || !state ||
+        typeof state.layoutKey !== 'string' || state.layoutKey.length === 0 ||
+        state.layoutKey.length > 256 || !Array.isArray(state.anchors)) {
+      return null;
+    }
+    const anchors: number[] = [];
+    for (let i = 0; i < state.anchors.length; i++) {
+      const anchor = state.anchors[i];
+      if (Number.isInteger(anchor) && anchor >= 0 && !anchors.includes(anchor)) {
+        anchors.push(anchor);
+      }
+    }
+    anchors.sort((left: number, right: number): number => left - right);
+    while (anchors.length > MAX_PAGINATION_ANCHORS) anchors.shift();
+    return { layoutKey: state.layoutKey, anchors: anchors };
+  }
+
   private parseRecord(text: string): StoredRecord | null {
     try {
       const value = JSON.parse(text) as StoredRecord;
@@ -89,13 +118,31 @@ export class ReadingProgressStore {
       const pendingOffset = typeof value.pendingOffset === 'number' &&
         Number.isInteger(value.pendingOffset) && value.pendingOffset >= 0 ?
         value.pendingOffset : -1;
-      return {
+      const record: StoredRecord = {
         sha256: value.sha256,
         offset: value.offset,
         updatedAt: updatedAt,
         syncedOffset: syncedOffset,
         pendingOffset: pendingOffset
       };
+      if (typeof value.paginationLayoutKey === 'string' &&
+          value.paginationLayoutKey.length > 0 &&
+          value.paginationLayoutKey.length <= 256 &&
+          Array.isArray(value.paginationAnchors)) {
+        const anchors: number[] = [];
+        for (let i = 0; i < value.paginationAnchors.length; i++) {
+          const anchor = value.paginationAnchors[i];
+          if (typeof anchor === 'number' && Number.isInteger(anchor) &&
+              anchor >= 0 && !anchors.includes(anchor)) {
+            anchors.push(anchor);
+          }
+        }
+        anchors.sort((left: number, right: number): number => left - right);
+        while (anchors.length > MAX_PAGINATION_ANCHORS) anchors.shift();
+        record.paginationLayoutKey = value.paginationLayoutKey;
+        record.paginationAnchors = anchors;
+      }
+      return record;
     } catch (error) {
       return null;
     }
@@ -130,17 +177,21 @@ export class ReadingProgressStore {
       syncedOffset: parsed.syncedOffset !== undefined ?
         parsed.syncedOffset : UNKNOWN_BASELINE,
       pendingOffset: parsed.pendingOffset !== undefined ?
-        parsed.pendingOffset : -1
+        parsed.pendingOffset : -1,
+      paginationLayoutKey: parsed.paginationLayoutKey,
+      paginationAnchors: parsed.paginationAnchors
     };
   }
 
   // 本地阅读保存：默认保留上一次同步基线，不能把“本地新读”误当成
   // “已同步”。同步服务在确认采用某一边后可显式传入 baseline。
   async save(bookId: string, sha256: string, offset: number,
-    baseline?: number, generation?: number): Promise<void> {
+    baseline?: number, generation?: number,
+    pagination?: PaginationCheckpointState): Promise<void> {
     if (!bookId || !sha256 || !Number.isInteger(offset) || offset < 0) {
       return;
     }
+    const checkpoint = this.normalizePaginationState(pagination);
     const writeGeneration = generation !== undefined ?
       generation : captureWriteGeneration(bookId);
     await enqueueBookWrite(bookId, async () => {
@@ -167,8 +218,31 @@ export class ReadingProgressStore {
         offset: offset,
         updatedAt: Date.now(),
         syncedOffset: syncedOffset,
-        pendingOffset: pendingOffset
+        pendingOffset: pendingOffset,
+        paginationLayoutKey: checkpoint !== null ? checkpoint.layoutKey :
+          existing !== null && existing.sha256 === sha256 ?
+            existing.paginationLayoutKey : undefined,
+        paginationAnchors: checkpoint !== null ? checkpoint.anchors :
+          existing !== null && existing.sha256 === sha256 ?
+            existing.paginationAnchors : undefined
       });
+    }, writeGeneration);
+  }
+
+  // Pagination checkpoints are local layout metadata. Updating them must not
+  // change the synchronized reading offset or its conflict timestamp.
+  async savePaginationCheckpoints(bookId: string, sha256: string,
+    state: PaginationCheckpointState): Promise<void> {
+    if (!bookId || !sha256) return;
+    const checkpoint = this.normalizePaginationState(state);
+    if (checkpoint === null) return;
+    const writeGeneration = captureWriteGeneration(bookId);
+    await enqueueBookWrite(bookId, async () => {
+      const existing = await this.readRecord(bookId);
+      if (existing === null || existing.sha256 !== sha256) return;
+      existing.paginationLayoutKey = checkpoint.layoutKey;
+      existing.paginationAnchors = checkpoint.anchors;
+      await this.writeRecord(bookId, existing);
     }, writeGeneration);
   }
 
@@ -180,13 +254,18 @@ export class ReadingProgressStore {
     }
     const writeGeneration = bumpWriteGeneration(bookId);
     await enqueueBookWrite(bookId, async () => {
+      const existing = await this.readRecord(bookId);
       await this.writeRecord(bookId, {
         sha256: sha256,
         offset: offset,
         updatedAt: typeof updatedAt === 'number' && updatedAt > 0 ?
           updatedAt : Date.now(),
         syncedOffset: offset,
-        pendingOffset: -1
+        pendingOffset: -1,
+        paginationLayoutKey: existing !== null && existing.sha256 === sha256 ?
+          existing.paginationLayoutKey : undefined,
+        paginationAnchors: existing !== null && existing.sha256 === sha256 ?
+          existing.paginationAnchors : undefined
       });
     }, writeGeneration);
   }
@@ -204,7 +283,9 @@ export class ReadingProgressStore {
         offset: existing.offset,
         updatedAt: existing.updatedAt,
         syncedOffset: offset,
-        pendingOffset: -1
+        pendingOffset: -1,
+        paginationLayoutKey: existing.paginationLayoutKey,
+        paginationAnchors: existing.paginationAnchors
       });
     });
   }
@@ -226,7 +307,9 @@ export class ReadingProgressStore {
         updatedAt: existing.updatedAt,
         syncedOffset: existing.syncedOffset !== undefined ?
           existing.syncedOffset : UNKNOWN_BASELINE,
-        pendingOffset: offset
+        pendingOffset: offset,
+        paginationLayoutKey: existing.paginationLayoutKey,
+        paginationAnchors: existing.paginationAnchors
       });
     });
   }

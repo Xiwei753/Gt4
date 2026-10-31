@@ -109,50 +109,24 @@ export function paginateForward(text: string, startByte: number,
   };
 }
 
-/**
- * Replays the forward pager from a known page boundary and returns the page
- * boundary at or immediately before targetByte. This also aligns a saved
- * byte offset to the page containing it after a layout change.
- */
-export async function findForwardPageStart(targetByte: number,
-  loadPageAt: ReaderPageLoader,
-  onCheckpoint?: (byteOffset: number) => void,
-  anchorByte: number = 0): Promise<number | null> {
-  if (!Number.isInteger(targetByte) || targetByte < 0 ||
-      !Number.isInteger(anchorByte) || anchorByte < 0 ||
-      anchorByte > targetByte) return null;
-  if (targetByte === anchorByte) return targetByte;
-
-  let cursor = anchorByte;
-  let pages = 0;
-  while (cursor < targetByte) {
-    const page = await loadPageAt(cursor);
-    if (page.startByte !== cursor || page.endByte <= cursor) return null;
-    if (page.endByte >= targetByte) {
-      return page.endByte === targetByte ? targetByte : cursor;
-    }
-    cursor = page.endByte;
-    pages += 1;
-    if (pages % READER_CHECKPOINT_PAGE_INTERVAL === 0) {
-      onCheckpoint?.(cursor);
-    }
-  }
-  return cursor === targetByte ? cursor : null;
-}
-
-/** Replays only forward page boundaries to recover the exact prior page. */
+/** Replays a bounded number of forward pages to recover the exact prior page. */
 export async function recoverPreviousPageFromCheckpoint(
   targetStartByte: number, checkpointByte: number,
-  loadPageAt: ReaderPageLoader): Promise<ReaderTextPage | null> {
+  loadPageAt: ReaderPageLoader,
+  maxPages: number = READER_CHECKPOINT_PAGE_INTERVAL):
+  Promise<ReaderTextPage | null> {
   if (!Number.isInteger(targetStartByte) || !Number.isInteger(checkpointByte) ||
-      checkpointByte < 0 || checkpointByte >= targetStartByte) return null;
+      checkpointByte < 0 || checkpointByte >= targetStartByte ||
+      !Number.isInteger(maxPages) || maxPages < 1) return null;
   let cursor = checkpointByte;
-  while (cursor < targetStartByte) {
+  let pages = 0;
+  while (cursor < targetStartByte && pages < maxPages) {
     const page = await loadPageAt(cursor);
     if (page.startByte !== cursor || page.endByte <= cursor) break;
     if (page.endByte === targetStartByte) return page;
     if (page.endByte > targetStartByte) break;
     cursor = page.endByte;
+    pages += 1;
   }
   return null;
 }

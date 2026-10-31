@@ -7,8 +7,7 @@ import { router } from '@kit.ArkUI';
 import { inputConsumer, KeyCode, KeyEvent } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BookChapter, BookMeta } from '../model/BookModels';
-import { findForwardPageStart, paginateForward, ReaderTextPage,
-  recoverPreviousPageFromCheckpoint,
+import { paginateForward, ReaderTextPage, recoverPreviousPageFromCheckpoint,
   READER_CHECKPOINT_PAGE_INTERVAL }
   from '../model/ReaderPagination';
 import { BookRepository } from '../services/BookRepository';
@@ -690,39 +689,26 @@ struct Reader {
         this.log('progress', 'saved_offset_invalid');
       }
       const replayAnchors = this.paginationAnchorsThrough(startByte);
-      if (savedOffsetValid && startByte > 0) {
-        const savedOffset = startByte;
-        const replayAnchor = replayAnchors[replayAnchors.length - 1];
-        const pageStart = await findForwardPageStart(savedOffset,
-          (offset: number): Promise<ReaderTextPage> =>
-            this.createPageAt(offset), (offset: number): void => {
-              replayAnchors.push(offset);
-              while (replayAnchors.length >
-                  READER_PAGINATION_CHECKPOINT_LIMIT) {
-                replayAnchors.shift();
-              }
-            }, replayAnchor);
-        if (pageStart === null) {
-          startByte = 0;
-          savedOffsetValid = false;
-          this.log('progress', 'saved_offset_replay_failed');
-        } else {
-          startByte = pageStart;
-          if (startByte !== savedOffset) {
-            this.log('progress', 'saved_offset_realigned');
+      const layoutKey = this.paginationLayoutKey();
+      if (saved !== null && saved.paginationLayoutKey === layoutKey &&
+          saved.paginationAnchors !== undefined) {
+        for (let i = 0; i < saved.paginationAnchors.length; i++) {
+          const anchor = saved.paginationAnchors[i];
+          if (anchor <= startByte && anchor <= book.bytes &&
+              !replayAnchors.includes(anchor)) {
+            replayAnchors.push(anchor);
           }
         }
+      }
+      if (!replayAnchors.includes(startByte)) replayAnchors.push(startByte);
+      replayAnchors.sort((left: number, right: number): number => left - right);
+      while (replayAnchors.length > READER_PAGINATION_CHECKPOINT_LIMIT) {
+        replayAnchors.shift();
       }
       const pageLoaded = await this.loadPageAt(startByte, true);
       if (!pageLoaded || this.leaving) return;
       this.initialized = true;
       this.readerReady = true;
-      if (replayAnchors[replayAnchors.length - 1] !== startByte) {
-        replayAnchors.push(startByte);
-      }
-      while (replayAnchors.length > READER_PAGINATION_CHECKPOINT_LIMIT) {
-        replayAnchors.shift();
-      }
       this.paginationAnchors = replayAnchors;
       this.pagesSincePaginationAnchor = 0;
       this.loading = false;
@@ -733,12 +719,18 @@ struct Reader {
         if (this.settingsStore !== null) {
           await this.settingsStore.removeLegacyLocation(book.bookId);
         }
-        if (saved !== null && saved.offset !== startByte) {
-          await store.save(book.bookId, book.sha256, startByte);
-        }
       }
       if (saved === null) {
-        await store.save(book.bookId, book.sha256, startByte);
+        await store.save(book.bookId, book.sha256, startByte, undefined,
+          undefined, this.paginationCheckpointState());
+      } else if (savedOffsetValid) {
+        try {
+          await store.savePaginationCheckpoints(book.bookId, book.sha256,
+            this.paginationCheckpointState());
+        } catch (error) {
+          this.log('progress', 'pagination_checkpoint_save_fail',
+            this.errorCode(error));
+        }
       }
       await store.saveLastBook(book.bookId);
       this.log('reader', 'initial_load.ok');
@@ -950,16 +942,11 @@ struct Reader {
       const checkpoint = this.closestPaginationAnchorBefore(oldStart);
       const previous = await recoverPreviousPageFromCheckpoint(oldStart,
         checkpoint, (start: number): Promise<ReaderTextPage> =>
-          this.createPageAt(start));
+          this.createPageAt(start), READER_CHECKPOINT_PAGE_INTERVAL);
       if (previous === null) {
-        recordReaderDiagnostic(this.context(), 'readerFlip',
-          'previous_page_missing', 0, {
-            source: source,
-            startByte: page.startByte,
-            endByte: page.endByte,
-            pageRequestId: this.pageRequestId
-          });
-        this.showInputFeedback('无法定位上一页，请重新打开本书');
+        previousStart = this.chapterAnchorBefore(oldStart);
+        await this.loadPreviousFromFallback(source, page, oldStart,
+          previousStart);
         return;
       }
       previousStart = previous.startByte;
@@ -975,6 +962,47 @@ struct Reader {
     }
     this.status = '';
     this.saveCurrentOffset();
+  }
+
+  private async loadPreviousFromFallback(source: string,
+    page: ReaderTextPage, oldStart: number, fallbackStart: number):
+    Promise<void> {
+    recordReaderDiagnostic(this.context(), 'readerFlip',
+      'previous_page_fallback', 0, {
+        source: source,
+        startByte: page.startByte,
+        endByte: page.endByte,
+        nextStartByte: fallbackStart,
+        pageRequestId: this.pageRequestId
+      });
+    if (!await this.loadPageAt(fallbackStart, false, source,
+        page.startByte, page.endByte)) {
+      this.showInputFeedback('上一页边界尚未缓存，无法回到附近位置');
+      return;
+    }
+    if (!this.paginationAnchors.includes(fallbackStart)) {
+      this.paginationAnchors.push(fallbackStart);
+      while (this.paginationAnchors.length >
+          READER_PAGINATION_CHECKPOINT_LIMIT) this.paginationAnchors.shift();
+    }
+    this.pagesSincePaginationAnchor = 0;
+    this.nextPageStarts.push(oldStart);
+    this.trimPositionHistory(this.nextPageStarts);
+    this.status = '';
+    this.saveCurrentOffset();
+    this.showInputFeedback(fallbackStart > 0 ?
+      '附近分页边界尚未缓存，已回到本章开头' :
+      '附近分页边界尚未缓存，已回到书首');
+  }
+
+  private chapterAnchorBefore(targetByte: number): number {
+    let closest = 0;
+    for (let i = 0; i < this.chapters.length; i++) {
+      const offset = this.chapters[i].offset;
+      if (Number.isInteger(offset) && offset >= 0 && offset < targetByte &&
+          offset > closest) closest = offset;
+    }
+    return closest;
   }
 
   private trimPositionHistory(history: number[]): void {
@@ -1028,9 +1056,41 @@ struct Reader {
     return anchors;
   }
 
+  private paginationLayoutKey(): string {
+    return JSON.stringify([
+      'native-reader-v2',
+      Math.round(this.viewportWidthVp * 100) / 100,
+      Math.round(this.viewportHeightVp * 100) / 100,
+      this.fontSize,
+      this.lineHeight,
+      READER_TEXT_FONT,
+      'break-word'
+    ]);
+  }
+
+  private paginationCheckpointState(): { layoutKey: string;
+    anchors: number[] } {
+    const anchors: number[] = [];
+    for (let i = 0; i < this.paginationAnchors.length; i++) {
+      const anchor = this.paginationAnchors[i];
+      if (Number.isInteger(anchor) && anchor >= 0 &&
+          (this.book === null || anchor <= this.book.bytes) &&
+          !anchors.includes(anchor)) anchors.push(anchor);
+    }
+    if (this.currentPage !== null &&
+        !anchors.includes(this.currentPage.startByte)) {
+      anchors.push(this.currentPage.startByte);
+    }
+    anchors.sort((left: number, right: number): number => left - right);
+    while (anchors.length > READER_PAGINATION_CHECKPOINT_LIMIT) {
+      anchors.shift();
+    }
+    return { layoutKey: this.paginationLayoutKey(), anchors: anchors };
+  }
+
   private scheduleReflow(): void {
     if (this.resizeTimer !== -1) clearTimeout(this.resizeTimer);
-    this.resizeTimer = setTimeout(async (): Promise<void> => {
+    this.resizeTimer = setTimeout((): void => {
       this.resizeTimer = -1;
       this.viewportNeedsInsetsLayout = false;
       if (this.readerReady && this.currentPage !== null && !this.leaving) {
@@ -1049,29 +1109,9 @@ struct Reader {
             });
           return;
         }
-        const targetByte = this.currentPage.startByte;
-        const replayAnchors = this.paginationAnchorsThrough(targetByte);
-        const replayAnchor = replayAnchors[replayAnchors.length - 1];
-        const pageStart = await findForwardPageStart(targetByte,
-          (offset: number): Promise<ReaderTextPage> =>
-            this.createPageAt(offset), (offset: number): void => {
-              replayAnchors.push(offset);
-              while (replayAnchors.length >
-                  READER_PAGINATION_CHECKPOINT_LIMIT) {
-                replayAnchors.shift();
-              }
-            }, replayAnchor);
-        if (pageStart !== null && !this.leaving &&
-            this.currentPage?.startByte === targetByte) {
-          this.resetPaginationHistory(pageStart);
-          for (let i = 0; i < replayAnchors.length; i++) {
-            const anchor = replayAnchors[i];
-            if (anchor < pageStart && !this.paginationAnchors.includes(anchor)) {
-              this.paginationAnchors.push(anchor);
-            }
-          }
-          this.loadPageAt(pageStart, false);
-        }
+        this.reflowCurrentPage().catch((error: Error): void => {
+          this.log('pagination', 'layout_reflow_fail', this.errorCode(error));
+        });
       }
       refreshReaderWindowInsets();
     }, 120);
@@ -1085,7 +1125,8 @@ struct Reader {
     if (book === null || store === null || page === null ||
         page.startByte < 0 || page.startByte > book.bytes) return;
     try {
-      await store.save(book.bookId, book.sha256, page.startByte);
+      await store.save(book.bookId, book.sha256, page.startByte, undefined,
+        undefined, this.paginationCheckpointState());
       if (repository !== null) {
         repository.markProgressMapping(book.bookId, 'utf8_byte');
       }
@@ -1227,25 +1268,22 @@ struct Reader {
         });
       return;
     }
-    const replayAnchors = this.paginationAnchorsThrough(page.startByte);
-    const replayAnchor = replayAnchors[replayAnchors.length - 1];
-    const pageStart = await findForwardPageStart(page.startByte,
-      (offset: number): Promise<ReaderTextPage> => this.createPageAt(offset),
-      (offset: number): void => {
-        replayAnchors.push(offset);
-        while (replayAnchors.length >
-            READER_PAGINATION_CHECKPOINT_LIMIT) replayAnchors.shift();
-      }, replayAnchor);
-    if (pageStart === null || this.leaving ||
-        this.currentPage?.startByte !== page.startByte) return;
-    this.resetPaginationHistory(pageStart);
-    for (let i = 0; i < replayAnchors.length; i++) {
-      const anchor = replayAnchors[i];
-      if (anchor < pageStart && !this.paginationAnchors.includes(anchor)) {
-        this.paginationAnchors.push(anchor);
+    const targetByte = page.startByte;
+    this.resetPaginationHistory(targetByte);
+    const loaded = await this.loadPageAt(targetByte, false);
+    if (!loaded || this.leaving ||
+        this.currentPage?.startByte !== targetByte) return;
+    const book = this.book;
+    const store = this.progressStore;
+    if (book !== null && store !== null) {
+      try {
+        await store.savePaginationCheckpoints(book.bookId, book.sha256,
+          this.paginationCheckpointState());
+      } catch (error) {
+        this.log('progress', 'pagination_checkpoint_save_fail',
+          this.errorCode(error));
       }
     }
-    await this.loadPageAt(pageStart, false);
   }
 
   private toggleTheme(): void {

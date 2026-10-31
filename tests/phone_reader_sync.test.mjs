@@ -39,11 +39,36 @@ const textFile = read(
   'harmony/entry/src/main/ets/services/NormalizedTextFile.ts');
 assert.ok(pagination.includes('paginateForward') &&
   pagination.includes('recoverPreviousPageFromCheckpoint') &&
-  pagination.includes('findForwardPageStart') &&
+  pagination.includes('maxPages') &&
+  !pagination.includes('findForwardPageStart') &&
   !pagination.includes('paginateBackward') &&
   pagination.includes('codePointAt') &&
   pagination.includes('scalarWidth'),
   'forward page recovery must use UTF-8 byte lengths and Unicode scalar boundaries');
+const initializeReader = reader.slice(
+  reader.indexOf('private async initializeReader'),
+  reader.indexOf('private async createPageAt'));
+const reflowReader = reader.slice(
+  reader.indexOf('private async reflowCurrentPage'),
+  reader.indexOf('private toggleTheme'));
+const resizeReader = reader.slice(
+  reader.indexOf('private scheduleReflow'),
+  reader.indexOf('private async saveCurrentOffset'));
+assert.ok(initializeReader.includes('startByte = saved !== null ? saved.offset : 0') &&
+  initializeReader.includes('this.loadPageAt(startByte, true)') &&
+  !initializeReader.includes('findForwardPageStart'),
+  'cold start must show the saved byte position without replaying earlier pages');
+assert.ok(reflowReader.includes('this.loadPageAt(targetByte, false)') &&
+  !reflowReader.includes('findForwardPageStart') &&
+  resizeReader.includes('this.reflowCurrentPage()') &&
+  !resizeReader.includes('findForwardPageStart') &&
+  reader.includes('private paginationLayoutKey()') &&
+  reader.includes('savePaginationCheckpoints'),
+  'layout reflow must keep the byte anchor and persist layout-specific checkpoints');
+assert.ok(reader.includes('READER_CHECKPOINT_PAGE_INTERVAL') &&
+  reader.includes('chapterAnchorBefore(oldStart)') &&
+  reader.includes('previous_page_fallback'),
+  'uncached previous-page recovery must be bounded and land on a safe chapter or book anchor');
 assert.ok(textFile.includes('readWindow') &&
   !textFile.includes('readWindowBefore') &&
   textFile.includes('fileIo.lseek') &&
@@ -51,7 +76,7 @@ assert.ok(textFile.includes('readWindow') &&
   'long books must be read through bounded random-access UTF-8 windows');
 assert.ok(reader.includes('ReadingProgressStore') &&
   reader.includes('store.load(book.bookId, book.sha256)') &&
-  reader.includes('store.save(book.bookId, book.sha256, page.startByte)') &&
+  reader.includes('store.save(book.bookId, book.sha256, page.startByte, undefined') &&
   reader.includes("repository.markProgressMapping(book.bookId, 'utf8_byte')"),
   'phone resume and sync must use the normalized-text UTF-8 byte offset');
 assert.ok(reader.includes('chapter.offset') &&
@@ -77,6 +102,13 @@ assert.ok(progress.includes('async remove(bookId'),
   'delete must clear per-book progress');
 assert.ok(progress.includes('syncedOffset'),
   'sync baseline must be persisted for conflict detection');
+const readingSummary = progress.slice(
+  progress.indexOf('export interface ReadingSummary'),
+  progress.indexOf('export interface ReadingLast'));
+assert.ok(!readingSummary.includes('paginationLayoutKey') &&
+  !readingSummary.includes('paginationAnchors') &&
+  progress.includes('async savePaginationCheckpoints'),
+  'local layout checkpoints must stay out of the phone-watch progress protocol');
 
 const sync = read(
   'harmony/entry/src/main/ets/services/ReadingSyncService.ts');

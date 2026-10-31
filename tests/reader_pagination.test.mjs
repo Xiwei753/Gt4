@@ -2,8 +2,8 @@
 // Pure pagination tests run with Node's built-in TypeScript type stripping.
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
-import { findForwardPageStart, isTextWindowByteBoundary,
-  paginateForward, recoverPreviousPageFromCheckpoint, utf8ByteLength,
+import { isTextWindowByteBoundary, paginateForward,
+  recoverPreviousPageFromCheckpoint, utf8ByteLength,
   READER_CHECKPOINT_PAGE_INTERVAL }
   from '../harmony/entry/src/main/ets/model/ReaderPagination.ts';
 
@@ -139,32 +139,34 @@ for (const maxHeightPx of [10, 20, 30, 40]) {
 assert.ok(boundariesByHeight.size > 1,
   'different viewport heights must produce and recover distinct page layouts');
 
-const longReplayText = ('A short line\n\nA longer paragraph for wrapping.\n').repeat(32);
+const longReplayText = ('A short line\n\nA longer paragraph for wrapping.\n').repeat(256);
 const longReplayPages = paginateAll(longReplayText, 20);
-assert.ok(longReplayPages.length > READER_CHECKPOINT_PAGE_INTERVAL,
-  'the long replay fixture must exceed one checkpoint interval');
-let replayedPageCount = 0;
-const longReplay = await recoverPreviousPageFromCheckpoint(
-  longReplayPages[longReplayPages.length - 1].startByte,
-  longReplayPages[0].startByte,
-  loaderFor(longReplayText, 20, () => { replayedPageCount++; }));
-assert.equal(longReplay?.startByte,
-  longReplayPages[longReplayPages.length - 2].startByte,
-  'replay must recover an exact page across spans longer than one checkpoint');
-assert.ok(replayedPageCount > READER_CHECKPOINT_PAGE_INTERVAL,
-  'recovery must continue forward when no nearby checkpoint exists');
-
-const restoredOffset = irregularPages[3].startByte + 1;
-assert.equal(await findForwardPageStart(restoredOffset,
-  loaderFor(irregular, 20)), irregularPages[3].startByte,
-  'a saved offset inside a page must align to that forward page start');
-assert.equal(await findForwardPageStart(irregularPages[3].startByte,
-  loaderFor(irregular, 20)), irregularPages[3].startByte,
-  'an existing page boundary must remain unchanged');
-assert.equal(await findForwardPageStart(restoredOffset,
-  loaderFor(irregular, 20), undefined, irregularPages[2].startByte),
-  irregularPages[3].startByte,
-  'a known chapter or pagination anchor must replay without scanning earlier pages');
+assert.ok(longReplayPages.length > 256,
+  'the performance fixture must contain hundreds of pages');
+for (const pageIndex of [32, 128, longReplayPages.length - 1]) {
+  let replayedPageCount = 0;
+  const longReplay = await recoverPreviousPageFromCheckpoint(
+    longReplayPages[pageIndex].startByte,
+    longReplayPages[0].startByte,
+    loaderFor(longReplayText, 20, () => { replayedPageCount++; }));
+  assert.equal(longReplay, null,
+    'a distant uncached previous boundary must return the bounded fallback');
+  assert.equal(replayedPageCount, READER_CHECKPOINT_PAGE_INTERVAL,
+    'late-book recovery work must stay fixed as the target moves deeper');
+}
+const latePageIndex = longReplayPages.length - 1;
+const cachedCheckpointIndex = latePageIndex -
+  READER_CHECKPOINT_PAGE_INTERVAL;
+let cachedReplayCount = 0;
+const recoveredFromCache = await recoverPreviousPageFromCheckpoint(
+  longReplayPages[latePageIndex].startByte,
+  longReplayPages[cachedCheckpointIndex].startByte,
+  loaderFor(longReplayText, 20, () => { cachedReplayCount++; }));
+assert.equal(recoveredFromCache?.startByte,
+  longReplayPages[latePageIndex - 1].startByte,
+  'a nearby saved checkpoint must recover the exact previous boundary');
+assert.ok(cachedReplayCount <= READER_CHECKPOINT_PAGE_INTERVAL,
+  'cached previous-page recovery must stay within its fixed page budget');
 
 let measureCalls = 0;
 const longWindow = 'x'.repeat(100_000);
@@ -175,5 +177,31 @@ const boundedPage = paginateForward(longWindow, 0, 2048, (text) => {
 assert.equal(boundedPage.text.length, 2048);
 assert.ok(measureCalls <= 18,
   'page end must be found by bisection, not one measurement per character');
+
+// Simulate no-chapter TXT resume, font reflow and fold-width reflow. Each path
+// opens only the bounded random-access window at its saved byte offset.
+const noChapterText = 'x'.repeat(256_000);
+const randomAccessStarts = [0, 128_000, noChapterText.length - 1024];
+for (const startByte of randomAccessStarts) {
+  for (const maxHeightPx of [1024, 2048, 4096]) {
+    let loaderCalls = 0;
+    let textMeasureCalls = 0;
+    const loadAtSavedOffset = async (offset) => {
+      loaderCalls++;
+      const window = noChapterText.slice(offset, offset + 64 * 1024);
+      return paginateForward(window, offset, maxHeightPx, (text) => {
+        textMeasureCalls++;
+        return text.length;
+      });
+    };
+    const page = await loadAtSavedOffset(startByte);
+    assert.equal(page.startByte, startByte,
+      'cold start and layout reflow must retain the saved byte anchor');
+    assert.equal(loaderCalls, 1,
+      'work at a late saved position must load one local text window');
+    assert.ok(textMeasureCalls <= 18,
+      'measurement work must depend on the bounded window, not pages before the anchor');
+  }
+}
 
 console.log('PASS: UTF-8 boundaries, forward recovery, reflow and bounded measurement');
