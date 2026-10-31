@@ -30,8 +30,7 @@ import { exportReaderDiagnostics, ReaderDiagnosticsExportError,
 import { WearDeviceService, WearDeviceListResult } from '../services/WearDeviceService';
 import { BookTransferService } from '../services/BookTransferService';
 import { ReadingSyncService } from '../services/ReadingSyncService';
-import { deviceNotice, planRetry, MAX_AUTO_RETRIES,
-  runDeviceRefresh } from '../services/WearAuthPolicy';
+import { deviceNotice, runDeviceRefresh } from '../services/WearAuthPolicy';
 import { ReaderWindowInsets, setAppWindowTheme, showShelfWindow }
   from '../services/ReaderWindowAppearance';
 
@@ -90,11 +89,6 @@ struct Index {
   // 设备发现/授权的进度序号：只允许最后一次异步结果落地，
   // 避免旧的 await 覆盖新状态（issue #5 P0-B）。
   private refreshSeq: number = 0;
-  // issue #6 P0-B：自动重试的定时器与计数。确定性失败不重试，
-  // 只有短暂断连/网络错误才在有限次数内退避重试；页面退出/切后台
-  // 时一并清理，绝不做亚秒级连续请求。
-  private retryTimer: number = -1;
-  private autoRetryCount: number = 0;
   private onWindowInsets = (insets: ReaderWindowInsets): void => {
     this.safeTop = insets.top;
     this.safeBottom = insets.bottom;
@@ -161,23 +155,14 @@ struct Index {
     if (this.activeTab === 'transfer') this.refreshDevices();
   }
 
-  // issue #6 P0-B：切后台/页面退出时，取消任何在途发现的自动重试定时器，
-  // 并让旧结果作废，避免后台继续轰炸华为服务。
+  // No automatic device-discovery retries: user-initiated refresh makes
+  // one request; leaving the page invalidates any in-flight result.
   onPageHide(): void {
-    this.clearRetryTimer();
     this.refreshSeq++;
   }
 
   onDisappear(): void {
-    this.clearRetryTimer();
     this.refreshSeq++;
-  }
-
-  private clearRetryTimer(): void {
-    if (this.retryTimer !== -1) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = -1;
-    }
   }
 
   private isDarkTheme(): boolean {
@@ -335,8 +320,6 @@ struct Index {
   // 重试，确定性失败立即停止，只由用户手动刷新。
   private async refreshDevices(): Promise<void> {
     if (this.deviceBusy) return;
-    this.clearRetryTimer();
-    this.autoRetryCount = 0;
     await this.runDeviceRefreshFlow();
   }
 
@@ -389,21 +372,8 @@ struct Index {
             }
           }
 
-          // 只有可恢复的短暂错误才排定有退避上限的自动重试；
-          // 1008509999（应用身份未配置）等确定性失败立即停下。
-          const plan = planRetry(this.autoRetryCount,
-            result.ok ? { ok: true } : notice);
-          if (plan.retry) {
-            this.autoRetryCount = plan.attempt;
-            this.deviceStatus = notice.text +
-              '（自动重试 ' + plan.attempt + '/' + MAX_AUTO_RETRIES + '）';
-            this.retryTimer = setTimeout(() => {
-              this.retryTimer = -1;
-              this.runDeviceRefreshFlow();
-            }, plan.delayMs);
-          } else {
-            this.autoRetryCount = 0;
-          }
+          // Discovery failure is terminal for this request. The user may
+          // manually refresh again; do not schedule another SDK request.
         },
         end: () => {
           this.deviceBusy = false;
