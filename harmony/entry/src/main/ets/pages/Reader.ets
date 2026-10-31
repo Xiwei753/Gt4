@@ -62,6 +62,7 @@ const READER_WINDOW_BYTES = 64 * 1024;
 const READER_POSITION_HISTORY_LIMIT = 12;
 const READER_PAGINATION_CHECKPOINT_LIMIT = 32;
 const READER_TEXT_FONT = 'HarmonyOS Sans';
+const READER_BODY_HORIZONTAL_MARGIN_VP = 8;
 const READER_CHAPTER_LABEL_HEIGHT_VP = 18;
 const READER_CHAPTER_LABEL_GAP_VP = 8;
 const READER_GESTURE_SAFE_REGION_RATIO = 0.36;
@@ -456,7 +457,7 @@ struct Reader {
   private touchRegion(x: number): string {
     const width = this.viewportWidthVp;
     if (width <= 0) return 'unknown';
-    const contentLeft = this.safeLeft;
+    const contentLeft = this.safeLeft + READER_BODY_HORIZONTAL_MARGIN_VP;
     if (x < contentLeft + width * 0.34) return 'left';
     if (x > contentLeft + width * 0.66) return 'right';
     return 'center';
@@ -1759,7 +1760,8 @@ struct Reader {
             })
         }
         .width('100%').height('100%')
-        .padding({ left: this.safeLeft, right: this.safeRight,
+        .padding({ left: this.safeLeft + READER_BODY_HORIZONTAL_MARGIN_VP,
+          right: this.safeRight + READER_BODY_HORIZONTAL_MARGIN_VP,
           top: this.readerBodyTopInsetVp,
           bottom: this.readerContentBottomInsetVp() })
         .onTouch((event: TouchEvent) => { this.handleReaderTouch(event); })
