@@ -48,6 +48,11 @@ interface ReaderHeaderLayout {
   infoWidth: number;
 }
 
+interface ReaderPaginationCheckpointState {
+  layoutKey: string;
+  anchors: number[];
+}
+
 const READER_WINDOW_BYTES = 64 * 1024;
 const READER_POSITION_HISTORY_LIMIT = 12;
 const READER_PAGINATION_CHECKPOINT_LIMIT = 32;
@@ -1062,8 +1067,7 @@ struct Reader {
     ]);
   }
 
-  private paginationCheckpointState(): { layoutKey: string;
-    anchors: number[] } {
+  private paginationCheckpointState(): ReaderPaginationCheckpointState {
     const anchors: number[] = [];
     for (let i = 0; i < this.paginationAnchors.length; i++) {
       const anchor = this.paginationAnchors[i];
