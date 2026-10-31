@@ -54,9 +54,11 @@ assert.ok(infoBar.includes('.height(this.statusBarHeight)') &&
   chapterLabel.includes('this.chapterLabelWidthVp()') &&
   chapterLabel.includes('this.chapterLabelTopVp()') &&
   chapterLabel.includes('.hitTestBehavior(HitTestMode.None)') &&
-  reader.includes('this.navigationIndicatorLeftVp -') &&
+  reader.includes('READER_GESTURE_SAFE_REGION_RATIO') &&
+  reader.includes('const screenWidth = this.viewportWidthVp + this.safeLeft + this.safeRight;') &&
+  !reader.includes('this.navigationIndicatorLeftVp -') &&
   reader.includes('this.navigationIndicatorTopVp +'),
-  'the chapter label must sit left of the real system gesture indicator without intercepting it');
+  'the chapter label must reserve a centered gesture area without treating the avoidance rect as the visible indicator');
 assert.ok(reader.includes('private readerContentBottomInsetVp(): number {\n    return this.safeBottom;') &&
   !reader.includes('READER_FOOTER_HEIGHT_VP') &&
   appearance.includes('navigationIndicatorRectVp: insets?.navigationIndicator'),
@@ -102,8 +104,9 @@ assert.ok(reader.includes('this.readerChapterLabel()') &&
   reader.includes('page_load_superseded') &&
   reader.includes('page_load_ok') &&
   reader.includes('pageTextChanged: oldText !== page.text') &&
-  reader.includes('touch_down') && reader.includes('touch_up') &&
-  reader.includes("'readerFlip', 'attempt'") &&
+  reader.includes('touch_up_without_down') &&
+  reader.includes("'readerFlip', 'blocked'") &&
+  !reader.includes("'readerFlip', 'attempt'") &&
   reader.includes('reason: blockedReason.length > 0 ? blockedReason') &&
   reader.includes('this.showInputFeedback(') &&
   reader.includes('.position({ x: 0, y: this.readerContentTopInsetVp() })') &&

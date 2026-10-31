@@ -54,6 +54,7 @@ const READER_PAGINATION_CHECKPOINT_LIMIT = 32;
 const READER_TEXT_FONT = 'HarmonyOS Sans';
 const READER_CHAPTER_LABEL_HEIGHT_VP = 18;
 const READER_CHAPTER_LABEL_GAP_VP = 8;
+const READER_GESTURE_SAFE_REGION_RATIO = 0.36;
 const READER_INPUT_FEEDBACK_MS = 1600;
 
 @Entry
@@ -81,9 +82,7 @@ struct Reader {
   @State private safeLeft: number = 0;
   @State private safeRight: number = 0;
   @State private statusBarHeight: number = 0;
-  @State private navigationIndicatorLeftVp: number = 0;
   @State private navigationIndicatorTopVp: number = 0;
-  @State private navigationIndicatorRightVp: number = 0;
   @State private navigationIndicatorBottomVp: number = 0;
   @State private headerTitleX: number = 12;
   @State private headerTitleMaxWidthVp: number = 0;
@@ -367,8 +366,6 @@ struct Reader {
       this.touchStartX = point.x;
       this.touchStartY = point.y;
       this.touchStartAt = Date.now();
-      this.logReaderInput('touch_down', 'touch', '', point.x, point.y,
-        this.touchRegion(point.x));
       return;
     }
     if (event.type !== TouchType.Up) return;
@@ -381,8 +378,6 @@ struct Reader {
     const deltaX = point.x - this.touchStartX;
     const deltaY = point.y - this.touchStartY;
     const region = this.touchRegion(point.x);
-    this.logReaderInput('touch_up', 'touch', '', point.x, point.y,
-      region, deltaX, deltaY);
     if (Math.abs(deltaX) >= 48 && Math.abs(deltaX) > Math.abs(deltaY)) {
       if (deltaX < 0) this.requestPageFlip('swipe_left', true);
       else this.requestPageFlip('swipe_right', false);
@@ -394,8 +389,6 @@ struct Reader {
     } else if (region === 'right') {
       this.requestPageFlip('tap_right', true);
     } else if (region === 'center') {
-      this.logReaderInput('controls_toggle', 'tap_center', '', point.x,
-        point.y, region);
       this.toggleReaderControls();
     }
   }
@@ -466,9 +459,9 @@ struct Reader {
       volumeUpRegistered: this.volumeUpRegistered,
       volumeDownRegistered: this.volumeDownRegistered
     };
-    recordReaderDiagnostic(this.context(), 'readerFlip', 'attempt', 0,
-      details);
     if (blockedReason.length > 0) {
+      recordReaderDiagnostic(this.context(), 'readerFlip', 'blocked', 0,
+        details);
       if (this.pageInForeground && !this.leaving && !this.loading) {
         this.showInputFeedback(blockedReason === 'settings_open' ?
           '先关闭设置再翻页' : blockedReason === 'catalog_open' ?
@@ -569,9 +562,7 @@ struct Reader {
     this.safeRight = insets.right;
     this.statusBarHeight = insets.statusBarHeight > 0 ?
       insets.statusBarHeight : insets.top;
-    this.navigationIndicatorLeftVp = insets.navigationIndicator.left;
     this.navigationIndicatorTopVp = insets.navigationIndicator.top;
-    this.navigationIndicatorRightVp = insets.navigationIndicator.right;
     this.navigationIndicatorBottomVp = insets.navigationIndicator.bottom;
     const header = this.calculateHeaderLayout(insets);
     this.headerTitleX = header.titleX;
@@ -1191,10 +1182,12 @@ struct Reader {
   }
 
   private chapterLabelWidthVp(): number {
-    if (this.navigationIndicatorRightVp <=
-        this.navigationIndicatorLeftVp) return 0;
-    return Math.max(0, this.navigationIndicatorLeftVp -
-      this.chapterLabelLeftVp() - READER_CHAPTER_LABEL_GAP_VP);
+    const screenWidth = this.viewportWidthVp + this.safeLeft + this.safeRight;
+    if (screenWidth <= 0) return 0;
+    const gestureSafeLeft = screenWidth *
+      (1 - READER_GESTURE_SAFE_REGION_RATIO) / 2;
+    return Math.max(0, gestureSafeLeft - this.chapterLabelLeftVp() -
+      READER_CHAPTER_LABEL_GAP_VP);
   }
 
   private chapterLabelTopVp(): number {

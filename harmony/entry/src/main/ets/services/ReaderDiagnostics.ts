@@ -7,6 +7,15 @@ import { util } from '@kit.ArkTS';
 const FILE_NAME = 'reader-diagnostics.jsonl';
 const MAX_LINES = 256;
 const MAX_BYTES = 96 * 1024;
+const FLUSH_DELAY_MS = 0;
+
+let pendingLines: string[] = [];
+let diagnosticsPath: string = '';
+let flushTimer: number = -1;
+let flushPromise: Promise<void> | null = null;
+let storedLines: string[] = [];
+let storedPath: string = '';
+let storedNeedsRewrite: boolean = false;
 
 interface DiagnosticRecord {
   at: number;
@@ -73,8 +82,7 @@ export function recordReaderDiagnostic(context: common.UIAbilityContext,
   event: string, stage: string, code?: number,
   details?: DiagnosticDetails): void {
   try {
-    const path = context.filesDir + '/' + FILE_NAME;
-    const lines = readLines(path);
+    diagnosticsPath = context.filesDir + '/' + FILE_NAME;
     const record: DiagnosticRecord = {
       at: Date.now(),
       event: safeLabel(event),
@@ -84,15 +92,90 @@ export function recordReaderDiagnostic(context: common.UIAbilityContext,
       details: safeDetails(details)
     };
     if (record.details === undefined) delete record.details;
-    lines.push(JSON.stringify(record));
-    while (lines.length > MAX_LINES ||
-        byteLength(lines.join('\n')) > MAX_BYTES) {
-      lines.shift();
-    }
-    writeText(path, lines.join('\n') + (lines.length > 0 ? '\n' : ''));
+    pendingLines.push(JSON.stringify(record));
+    while (pendingLines.length > MAX_LINES) pendingLines.shift();
+    scheduleFlush();
   } catch (error) {
     // Diagnostics must never block importing, reading, or transfer.
   }
+}
+
+function scheduleFlush(): void {
+  if (flushTimer >= 0 || pendingLines.length === 0) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = -1;
+    flushDiagnosticQueue();
+  }, FLUSH_DELAY_MS);
+}
+
+function flushDiagnosticQueue(): Promise<void> {
+  if (flushPromise !== null) return flushPromise;
+  if (pendingLines.length === 0 || diagnosticsPath.length === 0) {
+    return Promise.resolve();
+  }
+  flushPromise = writeQueuedLines().finally(() => {
+    flushPromise = null;
+    if (pendingLines.length > 0) scheduleFlush();
+  });
+  return flushPromise;
+}
+
+async function writeQueuedLines(): Promise<void> {
+  const path = diagnosticsPath;
+  const batch = pendingLines.splice(0, pendingLines.length);
+  try {
+    if (storedPath !== path) {
+      const loaded = await readStoredLines(path);
+      storedPath = path;
+      storedLines = loaded.lines;
+      storedNeedsRewrite = loaded.trimmed || loaded.readFailed;
+    }
+
+    const combined = storedLines.concat(batch);
+    const retained = retainBoundedLines(combined);
+    const rewrite = storedNeedsRewrite || retained.trimmed;
+    if (rewrite) await replaceText(path, serializeLines(retained.lines));
+    else await appendText(path, serializeLines(batch));
+    storedLines = retained.lines;
+    storedNeedsRewrite = false;
+  } catch (error) {
+    // A failed best-effort diagnostic write must not block reading or retry forever.
+  }
+}
+
+async function readStoredLines(path: string): Promise<{
+  lines: string[]; trimmed: boolean; readFailed: boolean
+}> {
+  try {
+    const content = await fileIo.readText(path);
+    const lines = content.split('\n').filter((line) => line.length > 0);
+    const retained = retainBoundedLines(lines);
+    return { lines: retained.lines, trimmed: retained.trimmed,
+      readFailed: false };
+  } catch (error) {
+    return { lines: [], trimmed: false, readFailed: true };
+  }
+}
+
+function retainBoundedLines(lines: string[]): {
+  lines: string[]; trimmed: boolean
+} {
+  const retained = lines.slice();
+  let bytes = 0;
+  for (let i = 0; i < retained.length; i++) {
+    bytes += byteLength(retained[i]) + 1;
+  }
+  let trimmed = false;
+  while (retained.length > MAX_LINES || bytes > MAX_BYTES) {
+    const removed = retained.shift();
+    if (removed !== undefined) bytes -= byteLength(removed) + 1;
+    trimmed = true;
+  }
+  return { lines: retained, trimmed };
+}
+
+function serializeLines(lines: string[]): string {
+  return lines.length > 0 ? lines.join('\n') + '\n' : '';
 }
 
 function safeDetails(details: DiagnosticDetails | undefined):
@@ -246,8 +329,19 @@ function roundMetric(value: number): number {
 export async function exportReaderDiagnostics(
   context: common.UIAbilityContext): Promise<boolean> {
   const source = context.filesDir + '/' + FILE_NAME;
-  const lines = readLines(source);
-  const content = lines.join('\n') + (lines.length > 0 ? '\n' : '');
+  if (flushTimer >= 0) {
+    clearTimeout(flushTimer);
+    flushTimer = -1;
+  }
+  while (pendingLines.length > 0 || flushPromise !== null) {
+    await flushDiagnosticQueue();
+  }
+  let content = '';
+  try {
+    content = serializeLines((await readStoredLines(source)).lines);
+  } catch (error) {
+    // Export an empty diagnostic file if the log is not available.
+  }
   const pickerView = new picker.DocumentViewPicker(context);
   const options = new picker.DocumentSaveOptions();
   options.newFileNames = ['suyue-reader-diagnostics.jsonl'];
@@ -268,31 +362,23 @@ function safeLabel(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_').substring(0, 48);
 }
 
-function readLines(path: string): string[] {
+async function appendText(path: string, text: string): Promise<void> {
+  const file = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY |
+    fileIo.OpenMode.CREATE | fileIo.OpenMode.APPEND);
   try {
-    const file = fileIo.openSync(path, fileIo.OpenMode.READ_ONLY);
-    try {
-      const stat = fileIo.statSync(path);
-      const buffer = new ArrayBuffer(Math.min(stat.size, MAX_BYTES));
-      fileIo.readSync(file.fd, buffer);
-      const text = new util.TextDecoder().decodeToString(new Uint8Array(buffer));
-      return text.split('\n').filter((line) => line.length > 0)
-        .slice(-MAX_LINES);
-    } finally {
-      fileIo.closeSync(file.fd);
-    }
-  } catch (error) {
-    return [];
+    await fileIo.write(file.fd, text);
+  } finally {
+    await fileIo.close(file.fd);
   }
 }
 
-function writeText(path: string, text: string): void {
-  const file = fileIo.openSync(path, fileIo.OpenMode.READ_WRITE |
+async function replaceText(path: string, text: string): Promise<void> {
+  const file = await fileIo.open(path, fileIo.OpenMode.WRITE_ONLY |
     fileIo.OpenMode.CREATE | fileIo.OpenMode.TRUNC);
   try {
-    fileIo.writeSync(file.fd, new util.TextEncoder().encode(text).buffer);
+    if (text.length > 0) await fileIo.write(file.fd, text);
   } finally {
-    fileIo.closeSync(file.fd);
+    await fileIo.close(file.fd);
   }
 }
 
