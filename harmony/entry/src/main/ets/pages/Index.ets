@@ -533,6 +533,7 @@ struct Index {
   }
 
   private async sendBook(book: BookMeta): Promise<void> {
+    if (this.sending) return;
     if (!this.canSend() || this.transferService === null) {
       this.transferText =
         '发送不可用：请先选择设备、配置手表 Lite 公钥指纹并成功注册回执';
@@ -547,6 +548,11 @@ struct Index {
     this.activeTransferId = '';
     this.transferText = '正在发送《' + book.title + '》……';
     let lastFailure = '手表未确认入库';
+    let lastPhase = 'PEER_CHECK';
+    let lastError = 'E_UNKNOWN';
+    let lastSdkCode = 0;
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    recordReaderDiagnostic(context, 'transfer', 'start');
     const ok = await this.transferService.sendBook(
       book, device, WATCH_PEER,
       {
@@ -554,9 +560,16 @@ struct Index {
           if (progress.transferId) {
             this.activeTransferId = progress.transferId;
           }
-          if (progress.message) {
-            lastFailure = progress.message;
+          if (progress.phase && progress.phase !== lastPhase) {
+            lastPhase = progress.phase;
+            recordReaderDiagnostic(context, 'transfer', 'phase', 0,
+              { source: lastPhase });
           }
+          if (progress.error) lastError = progress.error;
+          if (progress.sdkCode !== undefined) {
+            lastSdkCode = progress.sdkCode;
+          }
+          if (progress.message) lastFailure = progress.message;
           this.transferText = progress.message +
             (progress.percent > 0 &&
               progress.state === TransferState.SENDING ?
@@ -573,9 +586,8 @@ struct Index {
       this.getRepository().markStatus(book.bookId,
         BookStatus.SENT);
     } else {
-      recordReaderDiagnostic(
-        this.getUIContext().getHostContext() as common.UIAbilityContext,
-        'transfer', 'fail');
+      recordReaderDiagnostic(context, 'transfer', 'fail', lastSdkCode,
+        { source: lastPhase, reason: lastError });
       this.transferText = '发送失败：' + lastFailure;
       this.getRepository().markStatus(book.bookId,
         BookStatus.TRANSFER_FAILED,
@@ -873,7 +885,8 @@ struct Index {
         ListItem() {
           Column({ space: 8 }) {
             Button(this.sending ? '正在发送…' : '发送到已选手表')
-              .width('100%').height(40).enabled(this.canSend() &&
+              .width('100%').height(40).enabled(!this.sending &&
+                this.canSend() &&
                 this.canTransferBook(this.findBook(
                   this.selectedTransferBookId)!))
               .backgroundColor(this.palette().accent)
