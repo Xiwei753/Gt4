@@ -8,6 +8,7 @@ const FILE_NAME = 'reader-diagnostics.jsonl';
 const MAX_LINES = 256;
 const MAX_BYTES = 96 * 1024;
 const FLUSH_DELAY_MS = 0;
+const WRITE_RETRY_DELAY_MS = 150;
 
 let pendingLines: string[] = [];
 let diagnosticsPath: string = '';
@@ -16,6 +17,8 @@ let flushPromise: Promise<void> | null = null;
 let storedLines: string[] = [];
 let storedPath: string = '';
 let storedNeedsRewrite: boolean = false;
+let writeRetryPending: boolean = false;
+let nextFlushDelayMs: number = FLUSH_DELAY_MS;
 
 interface DiagnosticRecord {
   at: number;
@@ -100,12 +103,12 @@ export function recordReaderDiagnostic(context: common.UIAbilityContext,
   }
 }
 
-function scheduleFlush(): void {
+function scheduleFlush(delayMs: number = FLUSH_DELAY_MS): void {
   if (flushTimer >= 0 || pendingLines.length === 0) return;
   flushTimer = setTimeout(() => {
     flushTimer = -1;
     flushDiagnosticQueue();
-  }, FLUSH_DELAY_MS);
+  }, delayMs);
 }
 
 function flushDiagnosticQueue(): Promise<void> {
@@ -115,7 +118,9 @@ function flushDiagnosticQueue(): Promise<void> {
   }
   flushPromise = writeQueuedLines().finally(() => {
     flushPromise = null;
-    if (pendingLines.length > 0) scheduleFlush();
+    const delayMs = nextFlushDelayMs;
+    nextFlushDelayMs = FLUSH_DELAY_MS;
+    if (pendingLines.length > 0) scheduleFlush(delayMs);
   });
   return flushPromise;
 }
@@ -138,8 +143,16 @@ async function writeQueuedLines(): Promise<void> {
     else await appendText(path, serializeLines(batch));
     storedLines = retained.lines;
     storedNeedsRewrite = false;
+    writeRetryPending = false;
   } catch (error) {
-    // A failed best-effort diagnostic write must not block reading or retry forever.
+    if (!writeRetryPending) {
+      writeRetryPending = true;
+      pendingLines = batch.concat(pendingLines).slice(-MAX_LINES);
+      nextFlushDelayMs = WRITE_RETRY_DELAY_MS;
+    } else {
+      // Drop a batch only after its single best-effort retry also fails.
+      writeRetryPending = false;
+    }
   }
 }
 
@@ -368,7 +381,11 @@ async function appendText(path: string, text: string): Promise<void> {
   try {
     await fileIo.write(file.fd, text);
   } finally {
-    await fileIo.close(file.fd);
+    try {
+      await fileIo.close(file.fd);
+    } catch (error) {
+      // Closing is best-effort after the write has completed.
+    }
   }
 }
 
@@ -378,7 +395,11 @@ async function replaceText(path: string, text: string): Promise<void> {
   try {
     if (text.length > 0) await fileIo.write(file.fd, text);
   } finally {
-    await fileIo.close(file.fd);
+    try {
+      await fileIo.close(file.fd);
+    } catch (error) {
+      // Closing is best-effort after the write has completed.
+    }
   }
 }
 
