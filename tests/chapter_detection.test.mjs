@@ -13,6 +13,7 @@ const fixtures = {
   simple: '第一章 开始\n正文一\n第二章 继续\n正文二\n',
   crlf: '第一章 开始\r\n正文\r\n第二章 继续\r\n正文\r\n',
   tight: '第123章出发\n正文\n第124章 到达\n正文\n',
+  tightNoSpace: '第4章鱼与网\n前章正文\n第5章远行\n新章正文\n',
   fullwidth: '第１２３章　出发\n正文\n第１２４章 到达\n正文\n',
   chineseAndSection: '第一百二十三章 出发\n正文\n第一百二十四节 初遇\n正文\n',
   sectionOnly: '第一章 开始\n正文\n第十二节 初遇\n正文\n',
@@ -65,6 +66,7 @@ function titles(result) {
 assert.deepEqual(titles(jsResults.simple), ['第一章 开始', '第二章 继续']);
 assert.deepEqual(titles(jsResults.crlf), ['第一章 开始', '第二章 继续']);
 assert.deepEqual(titles(jsResults.tight), ['第123章 出发', '第124章 到达']);
+assert.deepEqual(titles(jsResults.tightNoSpace), ['第4章 鱼与网', '第5章 远行']);
 assert.deepEqual(titles(jsResults.fullwidth), ['第１２３章 出发', '第１２４章 到达']);
 assert.deepEqual(titles(jsResults.chineseAndSection), ['第一百二十三章 出发', '第一百二十四节 初遇']);
 assert.deepEqual(titles(jsResults.sectionOnly), ['第一章 开始', '第十二节 初遇']);

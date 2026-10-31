@@ -23,11 +23,36 @@ export interface ReaderPageLoader {
 
 export const READER_CHECKPOINT_PAGE_INTERVAL = 8;
 
-/** Add a display-only blank line after single line breaks in TXT paragraphs. */
+/** Add display-only spacing between adjacent non-empty source lines. */
 export function formatReaderParagraphs(text: string): string {
-  return text.replace(/(^|[^\r\n])(\r\n|\r|\n)(?=[^\r\n]|$)/g,
-    (_match: string, previous: string, lineBreak: string): string =>
-      previous + lineBreak + '\n');
+  let result = '';
+  let lineStart = 0;
+  while (lineStart < text.length) {
+    let lineEnd = lineStart;
+    while (lineEnd < text.length && text.charAt(lineEnd) !== '\r' &&
+        text.charAt(lineEnd) !== '\n') {
+      lineEnd++;
+    }
+    const line = text.slice(lineStart, lineEnd);
+    result += line;
+    if (lineEnd >= text.length) break;
+
+    const lineBreak = text.charAt(lineEnd) === '\r' &&
+      text.charAt(lineEnd + 1) === '\n' ? '\r\n' : text.charAt(lineEnd);
+    const nextLineStart = lineEnd + lineBreak.length;
+    let nextLineEnd = nextLineStart;
+    while (nextLineEnd < text.length && text.charAt(nextLineEnd) !== '\r' &&
+        text.charAt(nextLineEnd) !== '\n') {
+      nextLineEnd++;
+    }
+    const nextLine = text.slice(nextLineStart, nextLineEnd);
+    result += lineBreak;
+    if (line.trim().length > 0 && nextLine.trim().length > 0) {
+      result += lineBreak;
+    }
+    lineStart = nextLineStart;
+  }
+  return result;
 }
 
 interface TextBoundaries {

@@ -10,6 +10,10 @@ const reader = read('harmony/entry/src/main/ets/pages/Reader.ets');
 const index = read('harmony/entry/src/main/ets/pages/Index.ets');
 const settings = read(
   'harmony/entry/src/main/ets/services/ReaderSettingsStore.ts');
+const bookRepository = read(
+  'harmony/entry/src/main/ets/services/BookRepository.ts');
+const importService = read(
+  'harmony/entry/src/main/ets/services/BookImportService.ts');
 const builderSection = (name, nextName) => {
   const start = reader.indexOf(`@Builder\n  ${name}() {`);
   const end = reader.indexOf(`@Builder\n  ${nextName}() {`, start);
@@ -23,6 +27,11 @@ const controls = builderSection('topControls', 'catalogPanel');
 const buildStart = reader.indexOf('\n  build() {');
 assert.ok(buildStart >= 0);
 const build = reader.slice(buildStart);
+const createPageStart = reader.indexOf('private async createPageAt(');
+const previousPageStart = reader.indexOf(
+  'private async createPreviousPageEndingAt(', createPageStart);
+assert.ok(createPageStart >= 0 && previousPageStart > createPageStart);
+const createPageAt = reader.slice(createPageStart, previousPageStart);
 
 assert.ok(appearance.includes('window.getLastWindow') &&
   appearance.includes('setWindowLayoutFullScreen(true)') &&
@@ -35,11 +44,14 @@ assert.ok(!reader.includes('@kit.ReaderKit') &&
   !reader.includes('ReadPageComponent') &&
   !reader.includes('readerCore') && !reader.includes('bookParser'),
   'only the native Text pager may be mounted');
-assert.ok(build.includes('Text(this.pageText)') &&
+assert.ok(build.includes('Text(this.readerDisplayText(this.pageText))') &&
   build.includes('.fontSize(this.fontSize)') &&
   build.includes('.lineHeight(this.fontSize * this.lineHeight)') &&
   build.includes('.wordBreak(WordBreak.BREAK_WORD)'),
   'the displayed native Text must use the same font and wrapping settings as pagination');
+assert.ok(reader.includes('textContent: this.readerDisplayText(text)') &&
+  reader.includes('formatReaderParagraphs(sourceText)'),
+  'rendering and measured pagination must use the same display-only paragraph spacing');
 assert.ok(reader.includes('getMeasureUtils().measureTextSize') &&
   reader.includes('constraintWidth: this.viewportWidthVp') &&
   reader.includes('Math.max(1, heightPx - 1)'),
@@ -115,6 +127,16 @@ assert.ok(reader.includes('this.readerChapterLabel()') &&
   reader.includes('Text(this.status)') &&
   !reader.includes('this.pageFooter'),
   'input and page-load diagnostics must identify each attempt without logging book text');
+assert.ok(createPageAt.includes('chapterStart > startByte') &&
+  createPageAt.includes('windowBytes = chapterStart - startByte'),
+  'a page read window must stop before the next detected chapter boundary');
+assert.ok(index.includes('documentPicker.select(options)') &&
+  index.includes('importBook(context, uri)') &&
+  bookRepository.includes('books[idx].chapters = meta.chapters.slice()') &&
+  !bookRepository.includes('ReadingProgressStore'),
+  're-importing the same normalized book refreshes chapter metadata without touching reading progress');
+assert.ok(importService.includes('chapters = detectTxtChapters(decoded.text, normalized)'),
+  'TXT re-import must refresh chapter metadata from the normalized source text');
 assert.ok(index.includes('showShelfWindow') &&
   index.includes("@StorageLink(APP_THEME_MODE_KEY)") &&
   index.includes("chooseTheme('system')"),

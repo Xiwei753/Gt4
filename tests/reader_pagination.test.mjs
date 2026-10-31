@@ -4,11 +4,21 @@ import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { isTextWindowByteBoundary, paginateForward,
   paginatePreviousToBoundary, recoverPreviousPageFromCheckpoint,
-  utf8ByteLength, READER_CHECKPOINT_PAGE_INTERVAL }
+  formatReaderParagraphs, utf8ByteLength, READER_CHECKPOINT_PAGE_INTERVAL }
   from '../harmony/entry/src/main/ets/model/ReaderPagination.ts';
 
 const lineHeight = 10;
 const columns = 8;
+
+assert.equal(formatReaderParagraphs('ABC\nDEF'), 'ABC\n\nDEF');
+assert.equal(formatReaderParagraphs('ABC\r\nDEF'), 'ABC\r\n\r\nDEF');
+assert.equal(formatReaderParagraphs('ABC\rDEF'), 'ABC\r\rDEF');
+assert.equal(formatReaderParagraphs('ABC\n\nDEF'), 'ABC\n\nDEF');
+assert.equal(formatReaderParagraphs('ABC\n  \nDEF'), 'ABC\n  \nDEF');
+assert.equal(formatReaderParagraphs('ABC\n　\t\nDEF'), 'ABC\n　\t\nDEF');
+assert.equal(formatReaderParagraphs('ABC\n'), 'ABC\n');
+assert.equal(formatReaderParagraphs('\nDEF'), '\nDEF');
+
 function measure(text) {
   let lines = 1;
   let used = 0;
