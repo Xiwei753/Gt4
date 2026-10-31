@@ -109,7 +109,7 @@ export function paginateForward(text: string, startByte: number,
   };
 }
 
-/** Replays a bounded number of forward pages to recover the exact prior page. */
+/** Replays at most one checkpoint interval to recover an exact cached page. */
 export async function recoverPreviousPageFromCheckpoint(
   targetStartByte: number, checkpointByte: number,
   loadPageAt: ReaderPageLoader,
@@ -129,6 +129,43 @@ export async function recoverPreviousPageFromCheckpoint(
     pages += 1;
   }
   return null;
+}
+
+/** Finds a viewport-fitting suffix that ends at the current page boundary. */
+export function paginatePreviousToBoundary(text: string, windowStartByte: number,
+  targetEndByte: number, maxHeightPx: number,
+  measureHeightPx: ReaderTextMeasure): ReaderTextPage | null {
+  if (!Number.isInteger(windowStartByte) || windowStartByte < 0 ||
+      !Number.isInteger(targetEndByte) || targetEndByte < windowStartByte ||
+      !Number.isFinite(maxHeightPx) || maxHeightPx <= 0) return null;
+  const boundaries = textBoundaries(text);
+  const units = boundaries.chars.length - 1;
+  if (units <= 0 || windowStartByte +
+      boundaries.bytes[boundaries.bytes.length - 1] !== targetEndByte) {
+    return null;
+  }
+
+  let low = 0;
+  let high = units;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const startUnit = units - middle;
+    const candidate = text.slice(boundaries.chars[startUnit]);
+    if (heightFits(candidate, maxHeightPx, measureHeightPx)) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  // Match forward pagination's guaranteed progress for a single oversized unit.
+  const count = Math.max(1, low);
+  const startUnit = units - count;
+  return {
+    startByte: windowStartByte + boundaries.bytes[startUnit],
+    endByte: targetEndByte,
+    text: text.slice(boundaries.chars[startUnit])
+  };
 }
 
 /** Returns true when byteOffset is a UTF-8 boundary in a decoded text window. */

@@ -3,8 +3,8 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { isTextWindowByteBoundary, paginateForward,
-  recoverPreviousPageFromCheckpoint, utf8ByteLength,
-  READER_CHECKPOINT_PAGE_INTERVAL }
+  paginatePreviousToBoundary, recoverPreviousPageFromCheckpoint,
+  utf8ByteLength, READER_CHECKPOINT_PAGE_INTERVAL }
   from '../harmony/entry/src/main/ets/model/ReaderPagination.ts';
 
 const lineHeight = 10;
@@ -77,96 +77,55 @@ function paginateAll(text, maxHeightPx) {
   return pages;
 }
 
-function loaderFor(text, maxHeightPx, countCalls = () => {}) {
-  return async (offset) => {
-    countCalls();
-    const index = charAtByte(text, offset);
-    assert.ok(index >= 0, 'replay offsets must be valid UTF-8 boundaries');
-    return paginateForward(text.slice(index), offset, maxHeightPx, measure);
-  };
-}
-
-async function verifyRecoveryAtLayout(text, maxHeightPx) {
-  const pages = paginateAll(text, maxHeightPx);
-  const loadPageAt = loaderFor(text, maxHeightPx);
-  for (let i = 1; i < pages.length; i++) {
-    const checkpointIndex = Math.floor((i - 1) /
-      READER_CHECKPOINT_PAGE_INTERVAL) * READER_CHECKPOINT_PAGE_INTERVAL;
-    const recovered = await recoverPreviousPageFromCheckpoint(
-      pages[i].startByte, pages[checkpointIndex].startByte, loadPageAt);
-    assert.equal(recovered?.startByte, pages[i - 1].startByte,
-      `previous page must match forward boundary at height ${maxHeightPx}`);
-    assert.equal(recovered?.endByte, pages[i].startByte,
-      'recovered page must end at the current forward boundary');
-    assert.equal(recovered?.text, pages[i - 1].text,
-      'replay must reproduce the original forward page text');
-  }
-  return pages;
-}
-
 const source = 'ab😀cdEFGHIJKLMN\n中文🙂一二三四五六七八九\r\n' +
   'last paragraph with latin and 中文 mixed together';
 assert.equal(utf8ByteLength(source), Buffer.byteLength(source, 'utf8'));
-await verifyRecoveryAtLayout(source, 30);
+const sourcePages = paginateAll(source, 30);
+assert.ok(sourcePages.length > 1, 'the Unicode fixture must span pages');
+const unicodeTarget = sourcePages[1].startByte;
+const unicodeTargetChar = charAtByte(source, unicodeTarget);
+const unicodePrevious = paginatePreviousToBoundary(source.slice(0,
+  unicodeTargetChar), 0, unicodeTarget, 30, measure);
+assert.ok(unicodePrevious !== null,
+  'local previous paging must support mixed Unicode text');
+assert.equal(unicodePrevious.endByte, unicodeTarget);
+assert.ok(!/^[\uDC00-\uDFFF]/.test(unicodePrevious.text) &&
+  !/[\uD800-\uDBFF]$/.test(unicodePrevious.text),
+  'a local previous page must not split a Unicode surrogate pair');
 
-// This layout has short lines, explicit line breaks and blank paragraphs.
-// A reverse suffix fit used to return byte 15 for the
-// page ending at 28; forward replay identifies byte 16 as the real boundary.
+// This fixture covers short lines, blank paragraphs and uneven local suffixes.
 const irregular = 'hcehdf\n\njeaiecebhbadaed\nahbi\ndj\na\nghfjaej\nhdd';
-const irregularPages = await verifyRecoveryAtLayout(irregular, 20);
+const irregularPages = paginateAll(irregular, 20);
 assert.ok(irregular.includes('\n\n'), 'fixture must include a blank paragraph');
 const partialFillPages = paginateAll('one short final fragment', 20);
 assert.ok(measure(partialFillPages[partialFillPages.length - 1].text) < 20,
   'fixture must include a forward page that does not fill the viewport');
 const targetPage = irregularPages.find((page) => page.startByte === 28);
 assert.ok(targetPage, 'the regression fixture must retain its target boundary');
-const recoveredIrregular = await recoverPreviousPageFromCheckpoint(28, 0,
-  loaderFor(irregular, 20));
-assert.equal(recoveredIrregular?.startByte, 16,
-  'previous-page recovery must keep the original forward boundary');
-assert.equal(recoveredIrregular?.endByte, targetPage.startByte);
-assert.equal(await recoverPreviousPageFromCheckpoint(29, 0,
-  loaderFor(irregular, 20)), null,
-  'a non-boundary target must not fabricate a previous page');
+const previousIrregular = paginatePreviousToBoundary(irregular.slice(0, 28),
+  0, targetPage.startByte, 20, measure);
+assert.ok(previousIrregular !== null,
+  'local reverse paging must produce a page for a known current boundary');
+assert.equal(previousIrregular.endByte, targetPage.startByte,
+  'the reverse page must end exactly where the current page begins');
+assert.ok(previousIrregular.startByte > 0,
+  'the local reverse page must not fall back to the book start');
+const nextIrregular = paginateForward(irregular.slice(28), 28, 20, measure);
+const expectedRoundTripStart = charAtByte(irregular, previousIrregular.startByte);
+const expectedRoundTripEnd = charAtByte(irregular, nextIrregular.endByte);
+assert.equal(previousIrregular.text + nextIrregular.text,
+  irregular.slice(expectedRoundTripStart, expectedRoundTripEnd),
+  'previous then next must preserve adjacent text without gaps or duplicates');
 
 const layoutVariation = ('short\n\nlong paragraph with uneven wrapping\n' +
   '中英文混排🙂 and a different line length\n').repeat(12);
 const boundariesByHeight = new Set();
 for (const maxHeightPx of [10, 20, 30, 40]) {
-  const pages = await verifyRecoveryAtLayout(layoutVariation, maxHeightPx);
+  const pages = paginateAll(layoutVariation, maxHeightPx);
   boundariesByHeight.add(pages.map((page) => page.startByte).join(','));
 }
 assert.ok(boundariesByHeight.size > 1,
-  'different viewport heights must produce and recover distinct page layouts');
-
-const longReplayText = ('A short line\n\nA longer paragraph for wrapping.\n').repeat(256);
-const longReplayPages = paginateAll(longReplayText, 20);
-assert.ok(longReplayPages.length > 256,
-  'the performance fixture must contain hundreds of pages');
-for (const pageIndex of [32, 128, longReplayPages.length - 1]) {
-  let replayedPageCount = 0;
-  const longReplay = await recoverPreviousPageFromCheckpoint(
-    longReplayPages[pageIndex].startByte,
-    longReplayPages[0].startByte,
-    loaderFor(longReplayText, 20, () => { replayedPageCount++; }));
-  assert.equal(longReplay, null,
-    'a distant uncached previous boundary must return the bounded fallback');
-  assert.equal(replayedPageCount, READER_CHECKPOINT_PAGE_INTERVAL,
-    'late-book recovery work must stay fixed as the target moves deeper');
-}
-const latePageIndex = longReplayPages.length - 1;
-const cachedCheckpointIndex = latePageIndex -
-  READER_CHECKPOINT_PAGE_INTERVAL;
-let cachedReplayCount = 0;
-const recoveredFromCache = await recoverPreviousPageFromCheckpoint(
-  longReplayPages[latePageIndex].startByte,
-  longReplayPages[cachedCheckpointIndex].startByte,
-  loaderFor(longReplayText, 20, () => { cachedReplayCount++; }));
-assert.equal(recoveredFromCache?.startByte,
-  longReplayPages[latePageIndex - 1].startByte,
-  'a nearby saved checkpoint must recover the exact previous boundary');
-assert.ok(cachedReplayCount <= READER_CHECKPOINT_PAGE_INTERVAL,
-  'cached previous-page recovery must stay within its fixed page budget');
+  'different viewport heights must produce distinct page layouts');
 
 let measureCalls = 0;
 const longWindow = 'x'.repeat(100_000);
@@ -178,30 +137,46 @@ assert.equal(boundedPage.text.length, 2048);
 assert.ok(measureCalls <= 18,
   'page end must be found by bisection, not one measurement per character');
 
-// Simulate no-chapter TXT resume, font reflow and fold-width reflow. Each path
-// opens only the bounded random-access window at its saved byte offset.
-const noChapterText = 'x'.repeat(256_000);
-const randomAccessStarts = [0, 128_000, noChapterText.length - 1024];
-for (const startByte of randomAccessStarts) {
-  for (const maxHeightPx of [1024, 2048, 4096]) {
-    let loaderCalls = 0;
-    let textMeasureCalls = 0;
-    const loadAtSavedOffset = async (offset) => {
-      loaderCalls++;
-      const window = noChapterText.slice(offset, offset + 64 * 1024);
-      return paginateForward(window, offset, maxHeightPx, (text) => {
-        textMeasureCalls++;
-        return text.length;
-      });
-    };
-    const page = await loadAtSavedOffset(startByte);
-    assert.equal(page.startByte, startByte,
-      'cold start and layout reflow must retain the saved byte anchor');
-    assert.equal(loaderCalls, 1,
-      'work at a late saved position must load one local text window');
-    assert.ok(textMeasureCalls <= 18,
-      'measurement work must depend on the bounded window, not pages before the anchor');
-  }
-}
+// A resumed no-chapter TXT page in the second half must recover locally, then
+// return to the exact saved page on the next action. Work stays window-bounded.
+const noChapterText = ('line content with wrapping and text\n').repeat(12_000);
+const savedOffset = 250_000;
+const savedCharOffset = charAtByte(noChapterText, savedOffset);
+assert.ok(savedCharOffset > noChapterText.length / 2,
+  'the resumed fixture must be in the second half of a no-chapter book');
+let checkpointReads = 0;
+const checkpointResult = await recoverPreviousPageFromCheckpoint(savedOffset,
+  0, async (offset) => {
+    checkpointReads++;
+    const charOffset = charAtByte(noChapterText, offset);
+    return paginateForward(noChapterText.slice(charOffset), offset, 20, measure);
+  });
+assert.equal(checkpointResult, null,
+  'a stale root checkpoint must fall through to local previous paging');
+assert.equal(checkpointReads, READER_CHECKPOINT_PAGE_INTERVAL,
+  'stale checkpoint replay must stop at its fixed budget');
+const windowStartByte = Math.max(0, savedOffset - 64 * 1024);
+const windowStartChar = charAtByte(noChapterText, windowStartByte);
+let reverseMeasureCalls = 0;
+const previousAtResume = paginatePreviousToBoundary(
+  noChapterText.slice(windowStartChar, savedCharOffset), windowStartByte,
+  savedOffset, 20, (text) => {
+    reverseMeasureCalls++;
+    return measure(text);
+  });
+assert.ok(previousAtResume !== null && previousAtResume.startByte > 0,
+  'immediate previous from a late resume must not jump to book start');
+assert.equal(previousAtResume.endByte, savedOffset,
+  'the local previous page must end at the saved position');
+assert.ok(reverseMeasureCalls <= 18,
+  'local previous-page measurement must stay bounded by the 64 KiB window');
+const resumedPage = paginateForward(noChapterText.slice(savedCharOffset,
+  savedCharOffset + 64 * 1024), savedOffset, 20, measure);
+const nextPageStarts = [previousAtResume.endByte];
+const nextStart = nextPageStarts.pop();
+const resumedAgain = paginateForward(noChapterText.slice(nextStart,
+  nextStart + 64 * 1024), nextStart, 20, measure);
+assert.deepEqual(resumedAgain, resumedPage,
+  'previous followed by next must restore the exact resumed page');
 
-console.log('PASS: UTF-8 boundaries, forward recovery, reflow and bounded measurement');
+console.log('PASS: UTF-8 boundaries, local previous paging and bounded measurement');

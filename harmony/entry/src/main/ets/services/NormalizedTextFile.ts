@@ -96,6 +96,43 @@ export class NormalizedTextFile {
     };
   }
 
+  async readWindowBefore(endByte: number, maxBytes: number):
+    Promise<TextWindow> {
+    if (!Number.isInteger(endByte) || endByte < 0 ||
+        endByte > this.byteLength || !Number.isInteger(maxBytes) ||
+        maxBytes < 1) {
+      throw new Error('Invalid preceding text window range');
+    }
+    const boundedBytes = Math.min(maxBytes, 64 * 1024, endByte);
+    if (boundedBytes === 0) {
+      return { startByte: 0, endByte: 0, text: '' };
+    }
+    const rawStartByte = endByte - boundedBytes;
+    const bytes = await this.readBytesAt(rawStartByte, boundedBytes);
+    if (bytes.length !== boundedBytes) {
+      throw new Error('Preceding text window ended before its byte boundary');
+    }
+
+    let leadingBytes = 0;
+    while (leadingBytes < bytes.length && isContinuation(bytes[leadingBytes])) {
+      leadingBytes++;
+    }
+    if (leadingBytes > 3) {
+      throw new Error('Invalid UTF-8 preceding text window');
+    }
+    const startByte = rawStartByte + leadingBytes;
+    const decoded = decodeUtf8(bytes, leadingBytes,
+      bytes.length - leadingBytes);
+    if (startByte + decoded.byteLength !== endByte) {
+      throw new Error('Preceding text window does not end on a UTF-8 boundary');
+    }
+    return {
+      startByte: startByte,
+      endByte: endByte,
+      text: decoded.text
+    };
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;

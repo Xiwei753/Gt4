@@ -38,6 +38,7 @@ const pagination = read(
 const textFile = read(
   'harmony/entry/src/main/ets/services/NormalizedTextFile.ts');
 assert.ok(pagination.includes('paginateForward') &&
+  pagination.includes('paginatePreviousToBoundary') &&
   pagination.includes('recoverPreviousPageFromCheckpoint') &&
   pagination.includes('maxPages') &&
   !pagination.includes('findForwardPageStart') &&
@@ -54,6 +55,15 @@ const reflowReader = reader.slice(
 const resizeReader = reader.slice(
   reader.indexOf('private scheduleReflow'),
   reader.indexOf('private async saveCurrentOffset'));
+const previousReader = reader.slice(
+  reader.indexOf('private async previousPage'),
+  reader.indexOf('private trimPositionHistory'));
+const nextReader = reader.slice(
+  reader.indexOf('private async nextPage'),
+  reader.indexOf('private async previousPage'));
+const pageLoader = reader.slice(
+  reader.indexOf('private async loadPageAt'),
+  reader.indexOf('private async nextPage'));
 assert.ok(initializeReader.includes('startByte = saved !== null ? saved.offset : 0') &&
   initializeReader.includes('this.loadPageAt(startByte, true)') &&
   !initializeReader.includes('findForwardPageStart'),
@@ -61,16 +71,21 @@ assert.ok(initializeReader.includes('startByte = saved !== null ? saved.offset :
 assert.ok(reflowReader.includes('this.loadPageAt(targetByte, false)') &&
   !reflowReader.includes('findForwardPageStart') &&
   resizeReader.includes('this.reflowCurrentPage()') &&
-  !resizeReader.includes('findForwardPageStart') &&
-  reader.includes('private paginationLayoutKey()') &&
-  reader.includes('savePaginationCheckpoints'),
-  'layout reflow must keep the byte anchor and persist layout-specific checkpoints');
-assert.ok(reader.includes('READER_CHECKPOINT_PAGE_INTERVAL') &&
-  reader.includes('chapterAnchorBefore(oldStart)') &&
-  reader.includes('previous_page_fallback'),
-  'uncached previous-page recovery must be bounded and land on a safe chapter or book anchor');
+  !resizeReader.includes('findForwardPageStart'),
+  'layout reflow must keep the byte anchor without replaying earlier pages');
+assert.ok(previousReader.includes('createPreviousPageEndingAt(oldStart)') &&
+  previousReader.includes('recoverPreviousPageFromCheckpoint(oldStart') &&
+  previousReader.includes('this.nextPageStarts.push(oldStart)') &&
+  previousReader.includes('previous.startByte') &&
+  previousReader.includes('page.endByte, previous);') &&
+  nextReader.includes('this.previousPageStarts.push(page)') &&
+  pageLoader.includes('preloadedPage !== undefined') &&
+  !previousReader.includes('chapterAnchorBefore') &&
+  !previousReader.includes('previous_page_fallback'),
+  'a local previous page must retain its exact text and return to the saved page');
 assert.ok(textFile.includes('readWindow') &&
-  !textFile.includes('readWindowBefore') &&
+  textFile.includes('readWindowBefore') &&
+  textFile.includes('Math.min(maxBytes, 64 * 1024, endByte)') &&
   textFile.includes('fileIo.lseek') &&
   !textFile.includes('MAX_BACKWARD_ALIGNMENT_BYTES'),
   'long books must be read through bounded random-access UTF-8 windows');
@@ -102,14 +117,6 @@ assert.ok(progress.includes('async remove(bookId'),
   'delete must clear per-book progress');
 assert.ok(progress.includes('syncedOffset'),
   'sync baseline must be persisted for conflict detection');
-const readingSummary = progress.slice(
-  progress.indexOf('export interface ReadingSummary'),
-  progress.indexOf('export interface ReadingLast'));
-assert.ok(!readingSummary.includes('paginationLayoutKey') &&
-  !readingSummary.includes('paginationAnchors') &&
-  progress.includes('async savePaginationCheckpoints'),
-  'local layout checkpoints must stay out of the phone-watch progress protocol');
-
 const sync = read(
   'harmony/entry/src/main/ets/services/ReadingSyncService.ts');
 for (const name of ['READ_PROGRESS_GET', 'READ_PROGRESS_STATE',

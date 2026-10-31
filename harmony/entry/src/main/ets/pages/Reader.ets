@@ -7,7 +7,8 @@ import { router } from '@kit.ArkUI';
 import { inputConsumer, KeyCode, KeyEvent } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BookChapter, BookMeta } from '../model/BookModels';
-import { paginateForward, ReaderTextPage, recoverPreviousPageFromCheckpoint,
+import { paginateForward, paginatePreviousToBoundary, ReaderTextPage,
+  recoverPreviousPageFromCheckpoint,
   READER_CHECKPOINT_PAGE_INTERVAL }
   from '../model/ReaderPagination';
 import { BookRepository } from '../services/BookRepository';
@@ -122,7 +123,7 @@ struct Reader {
   private volumeDownListener = (_event: KeyEvent): void => {
     this.flipPageFromVolumeKey(true, 'volume_down');
   };
-  private previousPageStarts: number[] = [];
+  private previousPageStarts: ReaderTextPage[] = [];
   private nextPageStarts: number[] = [];
   private paginationAnchors: number[] = [];
   private pagesSincePaginationAnchor: number = 0;
@@ -775,6 +776,36 @@ struct Reader {
     return page;
   }
 
+  private async createPreviousPageEndingAt(endByte: number):
+    Promise<ReaderTextPage> {
+    const textFile = this.textFile;
+    const book = this.book;
+    if (textFile === null || book === null || endByte <= 0 ||
+        endByte > book.bytes) {
+      throw new Error('Previous page boundary is unavailable');
+    }
+    let chapterStart = 0;
+    for (let i = 0; i < this.chapters.length; i++) {
+      const offset = this.chapters[i].offset;
+      if (Number.isInteger(offset) && offset >= 0 && offset < endByte &&
+          offset > chapterStart) chapterStart = offset;
+    }
+    const maxBytes = Math.min(READER_WINDOW_BYTES, endByte - chapterStart);
+    const window = await textFile.readWindowBefore(endByte, maxBytes);
+    if (window.text.length === 0 || window.endByte !== endByte) {
+      throw new Error('Previous text window is unavailable');
+    }
+    const heightPx = this.getUIContext().vp2px(this.viewportHeightVp);
+    const page = paginatePreviousToBoundary(window.text, window.startByte,
+      endByte, Math.max(1, heightPx - 1), (text: string): number =>
+        this.measureTextHeightPx(text));
+    if (page === null || page.endByte !== endByte ||
+        page.startByte < window.startByte || page.startByte >= endByte) {
+      throw new Error('Previous page pagination did not reach the current boundary');
+    }
+    return page;
+  }
+
   private measureTextHeightPx(text: string): number {
     const measured = this.getUIContext().getMeasureUtils().measureTextSize({
       textContent: text,
@@ -798,12 +829,16 @@ struct Reader {
 
   private async loadPageAt(startByte: number,
     showLoading: boolean, flipSource?: string, oldStartByte?: number,
-    oldEndByte?: number): Promise<boolean> {
+    oldEndByte?: number, preloadedPage?: ReaderTextPage): Promise<boolean> {
     const requestId = ++this.pageRequestId;
     if (showLoading) this.loading = true;
     const oldText = this.pageText;
     try {
-      const page = await this.createPageAt(startByte);
+      const page = preloadedPage !== undefined ? preloadedPage :
+        await this.createPageAt(startByte);
+      if (page.startByte !== startByte || page.endByte < startByte) {
+        throw new Error('Loaded page boundaries do not match the request');
+      }
       if (requestId !== this.pageRequestId || this.leaving) {
         if (flipSource !== undefined) {
           recordReaderDiagnostic(this.context(), 'readerFlip',
@@ -905,7 +940,7 @@ struct Reader {
         page, nextStart);
       return;
     }
-    this.previousPageStarts.push(page.startByte);
+    this.previousPageStarts.push(page);
     this.trimPositionHistory(this.previousPageStarts);
     const loaded = await this.loadPageAt(nextStart, false, source,
       page.startByte, page.endByte);
@@ -933,79 +968,38 @@ struct Reader {
       return;
     }
     const oldStart = page.startByte;
-    let previousStart = -1;
+    let previous: ReaderTextPage | null = null;
     let cameFromHistory = false;
     if (this.previousPageStarts.length > 0) {
-      previousStart = this.previousPageStarts.pop()!;
+      previous = this.previousPageStarts.pop()!;
       cameFromHistory = true;
     } else {
       const checkpoint = this.closestPaginationAnchorBefore(oldStart);
-      const previous = await recoverPreviousPageFromCheckpoint(oldStart,
-        checkpoint, (start: number): Promise<ReaderTextPage> =>
-          this.createPageAt(start), READER_CHECKPOINT_PAGE_INTERVAL);
-      if (previous === null) {
-        previousStart = this.chapterAnchorBefore(oldStart);
-        await this.loadPreviousFromFallback(source, page, oldStart,
-          previousStart);
-        return;
+      try {
+        previous = await recoverPreviousPageFromCheckpoint(oldStart,
+          checkpoint, (start: number): Promise<ReaderTextPage> =>
+            this.createPageAt(start), READER_CHECKPOINT_PAGE_INTERVAL);
+      } catch (error) {
+        previous = null;
       }
-      previousStart = previous.startByte;
+      if (previous === null) previous =
+        await this.createPreviousPageEndingAt(oldStart);
     }
+    if (previous === null) return;
     this.nextPageStarts.push(oldStart);
     this.trimPositionHistory(this.nextPageStarts);
-    const loaded = await this.loadPageAt(previousStart, false, source,
-      page.startByte, page.endByte);
+    const loaded = await this.loadPageAt(previous.startByte, false, source,
+      page.startByte, page.endByte, previous);
     if (!loaded) {
       this.nextPageStarts.pop();
-      if (cameFromHistory) this.previousPageStarts.push(previousStart);
+      if (cameFromHistory) this.previousPageStarts.push(previous);
       return;
     }
     this.status = '';
     this.saveCurrentOffset();
   }
 
-  private async loadPreviousFromFallback(source: string,
-    page: ReaderTextPage, oldStart: number, fallbackStart: number):
-    Promise<void> {
-    recordReaderDiagnostic(this.context(), 'readerFlip',
-      'previous_page_fallback', 0, {
-        source: source,
-        startByte: page.startByte,
-        endByte: page.endByte,
-        nextStartByte: fallbackStart,
-        pageRequestId: this.pageRequestId
-      });
-    if (!await this.loadPageAt(fallbackStart, false, source,
-        page.startByte, page.endByte)) {
-      this.showInputFeedback('上一页边界尚未缓存，无法回到附近位置');
-      return;
-    }
-    if (!this.paginationAnchors.includes(fallbackStart)) {
-      this.paginationAnchors.push(fallbackStart);
-      while (this.paginationAnchors.length >
-          READER_PAGINATION_CHECKPOINT_LIMIT) this.paginationAnchors.shift();
-    }
-    this.pagesSincePaginationAnchor = 0;
-    this.nextPageStarts.push(oldStart);
-    this.trimPositionHistory(this.nextPageStarts);
-    this.status = '';
-    this.saveCurrentOffset();
-    this.showInputFeedback(fallbackStart > 0 ?
-      '附近分页边界尚未缓存，已回到本章开头' :
-      '附近分页边界尚未缓存，已回到书首');
-  }
-
-  private chapterAnchorBefore(targetByte: number): number {
-    let closest = 0;
-    for (let i = 0; i < this.chapters.length; i++) {
-      const offset = this.chapters[i].offset;
-      if (Number.isInteger(offset) && offset >= 0 && offset < targetByte &&
-          offset > closest) closest = offset;
-    }
-    return closest;
-  }
-
-  private trimPositionHistory(history: number[]): void {
+  private trimPositionHistory(history: number[] | ReaderTextPage[]): void {
     while (history.length > READER_POSITION_HISTORY_LIMIT) history.shift();
   }
 
