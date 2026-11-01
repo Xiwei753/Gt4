@@ -109,12 +109,18 @@ const okWritebook = (id, title) => {
     receiver.receiveFileChannel(inboxUri, null, cb));
   assert.equal(outcome.ok, true,
     'in-flight transfer must survive the E_BUSY rejection');
-  const flow1 = sent.filter((m) =>
+  const flow1Results = sent.filter((m) =>
     m.type === 'RESULT' && m.transferId === 'flow-1');
-  assert.equal(flow1.length, 1);
-  assert.equal(flow1[0].ok, true);
+  assert.equal(flow1Results.length, 0,
+    'file channel completion must not send an application RESULT');
   const list = await wait((cb) => LibraryIndex.listBooks(cb));
-  assert.ok(list.some((e) => e.bookId === meta.bookId));
+  const imported = list.find((e) => e.bookId === meta.bookId);
+  assert.ok(imported, 'the in-flight book must be present in the library');
+  assert.equal(imported.title, meta.title);
+  assert.ok(readFileSync(sandboxFile(
+    'gt4reader/books/' + meta.bookId + '.txt'))
+    .equals(Buffer.from(bookBytes)),
+    'the committed file content must match the verified input');
   assert.ok(!list.some((e) => e.bookId === other.bookId),
     'rejected transfer must not reach the shelf');
 }
@@ -131,9 +137,18 @@ const okWritebook = (id, title) => {
     receiver.receiveFileChannel(inboxUri, null, cb));
   assert.equal(outcome.ok, true,
     're-sent META with the same transferId is an idempotent restart');
-  const results = sent.filter((m) => m.type === 'RESULT');
-  assert.equal(results.length, 1);
-  assert.equal(results[0].ok, true);
+  const successResults = sent.filter((m) => m.type === 'RESULT' &&
+    m.transferId === 'flow-1' && m.ok === true);
+  assert.equal(successResults.length, 0,
+    'file channel import success must remain local to the watch');
+  const list = await wait((cb) => LibraryIndex.listBooks(cb));
+  const imported = list.find((e) => e.bookId === meta.bookId);
+  assert.ok(imported, 'restarted transfer must remain in the library');
+  assert.equal(imported.title, meta.title);
+  assert.ok(readFileSync(sandboxFile(
+    'gt4reader/books/' + meta.bookId + '.txt'))
+    .equals(Buffer.from(bookBytes)),
+    'restarted transfer must preserve the full book content');
 }
 
 // ---- P0-2: 文件路径字段探测 ----
