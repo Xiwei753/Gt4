@@ -211,8 +211,9 @@ WATCH_BOOKS_DIR=/绝对路径/我的书 tools/build_watch_lite.sh debug
 - **长章节目录不能撑爆 4096 字节消息**：Wear Engine P2P 单条 JSON 控制消息上限 4096 字节。
   `BOOK_META` 能装下完整 `chapters` 时保持旧格式；装不下时改为空 `chapters` +
   `chapterChunks`，随后逐条发送 `CHAPTERS`（每条按真实 UTF-8 字节分片，≤4096），再传正文。
-  手机 Harmony/Android 两侧发送、手表按 index 幂等收集，缺片报 `E_MISSING_CHAPTERS`；
-  旧手机/旧手表只带完整目录时仍按原协议工作，不会截断章节或改走第二套正文通道。
+  手机 Harmony/Android 两侧发送、手表按 index 幂等收集；目录缺片或校验失败时仅丢弃目录，
+  正文仍单独校验大小和 SHA-256 后入库，缺失目录不会阻断阅读。完整目录才用于章节跳转；
+  旧手机/旧手表只带完整目录时仍按原协议工作，不会截断正文或改走第二套正文通道。
 - **冷启动续读**：`ProgressStore` 另存一个 16 字符 `suyue.last` 键；每本书的真实位置仍是
   `suyue.pos.<bookId>`，不复制进度。书架先同步渲染，再异步读取上次书籍：书还存在且可打开
   才自动进入阅读页；被删除、索引不可用或读取超时则留在书架。显式返回书架会带

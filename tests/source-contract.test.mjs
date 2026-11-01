@@ -72,9 +72,7 @@ const phoneIndexFull = read('harmony/entry/src/main/ets/pages/Index.ets');
 assert.ok(phoneIndexFull.includes('listDevices'),
   'phone index must discover devices');
 assert.ok(phoneIndexFull.includes('registerMessageReceiver'),
-  'phone index must register for watch RESULT');
-assert.ok(phoneIndexFull.includes('RESULT'),
-  'phone must wait for watch RESULT receipt');
+  'phone index must register for watch progress-sync messages');
 assert.ok(phoneIndexFull.includes('transferService'),
   'phone index must use BookTransferService');
 // issue #6 P0-B：设备发现由用户主动刷新；UI 不为失败自动重试。
@@ -187,13 +185,13 @@ assert.ok(readerSettingsHml.includes('openChapters') &&
   readerSettingsHml.includes('<list class="chapter-list"') &&
   readerSettingsHml.includes('<list-item class="chapter-item"') &&
   readerSettingsHml.includes('for="{{ chapterRows }}"') &&
-  readerSettingsHml.includes('chapterWindowNext') &&
+  !readerSettingsHml.includes('chapterWindowNext') &&
   readerSettingsHml.includes('previousChapter') &&
   readerSettingsHml.includes('nextChapter'),
-  'settings must expose a bounded Lite list panel with window + chapter navigation');
-assert.ok(watchReader.includes('chapterWindow(this.chapters') &&
-  watchReader.includes('chapterWindowNext()'),
-  'chapter panel must keep an independent bounded browse window');
+  'settings must expose a scrolling full chapter list without group navigation');
+assert.ok(watchReader.includes('chapterListRows(this.chapters') &&
+  !watchReader.includes('chapterWindowNext()'),
+  'chapter panel must pass every chapter to the native scrolling list');
 const chapterCss = read(
   'watch/huawei/watch-lite/entry/src/main/js/MainAbility/pages/reader/reader.css');
 assert.ok(/\.chapter-list\s*\{[^}]*height:/.test(chapterCss) &&
@@ -519,48 +517,46 @@ assert.ok(importService.includes('detectTxtChapters'),
 assert.ok(read('android/app/src/main/java/com/xiwei/suyue/importer/TxtImportService.kt')
   .includes('detectChapters'),
   'Android TXT import must detect chapter byte ranges (issue #17)');
-// issue #17 review：Wear Engine 单条消息 4096 字节，长章节目录必须分片；
-// 两端发送方 + 手表接收方使用同一 CHAPTERS 协议。
+// issue #27 review：Wear Engine 单条消息 4096 字节，长章节目录分片后
+// 尽力发送；文件通道不等待章节 ACK 或手表 RESULT。
 const watchTransferLogic = read(
   'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/TransferLogic.js');
 assert.ok(watchTransferLogic.includes('applyChapterChunk') &&
   watchTransferLogic.includes('assembleChapters') &&
   watchTransferLogic.includes('E_MISSING_CHAPTERS'),
-  'watch receiver must assemble CHAPTERS chunks before FINISH/file commit');
+  'watch receiver must validate complete chapter catalogs when available');
 const chapterReceiver = read(
   'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/IncomingBookReceiver.js');
 assert.ok(chapterReceiver.includes("case 'CHAPTERS'") &&
-  chapterReceiver.includes("type: 'CHAPTERS_ACK'") &&
-  chapterReceiver.includes('missingChapterIndices(state)'),
-  'watch receiver must handle CHAPTERS messages');
+  chapterReceiver.includes('missingChapterIndices(state)') &&
+  chapterReceiver.includes('chapterCatalogInvalid = true') &&
+  !chapterReceiver.includes('CHAPTERS_ACK'),
+  'watch must treat an incomplete chapter catalog as optional body metadata');
 const phoneTransfer = read(
   'harmony/entry/src/main/ets/services/BookTransferService.ts');
-const transferWaiters = read(
-  'harmony/entry/src/main/ets/services/TransferWaiters.js');
 const readerDiagnostics = read(
   'harmony/entry/src/main/ets/services/ReaderDiagnostics.ts');
-assert.ok(phoneTransfer.includes('beginChapterAck(') &&
-  phoneTransfer.includes('deliverChapterAck(message)') &&
-  transferWaiters.includes('deliverChapterAck: function') &&
-  transferWaiters.includes('E_CHAPTERS_ACK_TIMEOUT') &&
-  phoneTransfer.includes('sendThenAwaitChapterAck(') &&
-  !phoneTransfer.includes('Promise.race') &&
-  phoneTransfer.includes('notifyRemoteCancellation(transferId)'),
-  'phone must wait for a matching application-level chapter ACK before file transfer');
+assert.ok(phoneTransfer.includes('splitChapterChunks') &&
+  phoneTransfer.includes('await this.transferFile(') &&
+  phoneTransfer.includes('手表侧校验和入库未确认') &&
+  !phoneTransfer.includes('CHAPTERS_ACK') &&
+  !phoneTransfer.includes('RESULT') &&
+  !phoneTransfer.includes('TransferWaiters'),
+  'phone completion must follow transferFile and never wait for watch ACK/RESULT');
 assert.ok(phoneIndexFull.includes('onChapterChunk:') &&
   phoneIndexFull.includes('chapterIndex: index') &&
   readerDiagnostics.includes('chapterIndex?: number') &&
   readerDiagnostics.includes("details.chapterStatus === 'send_failed'"),
-  'per-chunk phone outcomes must enter the bounded exportable diagnostics');
+  'optional chapter-send outcomes must enter bounded diagnostics');
 assert.ok(read('harmony/entry/src/main/ets/services/BookTransferService.ts')
   .includes('splitChapterChunks') &&
   read('android/app/src/main/java/com/xiwei/suyue/wear/BookTransferService.kt')
     .includes('ChapterChunks.split'),
   'both phone senders must chunk long chapter catalogs');
 assert.ok(read('protocol/README.md').includes('chapterChunks') &&
-  read('protocol/README.md').includes('E_MISSING_CHAPTERS') &&
-  read('protocol/README.md').includes('CHAPTERS_ACK'),
-  'protocol must document 4096-byte chapter chunking');
+  read('protocol/README.md').includes('目录不完整时正文仍可入库') &&
+  !read('protocol/README.md').includes('CHAPTERS_ACK'),
+  'protocol must document optional 4096-byte chapter chunking');
 
 // P0-4：摘要必须对 normalized 字节计算，
 // 且写后复核。
@@ -596,9 +592,9 @@ assert.ok(incomingReceiver.includes('verifyFile('),
 assert.ok(incomingReceiver.includes('deleteFile('),
   'file channel must clean up on failure');
 
-// P0-6：RESULT 必须经 wearengine.sendMsg 回手机。
+// 旧式消息通道回复与阅读进度共用 wearengine.sendMsg；文件通道不等 RESULT。
 assert.ok(watchReceiver.includes('wearengine.sendMsg'),
-  'watch must send RESULT via wearengine.sendMsg');
+  'watch must retain the shared message response channel');
 assert.ok(incomingReceiver.includes('sendToPhone'),
   'receiver must have a phone response channel');
 assert.ok(!incomingReceiver.includes('reply('),
@@ -647,8 +643,12 @@ const wearDeviceCode = read('harmony/entry/src/main/ets/services/WearDeviceServi
 assert.ok(wearDeviceCode.includes('registered.appParam, registered.callback'),
   'unsubscribe must reuse the registered appParam and callback');
 const phoneShelf = read('harmony/entry/src/main/ets/pages/Index.ets');
-assert.ok(phoneShelf.includes('this.receiverReady'),
-  'sending must be disabled if RESULT receiver registration failed');
+assert.ok(!phoneShelf.slice(phoneShelf.indexOf('private canSend'),
+    phoneShelf.indexOf('private canTransferBook')).includes('receiverReady') &&
+  phoneShelf.includes('private syncReadingProgress') &&
+  phoneShelf.slice(phoneShelf.indexOf('private syncReadingProgress'),
+    phoneShelf.indexOf('private findBook')).includes('receiverReady'),
+  'book file sending must not depend on the optional progress-sync receiver');
 assert.ok(phoneShelf.includes('private canTransferBook(') &&
   phoneShelf.includes('BookStatus.SENT') &&
   phoneShelf.includes('BookStatus.TRANSFER_FAILED') &&
@@ -718,16 +718,15 @@ assert.ok(!transferService.includes(
   '} finally {\n              try {\n                fs.closeSync'),
   'transferFile must not close on every progress callback');
 
-// P1-10 / 第二轮 P0-3：RESULT waiter 在每个重试轮次
-// 重新注册，且注册先于任何发送。
+// issue #27: file-channel completion is the only phone-side success boundary.
 const sendBookBody = transferService.slice(
   transferService.indexOf('async sendBook'));
-assert.ok(sendBookBody.indexOf('waiters.beginAttempt') <
-  sendBookBody.indexOf('sendMessage'),
-  'waiter must be registered before any send');
-assert.ok(sendBookBody.indexOf('markUploaded') >
-  sendBookBody.indexOf('transferFile'),
-  'result timeout must start only after upload completes');
+assert.ok(sendBookBody.includes('await this.transferFile(') &&
+  sendBookBody.includes("progress.state = TransferState.SUCCEEDED") &&
+  !sendBookBody.includes('waiters.') &&
+  !sendBookBody.includes('CHAPTERS_ACK') &&
+  !sendBookBody.includes('RESULT'),
+  'file-transfer success must not wait on an application acknowledgment');
 
 // P1-11：流式 SHA-256 与导入上限。
 const sha256Module = read(
@@ -917,14 +916,11 @@ assert.ok(transferLogicSrc().includes("'E_BUSY'"),
 assert.ok(read('protocol/README.md').includes('E_BUSY'),
   'protocol spec must document E_BUSY');
 
-// P0-3：waiter 纯逻辑模块 + 取消接真实 SDK。
-assert.ok(existsSync(
-  'harmony/entry/src/main/ets/services/TransferWaiters.js'),
-  'waiter registry module must exist');
-assert.ok(transferService.includes('createWaiterRegistry'),
-  'send service must use the waiter registry');
-assert.ok(transferService.includes('UPLOAD_TIMEOUT_MS'),
-  'upload timeout must be separate from the result timeout');
+// 取消接真实 SDK；不再注册应用层回执 waiter。
+assert.ok(!existsSync(
+  'harmony/entry/src/main/ets/services/TransferWaiters.js') &&
+  !transferService.includes('createWaiterRegistry'),
+  'transfer sender must not have an ACK/RESULT waiter registry');
 assert.ok(transferService.includes('cancelFileTransfer'),
   'cancel must call the real SDK cancelFileTransfer');
 assert.ok(transferService.includes("code: 'E_CANCELLED'"),

@@ -45,14 +45,6 @@ assert.ok(chaptersExample.index >= 0);
 assert.ok(chaptersExample.total > chaptersExample.index);
 assert.ok(chaptersExample.chapters.length > 0);
 assert.ok(Buffer.byteLength(JSON.stringify(chaptersExample), 'utf8') <= 4096);
-const chaptersAck = JSON.parse(
-  readFileSync(new URL('chapters-ack.json', EXAMPLES), 'utf8'));
-assert.equal(chaptersAck.type, 'CHAPTERS_ACK');
-assert.equal(chaptersAck.bookId, chaptersExample.bookId);
-assert.equal(chaptersAck.transferId, chaptersExample.transferId);
-assert.equal(chaptersAck.index, chaptersExample.index);
-assert.equal(chaptersAck.total, chaptersExample.total);
-assert.equal(typeof chaptersAck.ok, 'boolean');
 // BOOK_META 示例：chapters 区间必须覆盖 bytes。
 const metaExample = JSON.parse(
   readFileSync(new URL('book-meta.json', EXAMPLES), 'utf8'));

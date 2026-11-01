@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// issue #17：手表章节索引的字节边界、乱序/越界防御与有界窗口。
+// issue #17：手表章节索引的字节边界、乱序/越界防御与完整目录。
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,13 +49,14 @@ try {
   assert.equal(Ch.chapterLabel(chapters, 1), '第二章');
   assert.equal(Ch.chapterLabel(chapters, 99), '第 3 章');
 
-  const rows = Ch.chapterRows(chapters, 1, 1);
+  const rows = Ch.chapterListRows(chapters, 1);
   assert.deepEqual(rows.map((r) => r.index), [0, 1, 2]);
   assert.deepEqual(rows.map((r) => r.current), [false, true, false]);
-  assert.equal(Ch.chapterRows(chapters, 1, 99).length, 3,
-    'UI rows must be bounded by actual chapter count');
+  assert.equal(rows[1].label, '▶ 第二章');
+  assert.deepEqual(Ch.chapterListRows([], 0), [],
+    'empty chapter lists stay empty');
 
-  console.info('PASS: 章节字节索引、排序/越界防御与有界窗口（issue #17）');
+  console.info('PASS: 章节字节索引、排序/越界防御与完整目录（issue #17）');
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }

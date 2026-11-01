@@ -3,7 +3,8 @@
 议题 #3 交付物：在 **nova 7 Pro 等 Android / HMS 手机**上运行的原生 APK，
 角色与 `harmony`（HarmonyOS NEXT）相同——都是「手机」端：
 选择 TXT/EPUB → 解析、规范化 UTF-8 → 经 **官方 Android Wear Engine SDK**
-发给 **HUAWEI WATCH GT 4 46 mm** → 以 GT 4 回 `RESULT ok=true` 作为入库成功。
+发给 **HUAWEI WATCH GT 4 46 mm**。发送完成表示 `transferFile` 回调成功，
+不代表手表已校验或入库。
 
 > 一部 nova 7 Pro 同时安装：**Huawei Health** + **应用调测助手（DevEco Assistant）** + **素阅 APK**，
 > 即可在不借助 Pocket 2 的情况下完成「选书 → 传书 → GT 4 确认」。
@@ -46,7 +47,7 @@ android/
       wear/PeerIdentity.kt             包名 + 指纹读取 + 本机签名指纹
       wear/PeerIdentityConfig.kt       指纹注入占位（构建期注入，构建后还原）
       wear/WearEngineGateway.kt        官方 SDK 封装（权限/设备/ping/收发/监听）
-      wear/BookTransferService.kt      协议 v0 发送状态机 + 回执校验
+      wear/BookTransferService.kt      协议 v0 发送状态机 + 文件回调结果处理
 ```
 
 ## 构建
@@ -70,8 +71,9 @@ tools/build_android_apk.sh release   # 需签名环境变量，见下
 cd android && ./gradlew :app:testDebugUnitTest
 ```
 
-覆盖：回执关联（`ReceiptMatcher`，串号/错书/迟到/重复/失败）、可发送状态（`SendPolicy`，含重发）、
-严格编码解码（`TextDecodeService`，UTF-8/GBK/BOM/非法字节）。
+Gradle 单元测试覆盖：可发送状态（`SendPolicy`）和严格编码解码
+（`TextDecodeService`，UTF-8/GBK/BOM/非法字节）。协议脚本
+`tests/android-protocol.test.mjs` 静态核对文件发送完成边界。
 
 ### CI
 
@@ -119,10 +121,10 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 2. 手机装 HMS Core + Huawei Health。
 3. AGC 应用已申请「Wear Engine 服务」并登记本 App 的正式签名指纹。
 4. App 内：请求授权 → 列出手表（不默认第一台，必须手动选择）→ 发送。
-5. 发送序列：`HELLO → BOOK_META → 文件通道正文 → 等待手表 RESULT`；
-   **只有 `RESULT ok=true` 才算入库**（发送回调成功不算）。
-6. 取消：本地停等 + 向手表发 `ERROR/E_CANCELLED`（Android SDK 无 `cancelFileTransfer`，
-   半成品由手表侧失败清理路径删除）。
+5. 发送序列：`HELLO → BOOK_META → 可选 CHAPTERS 目录 → 文件通道正文`；
+   `transferFile` 回调成功后只报告“文件已发送，手表侧校验/入库未确认”。
+6. 取消：向手表发 `ERROR/E_CANCELLED`（Android SDK 无 `cancelFileTransfer`，
+   不能中断已发出的文件流）。
 
 ### 常见错误码（`WearEngineErrorCode`）
 

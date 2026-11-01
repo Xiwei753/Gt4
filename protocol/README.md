@@ -16,8 +16,8 @@
   见“通道选型”）或消息通道（base64）。
 - 接收方对同 `transferId + index` 的重复 `CHUNK` 幂等确认
   （重复 ACK 同一 `index`，不重复落盘）。
-- 收到全部块且整本 `sha256` 校验通过后，才把临时文件转为正式书籍。
-- 成功以手表回 `RESULT ok=true` 为准；手机侧传输回调不是成功依据。
+- 收到文件后，手表校验字节数和整本 `sha256`，通过后才把临时文件转为正式书籍。
+- 当前文件通道的手机侧成功表示 Wear Engine `transferFile` 回调成功；这只证明文件已发送，不证明手表已校验或入库。
 
 ## 通道选型（先测量，再定默认）
 
@@ -43,11 +43,11 @@
 - 整本正文：`p2pClient.transferFile(device.randomId,
   appParam, P2pFile{file: fs.openSync(path)},
   (error, result) => …)`，回调 `result.progress`
-  上报进度；**回调成功不等于入库成功**，必须等
-  手表 `RESULT`。
-- 回执接收：`p2pClient.registerMessageReceiver(
-  device.randomId, appParam, callback)`，
-  手表的 RESULT/ACK 经此回到手机。
+  上报进度；`COMMUNICATION_SUCCESS` 表示文件已发送，手表侧
+  校验与入库结果未知，手机不得显示“手表已确认入库”。
+- 消息接收：`p2pClient.registerMessageReceiver(
+  device.randomId, appParam, callback)`，当前供阅读进度同步和旧式
+  消息通道 ACK 使用；文件通道不等待 `RESULT`。
 - 取消：`p2pClient.cancelFileTransfer(
   device.randomId, appParam, P2pFile)` 返回
   `Promise<P2pResult>`（比较
@@ -66,13 +66,12 @@
   候选字段 `file`/`name`/`uri`/`filePath`（上游示例用
   `data.file`，**以真机回调实测为准**）；收到后
   复制入沙箱、按片校验整本 SHA-256 再入库；
-- 回执发送：`wearengine.sendMsg({deviceId, bundleName:
-  <手机包名>, abilityName: '', message})`。**`deviceId: 'remote'
-  是照上游 Lite 示例写的占位回退值，从未在真机确认过**：
-  实现会先从订阅回调里探测真实 `deviceId`
-  （候选字段 `deviceId`/`deviceID`/`srcDeviceId`/`srcDeviceID`），
-  取到就用真值；取不到才回退并 `console.warn` 一次，
-  日志里能看出这条回执走的是未验证路径。
+- 可选的反向消息发送：`wearengine.sendMsg({deviceId, bundleName:
+  <手机包名>, abilityName: '', message})`。手表按 Lite Wear Engine
+  示例使用 `deviceId: 'remote'`；如果 `subscribeMsg` 回调提供
+  `deviceId`（候选字段 `deviceId`/`deviceID`/`srcDeviceId`/
+  `srcDeviceID`），实现优先使用回调值。文件通道不依赖这条反向消息，
+  手机只以 `transferFile` 成功回调报告文件已发送。
 - Manifest 授权：`config.json` 的
   `metaData.customizeData[supportLists]` 必须为
   `<手机包名>:<手机 APP ID>`（HarmonyOS 5.0+ 手机原生应用用
@@ -103,16 +102,17 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 | sha256 | string | 是 | 规范化后正文的 SHA-256（hex 小写，64 字符） |
 | chunks | number | 是 | 块总数（≥1） |
 | chunkBytes | number | 是 | 本传输使用的块字节大小 |
-| chapters | array | 是 | `[{title, offset, length}]`，字节区间，按序。分片模式下为空数组 |
-| chapterChunks | number | 否 | 长目录分片数；缺省/0 表示 `chapters` 已完整 |
+| chapters | array | 否 | `[{title, offset, length}]`，字节区间，按序。分片模式下为空数组；缺失或无效目录不影响正文传输 |
+| chapterChunks | number | 否 | 长目录分片数；缺省/0 表示内嵌目录完整；正数表示目录以 `CHAPTERS` 分片补充 |
 
 ### CHAPTERS（手机 → 表，可选）
 
-`BOOK_META.chapterChunks > 0` 时，手机在 BOOK_META 之后、正文文件/CHUNK
-之前按 `index` 逐片发送章节目录，并等待每片对应的 `CHAPTERS_ACK` 后
-才发送下一片。Wear Engine 的 `sendMessage` 成功不代表手表应用已接收。
+`BOOK_META.chapterChunks > 0` 时，手机在 BOOK_META 之后、正文文件之前
+按 `index` 逐片发送章节目录。手机等待每条 Wear Engine `sendMessage`
+调用完成以保持消息顺序，但不等待手表应用层 ACK；之后继续发送正文文件。
 每片的完整 JSON（UTF-8）必须 ≤4096 字节；发送方按实际序列化字节数
-分片，不得按固定章节数猜测。所有章节片 ACK 成功后才可启动文件通道。
+分片，不得按固定章节数猜测。目录片发送失败或手表收到的目录不完整时，
+手表丢弃整份目录，正文仍可通过大小和 SHA-256 校验后入库。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -121,26 +121,8 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 | total | number | 是 | 分片总数，须等于 BOOK_META.chapterChunks |
 | chapters | array | 是 | 本片 `[{title, offset, length}]`，非空 |
 
-接收方按 index 收集（重复片幂等），全部到齐后按序拼成完整章节目录；
-缺片时 FINISH/文件通道返回 `E_MISSING_CHAPTERS`，不得把半份目录入库。
-旧手机不发 CHAPTERS、旧手表忽略 `chapterChunks` 时，正文仍可正常传输。
-
-### CHAPTERS_ACK（表 → 手机）
-
-每个 CHAPTERS 收到并通过应用层校验后，手表经已有回调消息通道回一条：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| bookId / transferId | string | 是 | 必须匹配当前传输 |
-| index / total | number | 是 | 与对应 CHAPTERS 完全一致 |
-| ok | boolean | 是 | 分片已接收并纳入当前目录；重复分片也返回 true |
-| received | number | 否 | 手表当前已收到的不同分片数 |
-| duplicate | boolean | 否 | true 表示这是已收分片的幂等确认 |
-| reason | string | 拒收时必填 | 如 `E_PROTOCOL` |
-
-手机只接受匹配当前 transferId/bookId/index/total 的 ACK。等待超时为
-10 秒，当前传输失败并清理 waiter；不自动重发分片。取消也会清理等待，
-迟到或错配 ACK 不会推进传输。
+接收方按 index 收集（重复片幂等），全部到齐且范围顺序有效后才会把
+完整目录交给书架；目录不完整时正文仍可入库，但书架目录留空。
 
 ### CHUNK（手机 → 表）
 
@@ -205,8 +187,6 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 | E_TIMEOUT | 块超时未达 |
 | E_DIGEST_MISMATCH | 整本或块摘要不符 |
 | E_MISSING_CHUNKS | FINISH 时仍有缺块 |
-| E_MISSING_CHAPTERS | 长章节目录分片未到齐 |
-| E_CHAPTERS_ACK_TIMEOUT | 手机等待手表应用确认目录分片超时 |
 | E_DUPLICATE_TRANSFER | 同一 transferId 重复开始且状态不一致 |
 | E_CANCELLED | 发送方取消 |
 | E_PEER_UNAVAILABLE | 对端未配对/离线/不支持 |
@@ -232,15 +212,14 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 手机 → 表  HELLO（capabilities，含 chunkBytes/fileChannel）
 表 → 手机 HELLO（capabilities 回应）
 手机 → 表  BOOK_META
-手机 → 表  CHAPTERS[index]
-表 → 手机  CHAPTERS_ACK[index]
-             （长目录时逐片确认后再发下一片；每片 ≤4096 字节）
-手机 → 表  CHUNK × N        （每块到达后）
-表 → 手机 ACK {index, ok}
-手机 → 表  FINISH
-表       校验 sha256 → 临时文件转正
-表 → 手机 RESULT {ok, reason?}
+手机 → 表  CHAPTERS[index]（可选；每片 ≤4096 字节，不等待应用 ACK）
+手机 → 表  transferFile(整本正文)
+表       校验文件大小 + sha256 → 完整目录（若可用）+ 正文入库
+手机     transferFile 回调成功后显示“文件已发送；手表侧校验/入库未确认”
 ```
+
+旧式 `CHUNK` / `FINISH` 消息通道仍使用 `ACK` / `RESULT`；这不是当前
+文件通道发送方的完成条件。
 
 ## 接收方约束
 

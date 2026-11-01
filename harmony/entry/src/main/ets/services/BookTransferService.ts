@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // 手机侧书籍发送：按 protocol v0 序列
-// HELLO → BOOK_META →（长目录时 CHAPTERS 分片）→ 文件通道 transferFile →
-// 等待手表 RESULT。
+// HELLO → BOOK_META →（长目录时尽力发送 CHAPTERS 分片）→ 文件通道 transferFile。
 //
 // 关键约束（协议 + 施工单）：
-//   - 成功以手表回 RESULT ok=true 为准，
-//     不以 transferFile 回调成功为准；
+//   - 成功表示 Wear Engine transferFile 回调成功送达文件，
+//     不代表手表已校验或入库；
 //   - 目标设备由用户选择，不默认第一台；
 //   - 同一时刻只允许一本在途（手表侧单本
 //     互斥，第二个 META 返回 E_BUSY）；
-//   - 每次发送建立一次 waiter，上传与 RESULT 分开计时；
 //   - 取消接真实 SDK：cancelFileTransfer +
 //     向手表发 ERROR/E_CANCELLED（第二轮 P1-7）；
-//   - 任一阶段失败就终止，重发必须由用户再次点击。
+//   - 必需阶段失败就终止且不自动重发；可选目录发送失败不阻断正文。
 // API 形状以华为 Wear Engine 指南为准，
 // 当前未在真机验证（待验证）。
 import { wearEngine } from '@kit.WearEngine';
@@ -22,12 +20,8 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
 import { BookMeta } from '../model/BookModels';
 import { TransferProgress, TransferState,
-  TargetDevice, CHAPTER_ACK_TIMEOUT_MS, RESULT_TIMEOUT_MS,
-  UPLOAD_TIMEOUT_MS,
-  newTransferId } from '../model/TransferModels';
+  TargetDevice, newTransferId } from '../model/TransferModels';
 import { WearDeviceService } from './WearDeviceService';
-import { createWaiterRegistry,
-  sendThenAwaitChapterAck } from './TransferWaiters';
 import { splitChapterChunks, MAX_MESSAGE_BYTES,
   CHAPTER_TOO_LARGE } from '../model/ChapterChunks';
 
@@ -36,8 +30,7 @@ const TAG = 'suyue/BookTransferService';
 export interface TransferCallbacks {
   onProgress: (progress: TransferProgress) => void;
   onChapterChunk?: (index: number, total: number,
-    result: 'sent' | 'ack' | 'timeout' | 'rejected' |
-      'send_failed') => void;
+    result: 'sent' | 'send_failed') => void;
 }
 
 // 在途传输的运行态：取消时需要同一个
@@ -54,14 +47,6 @@ export class BookTransferService {
   private deviceService: WearDeviceService;
   private context: Context;
   private encoder: util.TextEncoder;
-  // P0-3：waiter 注册表（纯逻辑模块，Node 可测）。
-  private waiters = createWaiterRegistry({
-    setTimeout: setTimeout,
-    clearTimeout: clearTimeout,
-    uploadTimeoutMs: UPLOAD_TIMEOUT_MS,
-    resultTimeoutMs: RESULT_TIMEOUT_MS,
-    chapterAckTimeoutMs: CHAPTER_ACK_TIMEOUT_MS
-  });
   private cancelled = new Set<string>();
   // 当前在途传输（单本互斥）。
   private inFlight: InFlightTransfer | null = null;
@@ -74,46 +59,15 @@ export class BookTransferService {
     this.encoder = new util.TextEncoder();
   }
 
-  // 手表回执入口：页面层把 Wear Engine 消息
-  // 回调路由到这里。
-  onMessageFromWatch(content: Uint8Array): void {
-    const text = new util.TextDecoder()
-      .decodeToString(content);
-    let message;
-    try {
-      message = JSON.parse(text);
-    } catch (e) {
-      hilog.warn(0x0000, TAG, 'non-protocol message');
-      return;
-    }
-    if (message.v !== 0) {
-      return;
-    }
-    if (message.type === 'CHAPTERS_ACK') {
-      this.waiters.deliverChapterAck(message);
-      return;
-    }
-    if (message.type !== 'RESULT') return;
-    // deliver：缓存回执并唤醒当前轮次；迟到
-    // 回执只入缓存，不丢失（P0-3）。
-    this.waiters.deliver(message);
-  }
-
-  getReceipt(transferId: string):
-  { ok: boolean; reason?: string } | undefined {
-    return this.waiters.receipt(transferId);
-  }
-
   isSending(): boolean {
     return this.inFlight !== null;
   }
 
-  // 取消（P1-7）：本地等待立即结束 + 真实
-  // SDK cancelFileTransfer + 通知手表清理。
+  // 取消（P1-7）：调用真实 SDK cancelFileTransfer
+  // 并通知手表清理。
   // 半成品由手表侧的失败清理路径删除。
   async cancel(transferId: string): Promise<void> {
     this.cancelled.add(transferId);
-    this.waiters.fail(transferId, 'E_CANCELLED');
     const flight = this.inFlight;
     if (!flight || flight.transferId !== transferId) {
       return;
@@ -178,10 +132,10 @@ export class BookTransferService {
       'sendMessage %{public}s result=%{public}s',
       label, result && result.code !== undefined ?
         String(result.code) : 'undefined');
-    if (result && result.code !== undefined &&
-        result.code !==
-          wearEngine.P2pResultCode.COMMUNICATION_SUCCESS) {
-      throw new Error('sendMessage code ' + result.code);
+    if (!result || result.code !==
+        wearEngine.P2pResultCode.COMMUNICATION_SUCCESS) {
+      throw new Error('sendMessage code ' +
+        (result && result.code !== undefined ? result.code : 'unknown'));
     }
   }
 
@@ -282,7 +236,7 @@ export class BookTransferService {
   }
 
   private finishTransfer(transferId: string): void {
-    this.waiters.end(transferId);
+    this.cancelled.delete(transferId);
     if (this.inFlight &&
         this.inFlight.transferId === transferId) {
       this.inFlight = null;
@@ -370,7 +324,6 @@ export class BookTransferService {
       this.update(callbacks, progress);
       return false;
     }
-    const resultPromise = this.waiters.beginAttempt(transferId);
     let remoteMayHaveTransfer = false;
     try {
         // HELLO
@@ -387,9 +340,9 @@ export class BookTransferService {
         }, 'HELLO');
 
         // BOOK_META：章节索引可能很长（100~500 章），单条消息超过
-        // Wear Engine 的 4096 字节上限会导致整本传书在正文前失败。
-        // 能放下时保持旧协议；放不下时 BOOK_META 只带 chapterChunks，
-        // 随后逐条发送 CHAPTERS，再进入正文文件通道。
+        // Wear Engine 的 4096 字节上限时用 CHAPTERS 分片补充目录。
+        // 目录是可选元数据；每片只等待 SDK sendMessage 完成，不等待
+        // 手表应用回执。即使目录片发送失败，仍继续发送正文文件。
         const metaPayload = {
           v: 0, type: 'BOOK_META',
           transferId: transferId,
@@ -410,6 +363,7 @@ export class BookTransferService {
         const fullMetaBytes = this.encoder.encodeInto(
           JSON.stringify(metaPayload)).length;
         let chapterGroups: unknown[][] = [];
+        let chapterCatalogOmitted = false;
         if (fullMetaBytes > MAX_MESSAGE_BYTES) {
           try {
             chapterGroups = splitChapterChunks(book.chapters,
@@ -422,20 +376,21 @@ export class BookTransferService {
           } catch (error) {
             if (error instanceof Error &&
                 error.message === CHAPTER_TOO_LARGE) {
-              this.finishTransfer(transferId);
-              progress.state = TransferState.FAILED;
-              progress.error = CHAPTER_TOO_LARGE;
-              progress.message = '章节标题过长，无法发送';
-              this.update(callbacks, progress);
-              return false;
+              chapterCatalogOmitted = true;
+              chapterGroups = [];
+              hilog.warn(0x0000, TAG,
+                'optional chapter catalog omitted: title exceeds message limit');
+            } else {
+              throw error;
             }
-            throw error;
           }
           metaPayload.chapters = [];
-          // 类型收窄：metaPayload 的 chapters 初始为 BookChapter[]，
-          // 分片模式下显式置空，接收端以 chapterChunks 为准。
-          (metaPayload as Record<string, Object>)['chapterChunks'] =
-            chapterGroups.length;
+          if (!chapterCatalogOmitted) {
+            // 类型收窄：metaPayload 的 chapters 初始为 BookChapter[]，
+            // 分片模式下显式置空，接收端以 chapterChunks 为准。
+            (metaPayload as Record<string, Object>)['chapterChunks'] =
+              chapterGroups.length;
+          }
         }
         progress.state = TransferState.SENDING;
         progress.phase = 'BOOK_META';
@@ -452,70 +407,38 @@ export class BookTransferService {
 
         for (let i = 0; i < chapterGroups.length; i++) {
           progress.phase = 'CHAPTERS';
-          progress.message = '发送章节索引 ' + (i + 1) +
+          progress.message = '补充章节目录 ' + (i + 1) +
             '/' + chapterGroups.length;
           this.update(callbacks, progress);
-          const ackPromise = this.waiters.beginChapterAck(
-            transferId, book.bookId, i, chapterGroups.length);
-          callbacks.onChapterChunk?.(i, chapterGroups.length, 'sent');
-          const sendPromise = this.sendMessage(device, appParam, {
-            v: 0, type: 'CHAPTERS', transferId: transferId,
-            bookId: book.bookId, index: i,
-            total: chapterGroups.length,
-            chapters: chapterGroups[i]
-          }, 'CHAPTERS ' + (i + 1) + '/' + chapterGroups.length);
-          hilog.info(0x0000, TAG,
-            'chapter chunk sent index=%{public}d/%{public}d',
-            i + 1, chapterGroups.length);
-          progress.phase = 'CHAPTERS_ACK';
-          progress.message = '等待手表确认章节索引 ' + (i + 1) +
-            '/' + chapterGroups.length;
-          this.update(callbacks, progress);
-          let ack;
           try {
-            ack = await sendThenAwaitChapterAck(
-              sendPromise, ackPromise);
+            await this.sendMessage(device, appParam, {
+              v: 0, type: 'CHAPTERS', transferId: transferId,
+              bookId: book.bookId, index: i,
+              total: chapterGroups.length,
+              chapters: chapterGroups[i]
+            }, 'CHAPTERS ' + (i + 1) + '/' + chapterGroups.length);
+            callbacks.onChapterChunk?.(i, chapterGroups.length, 'sent');
+            hilog.info(0x0000, TAG,
+              'chapter chunk sent index=%{public}d/%{public}d',
+              i + 1, chapterGroups.length);
           } catch (sendError) {
             callbacks.onChapterChunk?.(i, chapterGroups.length,
               'send_failed');
-            throw sendError;
+            hilog.warn(0x0000, TAG,
+              'optional chapter chunk send failed index=%{public}d/%{public}d: %{public}s',
+              i + 1, chapterGroups.length,
+              sendError instanceof Error ? sendError.message : String(sendError));
+            // 剩余分片无法构成完整目录；正文仍可独立校验并入库。
+            break;
           }
-          if (this.cancelled.has(transferId)) {
-            this.finishTransfer(transferId);
-            progress.state = TransferState.CANCELLED;
-            progress.message = '已取消';
-            this.update(callbacks, progress);
-            return false;
-          }
-          if (!ack.ok) {
-            const reason = ack.reason || 'E_PROTOCOL';
-            if (reason === 'E_CHAPTERS_ACK_TIMEOUT') {
-              hilog.warn(0x0000, TAG,
-                'chapter chunk timeout index=%{public}d/%{public}d',
-                i + 1, chapterGroups.length);
-            } else {
-              hilog.warn(0x0000, TAG,
-                'chapter chunk rejected index=%{public}d/%{public}d reason=%{public}s',
-                i + 1, chapterGroups.length, reason);
-            }
-            callbacks.onChapterChunk?.(i, chapterGroups.length,
-              reason === 'E_CHAPTERS_ACK_TIMEOUT' ? 'timeout' : 'rejected');
-            await this.notifyRemoteCancellation(transferId);
-            this.finishTransfer(transferId);
-            progress.state = TransferState.FAILED;
-            progress.error = reason;
-            progress.message = reason === 'E_CHAPTERS_ACK_TIMEOUT' ?
-              '等待手表确认章节索引超时（' + (i + 1) + '/' +
-                chapterGroups.length + '）' :
-              '手表拒收章节索引（' + (i + 1) + '/' +
-                chapterGroups.length + '）：' + reason;
-            this.update(callbacks, progress);
-            return false;
-          }
-          hilog.info(0x0000, TAG,
-            'chapter chunk ack index=%{public}d/%{public}d',
-            i + 1, chapterGroups.length);
-          callbacks.onChapterChunk?.(i, chapterGroups.length, 'ack');
+        }
+
+        if (this.cancelled.has(transferId)) {
+          this.finishTransfer(transferId);
+          progress.state = TransferState.CANCELLED;
+          progress.message = '已取消';
+          this.update(callbacks, progress);
+          return false;
         }
 
         // 文件通道：整本规范化文件。
@@ -528,15 +451,6 @@ export class BookTransferService {
             this.update(callbacks, progress);
           });
 
-        // 上传完成：切换为回执等待阶段，
-        // 回执计时从现在开始（大文件不误超时）。
-        this.waiters.markUploaded(transferId);
-        progress.state = TransferState.WAITING_RESULT;
-        progress.phase = 'RESULT';
-        progress.message = '等待手表校验回执';
-        progress.percent = 100;
-        this.update(callbacks, progress);
-        const result = await resultPromise;
         if (this.cancelled.has(transferId)) {
           this.finishTransfer(transferId);
           progress.state = TransferState.CANCELLED;
@@ -544,28 +458,21 @@ export class BookTransferService {
           this.update(callbacks, progress);
           return false;
         }
-        if (result.ok) {
-          this.finishTransfer(transferId);
-          progress.state = TransferState.SUCCEEDED;
-          progress.message = '手表已确认入库';
-          this.update(callbacks, progress);
-          return true;
-        }
-        const reason = result.reason || 'E_PROTOCOL';
-        await this.notifyRemoteCancellation(transferId);
-        this.finishTransfer(transferId);
-        progress.state = TransferState.FAILED;
-        progress.error = reason;
-        progress.message = '手表返回失败（' +
-          (progress.phase || 'RESULT') + '）：' + reason;
+
+        // 文件通道回调成功仅说明文件已发送；手表的 SHA 校验和
+        // 入库结果不通过本回调确认。
+        progress.state = TransferState.SUCCEEDED;
+        progress.phase = 'TRANSFER_FILE';
+        progress.message = '文件已发送；手表侧校验和入库未确认';
+        progress.percent = 100;
         this.update(callbacks, progress);
-        return false;
+        this.finishTransfer(transferId);
+        return true;
       } catch (error) {
         hilog.error(0x0000, TAG,
           'sendBook failed at %{public}s: %{public}s',
           progress.phase || 'UNKNOWN',
           error instanceof Error ? error.message : String(error));
-        this.waiters.fail(transferId, 'E_PEER_UNAVAILABLE');
         if (this.cancelled.has(transferId)) {
           this.finishTransfer(transferId);
           progress.state = TransferState.CANCELLED;

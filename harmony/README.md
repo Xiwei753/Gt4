@@ -13,7 +13,7 @@
 
 ## 手表传书与进度
 
-- `services/BookTransferService.ts` 保留现有 Wear Engine 设备发现、目标选择、发送、取消、失败提示与 RESULT 回执；只从规范化文本发送，不更改 GT Lite 工程或协议。
+- `services/BookTransferService.ts` 使用 Wear Engine 设备发现、目标选择、控制消息和文件通道。章节目录分片是可选元数据；`transferFile` 成功回调只报告文件已发送，手表校验与入库结果未知。
 - 双向进度同步仍使用协议中的规范化 UTF-8 字节偏移。Reader Kit 返回的 `resourceIndex`/`startDomPos` 不是该偏移；在可靠映射完成前，开始使用 Reader Kit 的书籍会从位置同步中排除，旧字节位置和手表记录保留，其它可映射书籍仍可同步。页面明确提示此限制。
 - Reader Kit 的使用范围按官方文档为 HarmonyOS NEXT 5.0.4 及以上 Phone/PC/2in1/Tablet，仅中国大陆可用，且不支持模拟器。API 声明可编译不代表目标设备的服务、解析、翻页或真机续读已通过。
 

@@ -5,9 +5,9 @@
 // 纯逻辑在 ./TransferLogic.js（Node 可测）；本文件
 // 只做 Lite JS I/O 包装。
 //
-// 响应通道唯一（P0-6）：ACK/RESULT/ERROR 全部
-// 经 sendToPhone（即 Wear Engine sendMsg）回手机；
-// onStatus 只用于本机状态显示。
+// 消息通道 ACK/RESULT/ERROR 与阅读进度消息经
+// sendToPhone（Wear Engine sendMsg）回手机；文件通道
+// 不依赖应用层回执。
 import { decodeUtf8Bytes } from '../util/Utf8.js';
 import { decodeBase64 } from '../util/Base64.js';
 import { ensureDirs, saveTempBook,
@@ -23,8 +23,7 @@ var VERIFY_WINDOW = 64 * 1024;
 
 export function IncomingBookReceiver(onStatus, sendToPhone, options) {
   const config = options || {};
-  // Longer than the phone's 5-minute upload and 60-second result limits,
-  // with margin for lifecycle scheduling on the watch.
+  // Bound abandoned phone metadata so a later user send is not left busy.
   const staleTimeoutMs = typeof config.staleTimeoutMs === 'number' &&
     isFinite(config.staleTimeoutMs) && config.staleTimeoutMs > 0 ?
     config.staleTimeoutMs : 7 * 60 * 1000;
@@ -37,8 +36,8 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
   const notify = (message) => {
     if (typeof onStatus === 'function') onStatus(message);
   };
-  // 统一响应通道：手机必须能收到 RESULT，
-  // 不能只在本机 notify（P0-6）。
+  // 消息通道协议结果和进度消息共用响应通道；文件通道
+  // 的完成由手机侧 Wear Engine transferFile 回调报告。
   const respond = (text) => {
     notify(text);
     if (typeof sendToPhone === 'function') {
@@ -65,22 +64,6 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
     if (!ok) message.reason = reason;
     respond(JSON.stringify(message));
     return message;
-  }
-
-  function chapterAck(message, state, ok, reason, duplicate) {
-    const ack = {
-      v: 0, type: 'CHAPTERS_ACK',
-      transferId: message.transferId,
-      bookId: message.bookId,
-      index: message.index,
-      total: message.total,
-      ok: ok
-    };
-    if (state) ack.received = state.chapterChunksReceived;
-    if (duplicate) ack.duplicate = true;
-    if (!ok) ack.reason = reason || 'E_PROTOCOL';
-    respond(JSON.stringify(ack));
-    return ack;
   }
 
   function cleanup(transferId) {
@@ -125,9 +108,8 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
     }
   }
 
-  // 消息通道入口。ACK/RESULT/RESUME 全部
-  // 经统一响应通道（respond → sendToPhone）
-  // 回手机，不再有第二条通道。
+  // 消息通道入口。旧式 CHUNK/FINISH 的 ACK/RESULT 与
+  // 阅读进度消息仍经统一响应通道；文件通道不等待应用层回执。
   this.onMessage = function (messageText) {
     let message;
     try {
@@ -141,6 +123,11 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
     expireStaleTransfers();
     switch (message.type) {
       case 'BOOK_META': {
+        const existing = transfers[message.transferId];
+        if (existing && existing.fileReceiving) {
+          return result(message.transferId, message.bookId,
+            false, 'E_BUSY');
+        }
         // 单本互斥：第二个不同 transferId 的
         // META 返回 E_BUSY，不得按错误元信息
         // 校验/登记（P0-2）。相同 id 视为重启，
@@ -167,20 +154,21 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
         const state = transfers[message.transferId];
         if (!state) {
           console.warn('chapter chunk rejected reason=E_PROTOCOL');
-          return chapterAck(message, null, false, 'E_PROTOCOL', false);
+          break;
         }
         const applied = applyChapterChunk(state, message);
         if (!applied.ok) {
-          cleanup(message.transferId);
+          state.chapterCatalogInvalid = true;
+          state.chapterChunks = {};
+          state.chapterChunksReceived = 0;
+          state.meta.chapters = [];
           console.warn('chapter chunk rejected reason=' + applied.reason);
-          return chapterAck(message, state, false,
-            applied.reason, false);
+          break;
         }
         console.info('chapter chunk index=' +
           (message.index + 1) + '/' + state.expectedChapterChunks +
           ' received=' + state.chapterChunksReceived);
-        return chapterAck(message, state, true, undefined,
-          applied.duplicate === true);
+        break;
       }
       case 'CHUNK': {
         const state = transfers[message.transferId];
@@ -209,11 +197,12 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
           return result(message.transferId, message.bookId,
             false, 'E_PROTOCOL');
         }
-        const chapters = assembleChapters(state);
-        if (!chapters.ok) {
-          cleanup(message.transferId);
-          return result(message.transferId, state.meta.bookId,
-            false, chapters.reason);
+        const assembledChapters = assembleChapters(state);
+        const chapters = assembledChapters.ok ?
+          assembledChapters.chapters : [];
+        if (!assembledChapters.ok) {
+          console.warn('message channel book has no complete chapter catalog: ' +
+            assembledChapters.reason);
         }
         const assembled = assembleBytes(state);
         if (!assembled.ok) {
@@ -227,7 +216,7 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
             false, 'E_DIGEST_MISMATCH');
         }
         const text = decodeUtf8Bytes(assembled.bytes);
-        persistTransfer(state, text, (saved) => {
+        persistTransfer(state, text, chapters, (saved) => {
           cleanup(message.transferId);
           return result(message.transferId, state.meta.bookId,
             saved.ok, saved.reason);
@@ -266,7 +255,7 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
     }
   };
 
-  function persistTransfer(state, text, cb) {
+  function persistTransfer(state, text, chapters, cb) {
     ensureDirs((dirs) => {
       if (!dirs.ok) {
         return cb({ ok: false, reason: 'E_SPACE' });
@@ -289,7 +278,7 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
               sha256: state.meta.sha256,
               chunks: state.meta.chunks,
               chunkBytes: state.meta.chunkBytes,
-              chapters: state.meta.chapters
+              chapters: chapters
             }, (added) => {
               cb(added.ok ? { ok: true } :
                 { ok: false, reason: 'E_SPACE' });
@@ -302,39 +291,27 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
   // 文件通道（P0-5）：Wear Engine 把手机发来的
   // 文件送达 srcUri（回调给出路径）。这里把它
   // 拷入本应用沙箱 temp/<transferId> → 校验
-  // 大小 + 流式 SHA-256 → 原子入库 → RESULT。
+  // 大小 + 流式 SHA-256 → 原子入库。
   // 任一步失败：清理暂存、绝不入书架。
   this.receiveFileChannel = function (srcUri, fileApi, cb) {
     const state = oldestPendingTransfer();
     if (!state) {
       const outcome = { ok: false,
         reason: 'E_PROTOCOL' };
-      // 无在途传输：也把 RESULT 回手机。
-      notify(JSON.stringify({
-        v: 0, type: 'RESULT', transferId: '',
-        bookId: '', ok: false,
-        reason: outcome.reason }));
       return cb(outcome);
     }
     const meta = state.meta;
+    if (state.fileReceiving) {
+      return cb({ ok: false, reason: 'E_BUSY' });
+    }
+    // Prevent a second file callback from being associated with the same
+    // oldest pending BOOK_META while its first body is being verified.
+    state.fileReceiving = true;
     const dst = tempPath(meta.transferId);
     const finish = (ok, reason) => {
-      // 统一响应通道：文件通道的结果
-      // 同样必须以 RESULT 回手机（P0-6）。
-      result(meta.transferId, meta.bookId,
-        ok, reason);
       cb(ok ? { ok: true } :
         { ok: false, reason: reason });
     };
-    const chapters = assembleChapters(state);
-    if (!chapters.ok) {
-      const missing = missingChapterIndices(state);
-      console.error('file channel arrived before chapter catalog complete ' +
-        'received=' + state.chapterChunksReceived + '/' +
-        state.expectedChapterChunks + ' missing=' + missing.join(','));
-      cleanup(meta.transferId);
-      return finish(false, chapters.reason);
-    }
     ensureDirs((dirs) => {
       if (!dirs.ok) {
         cleanup(meta.transferId);
@@ -352,6 +329,19 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
             cleanup(meta.transferId);
             return finish(false, verified.reason);
           }
+          // Chapter messages can still be queued while the copied body is
+          // being checked. Snapshot only after size/SHA succeeds so a late
+          // complete catalog remains available for chapter jumps. The body
+          // never waits for a catalog or an app-level acknowledgment.
+          const assembledChapters = assembleChapters(state);
+          const chapters = assembledChapters.ok ?
+            assembledChapters.chapters : [];
+          if (!assembledChapters.ok) {
+            const missing = missingChapterIndices(state);
+            console.warn('file channel proceeding without complete chapter catalog ' +
+              'received=' + state.chapterChunksReceived + '/' +
+              state.expectedChapterChunks + ' missing=' + missing.join(','));
+          }
           commitVerifiedBook(meta.transferId,
             meta.bookId, (committed) => {
               if (!committed.ok) {
@@ -367,7 +357,7 @@ export function IncomingBookReceiver(onStatus, sendToPhone, options) {
                 sha256: meta.sha256,
                 chunks: meta.chunks,
                 chunkBytes: meta.chunkBytes,
-                chapters: meta.chapters
+                chapters: chapters
               }, (added) => {
                 cleanup(meta.transferId);
                 finish(added.ok,

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 章节索引的轻量校验与窗口化展示。
+// 章节索引的轻量校验与完整目录列表。
 // 偏移一律是规范化 UTF-8 正文字节偏移，不是 JS 字符下标，也不能由
 // 字体/页码反推。旧书没有 chapters 时仍返回单一「正文」，不影响阅读。
 var MAX_TITLE = 80;
-var ROW_RADIUS = 2;
 
 function fallback(totalBytes) {
   var total = (typeof totalBytes === 'number' && totalBytes > 0) ?
@@ -68,37 +67,12 @@ export function chapterIndexAt(chapters, offset) {
   return found;
 }
 
-export function chapterRows(chapters, index, radius) {
+// 章节面板把完整目录交给原生 list，由列表本身负责纵向滚动。
+export function chapterListRows(chapters, current) {
   if (!Array.isArray(chapters) || chapters.length === 0) return [];
-  var r = (typeof radius === 'number' && radius >= 0) ?
-    Math.floor(radius) : ROW_RADIUS;
-  var current = (typeof index === 'number') ? index : -1;
-  var center = current < 0 ? 0 : current;
-  var start = Math.max(0, center - r);
-  var end = Math.min(chapters.length - 1, center + r);
-  var rows = [];
-  for (var i = start; i <= end; i++) {
-    rows.push({ index: i, title: chapters[i].title, current: i === current,
-      label: (i === current ? '▶ ' : '') + chapters[i].title });
-  }
-  return rows;
-}
-
-// 独立浏览窗口：start 是窗口首行，不由当前阅读位置强制居中。
-// 章节面板分页时只移动这个窗口，点击具体行才跳转。
-export function chapterWindow(chapters, start, count, current) {
-  if (!Array.isArray(chapters) || chapters.length === 0) return [];
-  var size = (typeof count === 'number' && count > 0) ?
-    Math.floor(count) : 5;
-  var maxStart = Math.max(0, chapters.length - size);
-  var first = (typeof start === 'number' && isFinite(start)) ?
-    Math.floor(start) : 0;
-  if (first < 0) first = 0;
-  if (first > maxStart) first = maxStart;
   var currentIndex = (typeof current === 'number') ? current : -1;
-  var end = Math.min(chapters.length - 1, first + size - 1);
   var rows = [];
-  for (var i = first; i <= end; i++) {
+  for (var i = 0; i < chapters.length; i++) {
     rows.push({ index: i, title: chapters[i].title,
       current: i === currentIndex,
       label: (i === currentIndex ? '▶ ' : '') + chapters[i].title });

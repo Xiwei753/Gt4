@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Wear Engine 适配层：版本检查、手机 APP ID 门控、
 // 消息订阅；协议消息与文件通道路由到
-// IncomingBookReceiver；所有回执经
-// wearengine.sendMsg 发回手机（P0-6）。
+// IncomingBookReceiver；旧式消息通道回执经
+// wearengine.sendMsg 发回手机。
 // Based on Wear Engine receiver call patterns from
 // Explore in HMOS Wearable (MIT).
 // Does not vendor the upstream Huawei SDK wrapper (Apache-2.0).
@@ -15,10 +15,10 @@ let subscribed = false;
 let receiver = null;
 // 手表 → 手机的唯一回执通道（wearengine.sendMsg）。
 var sendToPhoneImpl = null;
-// 对端 deviceId。'remote' 是照华为 Lite 示例写的**占位回退值**，
-// 从未在真机上确认过；subscribeMsg 回调里若带真实 deviceId 就采用它。
+// 对端 deviceId。无回调字段时按 Lite Wear Engine 示例使用 'remote'；
+// subscribeMsg 回调若提供 deviceId，则优先沿用该值。
 var peerDeviceId = '';
-var warnedDeviceIdFallback = false;
+var loggedRemoteDeviceDefault = false;
 
 // 回调里可能携带 deviceId 的候选字段名（与文件引用一样逐一探测，
 // 不合成、不猜测具体值）。真机抓到后应把命中的字段名固化下来。
@@ -51,12 +51,10 @@ export function beginReceive(onStatus) {
   const sendToPhone = (text) => {
     var deviceId = peerDeviceId;
     if (!deviceId) {
-      // 不静默拿占位值冒充真值：告警一次，日志里能看出这条回执是
-      // 走的未验证回退路径。真机确认后应改为拿到 deviceId 再发送。
-      if (!warnedDeviceIdFallback) {
-        warnedDeviceIdFallback = true;
-        console.warn('sendMsg 使用未验证的占位 deviceId "remote"：'
-          + '回调中未取得真实 deviceId，回执能否送达待真机确认');
+      // 记录回调没有提供 deviceId；按 Lite 示例使用 remote。
+      if (!loggedRemoteDeviceDefault) {
+        loggedRemoteDeviceDefault = true;
+        console.info('subscribeMsg 未提供 deviceId，sendMsg 使用 Lite 示例值 remote');
       }
       deviceId = 'remote';
     }
@@ -164,8 +162,8 @@ function routeMessage(messageText) {
   // subscribeMsg 和同一个 sendToPhone 通道。
   if (handleProgressMessage(messageText, sendToPhoneImpl)) return;
   if (!receiver) return;
-  // ACK/RESUME/RESULT 全部由接收器内部
-  // 经统一响应通道（sendToPhone）回发。
+  // 旧式消息通道 ACK/RESUME/RESULT 由接收器内部
+  // 经统一响应通道（sendToPhone）回发；文件通道不等 RESULT。
   receiver.onMessage(messageText);
 }
 
@@ -187,11 +185,9 @@ export function extractFileRef(data) {
   return null;
 }
 
-// 文件通道：把 Wear Engine 送达的文件交给
-// IncomingBookReceiver 复制 → 校验 → 入库。
-// 结果（RESULT）由接收器统一经 sendToPhone 回发。
-// 单本在途约束下，收到的文件唯一对应当前
-// 待传 transferId（P0-2）。
+  // 文件通道：把 Wear Engine 送达的文件交给
+  // IncomingBookReceiver 复制 → 校验 → 入库；
+  // 手机不等待手表应用层 RESULT。
 function receiveFile(filePath, field) {
   if (!receiver || !filePath) {
     return;

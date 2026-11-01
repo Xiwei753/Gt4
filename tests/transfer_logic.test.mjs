@@ -78,6 +78,8 @@ function makeMeta() {
 // ---------- BOOK_META 校验 ----------
 const meta = makeMeta();
 assert.equal(validateBookMeta(meta).ok, true);
+assert.equal(validateBookMeta({ ...meta, chapters: undefined }).ok, true,
+  'chapter directory is optional to the body metadata');
 for (const broken of [
   { ...meta, v: 1 },
   { ...meta, bookId: 'XYZ' },
@@ -86,7 +88,6 @@ for (const broken of [
   { ...meta, chunks: 0 },
   { ...meta, bytes: -1 },
   { ...meta, title: 123 },
-  { ...meta, chapters: null },
   { ...meta, transferId: '' }
 ]) {
   assert.equal(validateBookMeta(broken).ok, false,
@@ -239,7 +240,8 @@ for (const broken of [
   assert.equal(assembledChapters.ok, true);
   assert.deepEqual(assembledChapters.chapters.map((c) => c.title),
     ['第一章', '第二章', '第三章']);
-  assert.equal(state.meta.chapters.length, 3);
+  assert.equal(state.meta.chapters.length, 0,
+    'assembled chunks are returned as one complete catalog without mutating BOOK_META');
 }
 {
   const chunkedMeta = Object.assign({}, makeMeta(), {
@@ -259,10 +261,13 @@ for (const broken of [
     index: 2, total: 2,
     chapters: [{ title: '越界', offset: 0, length: 1 }]
   }).reason, 'E_PROTOCOL');
-  assert.equal(validateBookMeta(Object.assign({}, chunkedMeta, {
+  const malformedCatalog = beginTransfer(Object.assign({}, chunkedMeta, {
     chapters: [{ title: '正文', offset: 0, length: 1 }]
-  })).ok, false,
-  'chunked BOOK_META must not also carry a full chapter array');
+  })).state;
+  assert.equal(malformedCatalog.chapterCatalogInvalid, true,
+    'malformed optional catalog data must be discarded without rejecting body metadata');
+  assert.deepEqual(assembleChapters(malformedCatalog),
+    { ok: false, reason: 'E_PROTOCOL' });
 }
 
 console.info('PASS: watch transfer logic (meta validation, ' +

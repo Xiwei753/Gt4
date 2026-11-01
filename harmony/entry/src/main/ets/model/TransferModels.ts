@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 手机侧传输模型：进度、传输 ID、重试状态与
-// 错误码。错误码与 protocol v0 对齐。
+// 手机侧传输模型：进度、传输 ID 与错误码。
+// 错误码与 protocol v0 对齐。
 import { BookMeta } from './BookModels';
 
 export enum TransferState {
   IDLE = 'idle',
   CONNECTING = 'connecting',
   SENDING = 'sending',
-  WAITING_RESULT = 'waiting_result',
   SUCCEEDED = 'succeeded',
   FAILED = 'failed',
   CANCELLED = 'cancelled'
@@ -33,18 +32,6 @@ export interface TargetDevice {
   name: string;
 }
 
-// One user tap means one transmission attempt. Another tap is required after failure.
-export const MAX_RETRY = 0;
-// 回执超时：上传完成后等待手表 RESULT 的时间
-// （第二轮 P0-3：不再把上传时长计入）。
-export const RESULT_TIMEOUT_MS = 60000;
-// 上传超时：设备检查 + HELLO + BOOK_META +
-// 文件通道传输的总时长上限。
-export const UPLOAD_TIMEOUT_MS = 300000;
-// Each long-catalog slice must be accepted by the watch app before the next
-// slice or the file channel is sent. No automatic retransmission is made.
-export const CHAPTER_ACK_TIMEOUT_MS = 10000;
-
 // 与 protocol README 的错误码表一致。
 export type TransferErrorCode =
   | 'E_UNSUPPORTED_FORMAT'
@@ -59,7 +46,6 @@ export type TransferErrorCode =
   // 单本互斥：已有传输在途（第二轮 P0-2）。
   | 'E_BUSY'
   | 'E_PROTOCOL'
-  | 'E_CHAPTERS_ACK_TIMEOUT'
   | 'E_CHAPTER_TOO_LARGE';
 
 export function newTransferId(): string {

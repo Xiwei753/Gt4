@@ -46,18 +46,17 @@
 - 书库：`library.json` 原子写、按 `bookId` 去重、删除、状态标记；重启不丢。
 - 发送：官方 Android Wear Engine（权限、设备发现、手动选择、ping 区分
   未安装/未运行、**发送前显式配置对端身份**、消息+文件通道、发送 `Task` 失败与超时都有处理）。
-- 回执：只有 `RESULT` 的 **`transferId` 与 `bookId` 同时命中当前在途传输** 才算成功；
-  串号 / 别的书 / 重试前 / 取消后到达的回执一律忽略（`wear/ReceiptMatcher.kt`，有单元测试）。
-- 回执监听：`registerReceiver` 可等待并返回成败，UI 在监听就绪前**禁用发送**（P0-D）。
+- 发送：`transferFile` 成功回调只表示文件已发送；手表侧大小、SHA-256 校验和入库状态未知。
+- 章节目录：目录是可选元数据；分片发送未完整时正文仍可传输，手表不保存半份目录。
 - 取消：**当前可用的 SDK（`5.0.0.300` / `5.0.0.301`）没有任何 `cancelFileTransfer` 接口**，
-  因此取消只做「停止本地等待 + 向手表发 `ERROR/E_CANCELLED`」，**不能中断已发出的文件流**；
+  因此取消只向手表发 `ERROR/E_CANCELLED`，**不能中断已发出的文件流**；
   半成品由手表侧失败清理路径删除。文档不把「取消请求」写成「文件传输已停止」。
-- 重发：已发送 / 发送失败的书（`READY`/`SENT`/`TRANSFER_FAILED`）可直接重发；未完成导入的不可发送。
+- 重发：已发送 / 发送失败的书（`READY`/`SENT`/`TRANSFER_FAILED`）可由用户再次发起；不自动重试。未完成导入的不可发送。
 - 书库索引：`library.json` 用 `AtomicFile` 原子写，写入失败会抛出并反馈界面，不静默丢索引。
 - 编码：GBK/GB18030 走**严格解码**（`CodingErrorAction.REPORT`），非法字节返回 `null`，不做静默替换。
 - 协议：`protocol` v0，字段与 HarmonyOS 侧一致（Android 额外带 `encoding`）。
 - 构建/测试：独立 Gradle 工程，本机 `BUILD SUCCESSFUL`；另有 JVM 单元测试
-  （`./gradlew :app:testDebugUnitTest`，覆盖回执关联 / 可发送状态 / 编码严格解码）。
+  （`./gradlew :app:testDebugUnitTest`，覆盖可发送状态 / 编码严格解码）。
 
 ## 4. 分阶段验收状态
 
@@ -65,7 +64,7 @@
 | --- | --- | --- |
 | 1 | Android APK 最小闭环（真实编译 + 产物信息 + 导入/持久化） | ✅ 编译验证；⚠️ nova 真机安装待验证 |
 | 2 | Wear Engine 连接（授权/设备列表/错误区分/指纹比对） | ⚠️ 代码就绪，真机待验证（阻塞于 AGC 注册与正式指纹） |
-| 3 | 同机调测与真实传书（RESULT ok=true） | ⛔ 未验证；依赖 #2 的手表端 HAP 与真机 |
+| 3 | 同机调测与真实传书 | ⛔ 未验证；依赖 #2 的手表端 HAP 与真机 |
 | 4 | 功能对齐（EPUB、编码恢复、删除/重发、上限、标题一致） | ⚠️ 代码就绪，真机待验证 |
 | 5 | 文档（三端 + 获取/安装 APK + 日志路径） | ✅ |
 

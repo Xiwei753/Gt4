@@ -3,8 +3,8 @@
 // Wear Engine 发送到 GT 4。
 // 选择文件 ≠ 导入成功：只有复制进沙箱、解析、
 // 登记后才显示 ready。
-// 发送 ≠ 成功：只有手表回 RESULT ok=true 才算
-// 入库；未选择目标设备时发送保持禁用。
+// 文件发送成功由 Wear Engine transferFile 回调确认；
+// 手表校验和入库结果未知；未选择目标设备时发送保持禁用。
 import { common } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
 import { promptAction, router } from '@kit.ArkUI';
@@ -39,7 +39,7 @@ interface SdkCodeCarrier {
 }
 
 // 双端身份严格分离（issue #13）：
-//   WATCH_PEER：对端 GT 4 Lite 身份，手机发送/注册回执时
+//   WATCH_PEER：手机发送时使用的对端 GT 4 Lite 身份
 //     使用 con.xiwei.suyue.gt4_Base64(原始 EC 公钥点)；
 //   PHONE_SELF：手机 APP ID，供手表登记“消息来自哪部手机”，
 //     不是 OAuth Client ID，也不是证书 SHA-256。
@@ -395,8 +395,7 @@ struct Index {
     }
   }
 
-  // 注册/恢复同一个手表 → 手机消息接收回调。进度消息优先，
-  // 未识别为进度的才交给传书状态机。
+  // 注册/恢复同一个手表 → 手机消息接收回调，供阅读进度同步使用。
   private async registerReceiverFor(device: TargetDevice): Promise<boolean> {
     if (!isConfigured(WATCH_PEER) || this.transferService === null) {
       return false;
@@ -405,10 +404,8 @@ struct Index {
       await this.getDeviceService().registerMessageReceiver(
         device, WATCH_PEER.bundleName, WATCH_PEER.fingerprint,
         (message: wearEngine.P2pMessage) => {
-          const handled = this.syncService !== null &&
+          if (this.syncService !== null) {
             this.syncService.onMessageFromWatch(message.content);
-          if (!handled && this.transferService !== null) {
-            this.transferService.onMessageFromWatch(message.content);
           }
         });
       this.receiverReady = true;
@@ -502,7 +499,6 @@ struct Index {
 
   private canSend(): boolean {
     return this.selectedDevice >= 0 &&
-      this.receiverReady &&
       isConfigured(WATCH_PEER) &&
       !this.sending;
   }
@@ -519,7 +515,7 @@ struct Index {
     if (this.sending) return;
     if (!this.canSend() || this.transferService === null) {
       this.transferText =
-        '发送不可用：请先选择设备、配置手表 Lite 公钥指纹并成功注册回执';
+        '发送不可用：请先选择设备并配置手表 Lite 公钥指纹';
       return;
     }
     if (!this.canTransferBook(book)) {
@@ -530,7 +526,7 @@ struct Index {
     this.sending = true;
     this.activeTransferId = '';
     this.transferText = '正在发送《' + book.title + '》……';
-    let lastFailure = '手表未确认入库';
+    let lastFailure = '文件传输尚未完成';
     let lastPhase = 'PEER_CHECK';
     let lastError = 'E_UNKNOWN';
     let wasCancelled = false;
@@ -561,13 +557,9 @@ struct Index {
               '（' + progress.percent + '%）' : '');
         },
         onChapterChunk: (index: number, total: number,
-          result: 'sent' | 'ack' | 'timeout' | 'rejected' |
-            'send_failed') => {
+          result: 'sent' | 'send_failed') => {
           const stage = result === 'sent' ? 'chapter_sent' :
-            result === 'ack' ? 'chapter_ack' :
-            result === 'timeout' ? 'chapter_timeout' :
-            result === 'send_failed' ? 'chapter_send_failed' :
-            'chapter_rejected';
+            'chapter_send_failed';
           recordReaderDiagnostic(context, 'transfer', stage, 0, {
             chapterIndex: index,
             chapterTotal: total,
@@ -581,7 +573,7 @@ struct Index {
       recordReaderDiagnostic(
         this.getUIContext().getHostContext() as common.UIAbilityContext,
         'transfer', 'ok');
-      this.transferText = '《' + book.title + '》手表已确认入库';
+      this.transferText = '《' + book.title + '》文件已发送；手表侧校验和入库未确认';
       this.getRepository().markStatus(book.bookId,
         BookStatus.SENT);
     } else if (wasCancelled) {
@@ -608,7 +600,7 @@ struct Index {
     }
     this.transferText = '正在取消传输……';
     await service.cancel(this.activeTransferId);
-    this.transferText = '已请求取消，等待手表确认清理';
+    this.transferText = '已发送取消请求；手表侧清理结果未确认';
   }
 
   private async syncReadingProgress(): Promise<void> {

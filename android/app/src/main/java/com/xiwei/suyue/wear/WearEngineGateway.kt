@@ -189,8 +189,7 @@ class WearEngineGateway(private val context: Context) {
         }
     }
 
-    // 注册手表 → 手机消息接收（RESULT 回执）。
-    // P0-D：这是可等待的，返回是否注册成功；注册失败时 UI 不得允许发送。
+    // 可选的手表 → 手机消息通道。当前文件传输完成不依赖应用层 RESULT。
     suspend fun registerReceiver(
         device: Device,
         peerBundle: String,

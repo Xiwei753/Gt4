@@ -118,11 +118,11 @@
 .chapter-list {
   width: 340px;
   /* issue #17 review：真实 list 必须显式高度，否则 Lite 可能只显示空容器。 */
-  height: 150px;
+  height: 200px;
 }
 .chapter-item {
   width: 340px;
-  /* list-item 默认高度为 0，必须给 5 行窗口每行固定高度。 */
+  /* list-item 默认高度为 0，必须显式指定行高。 */
   height: 30px;
 }
 .chapter-row {
@@ -139,7 +139,6 @@
   color: #f2f2f2;
   text-align: center;
 }
-.chapter-window-nav,
 .chapter-nav {
   width: 310px;
   height: 50px;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// 手机侧传输模型：进度、传输 ID、重试状态与错误码。
+// 手机侧传输模型：进度、传输 ID 与错误码。
 // 错误码与 protocol v0 及 harmony 实现对齐。
 package com.xiwei.suyue.model
 
@@ -9,7 +9,6 @@ enum class TransferState {
     IDLE,
     CONNECTING,
     SENDING,
-    WAITING_RESULT,
     SUCCEEDED,
     FAILED,
     CANCELLED
@@ -32,9 +31,6 @@ data class TargetDevice(
     val name: String
 )
 
-const val MAX_RETRY = 3
-// 回执超时：上传完成后等待手表 RESULT 的时间（不计上传时长）。
-const val RESULT_TIMEOUT_MS = 60_000L
 // 上传超时：设备检查 + HELLO + BOOK_META + 文件通道传输的总时长上限。
 const val UPLOAD_TIMEOUT_MS = 300_000L
 

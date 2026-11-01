@@ -245,10 +245,9 @@ adb -s TNL0220908013936 push \
   包名与 profile 一致。设备端还会校验该 UDID 是否在授权列表、有效期与
   设备调试状态。这些都没在 GT 4 上验证过，因此第 1 阶段"可安装"验收
   **尚未达成**，不能关闭议题 #2。
-- **回执通道的 `deviceId` 是占位值**：`wear/WearReceiver.js` 里
-  `deviceId: 'remote'` 取自上游 Lite 示例、**从未真机确认**。现已改为
-  优先采用从订阅回调探测到的真实 `deviceId`，探测不到才回退并告警一次；
-  这条回执路径仍未验证。
+- **手表到手机的消息发送**：`wear/WearReceiver.js` 参照 Lite 示例使用
+  `deviceId: 'remote'`；若订阅回调提供 `deviceId` 则优先使用回调值。
+  这条消息路径仍待真机核对，文件通道完成不依赖它的 RESULT 回执。
 - **CI 签名代码已与本机同源**：`watch_lite_hap.yml` 直接调用
   `tools/build_watch_lite.sh debug`（复用同一套 sign/verify 规则），并
   **删除了**对 Lite BIN 必然失败的裸 `verify-app -inForm bin` 步骤；

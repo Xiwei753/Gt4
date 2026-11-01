@@ -37,20 +37,6 @@ export function validateBookMeta(meta) {
       meta.chunkBytes < 1) {
     return { ok: false, reason: 'E_PROTOCOL' };
   }
-  if (!Array.isArray(meta.chapters)) {
-    return { ok: false, reason: 'E_PROTOCOL' };
-  }
-  if (meta.chapterChunks !== undefined) {
-    if (typeof meta.chapterChunks !== 'number' ||
-        !isFinite(meta.chapterChunks) ||
-        Math.floor(meta.chapterChunks) !== meta.chapterChunks ||
-        meta.chapterChunks < 0) {
-      return { ok: false, reason: 'E_PROTOCOL' };
-    }
-    if (meta.chapterChunks > 0 && meta.chapters.length !== 0) {
-      return { ok: false, reason: 'E_PROTOCOL' };
-    }
-  }
   return { ok: true };
 }
 
@@ -69,6 +55,24 @@ function validChapter(chapter, totalBytes) {
   return true;
 }
 
+function copyValidChapterCatalog(chapters, totalBytes) {
+  if (!Array.isArray(chapters)) return null;
+  const out = [];
+  let previousEnd = -1;
+  for (let i = 0; i < chapters.length; i++) {
+    const chapter = chapters[i];
+    if (!validChapter(chapter, totalBytes) ||
+        chapter.offset < previousEnd) return null;
+    previousEnd = chapter.offset + chapter.length;
+    out.push({
+      title: chapter.title,
+      offset: chapter.offset,
+      length: chapter.length
+    });
+  }
+  return out;
+}
+
 // 单本在途约束（第二轮 P0-2）：同一时刻只允许
 // 一个 transferId 处于接收中；第二个不同 id 的
 // BOOK_META 一律 E_BUSY。相同 id 视为重启（幂等
@@ -80,19 +84,33 @@ export function beginTransfer(meta, activeTransferId) {
       activeTransferId !== meta.transferId) {
     return { ok: false, reason: 'E_BUSY' };
   }
-  const expectedChapterChunks =
-    (typeof meta.chapterChunks === 'number') ? meta.chapterChunks : 0;
+  const rawChapterCount = meta.chapterChunks;
+  const validChunkCount = typeof rawChapterCount === 'number' &&
+    isFinite(rawChapterCount) &&
+    Math.floor(rawChapterCount) === rawChapterCount &&
+    rawChapterCount > 0 &&
+    (!Array.isArray(meta.chapters) || meta.chapters.length === 0);
+  const noChunkCount = rawChapterCount === undefined ||
+    rawChapterCount === 0;
+  const inlineChapters = noChunkCount ?
+    copyValidChapterCatalog(meta.chapters, meta.bytes) : null;
+  const catalogInvalid = !validChunkCount && inlineChapters === null;
+  const expectedChapterChunks = validChunkCount ? rawChapterCount : 0;
+  const normalizedMeta = Object.assign({}, meta, {
+    chapters: inlineChapters || []
+  });
   return {
     ok: true,
     state: {
-      meta: meta,
+      meta: normalizedMeta,
       chunks: {},        // index → Uint8Array
       receivedCount: 0,
       totalBytes: 0,
       // 长章节目录：BOOK_META 只给分片数，CHAPTERS 逐片补齐。
       chapterChunks: {}, // index → [{title,offset,length}]
       chapterChunksReceived: 0,
-      expectedChapterChunks: expectedChapterChunks
+      expectedChapterChunks: expectedChapterChunks,
+      chapterCatalogInvalid: catalogInvalid
     }
   };
 }
@@ -101,6 +119,9 @@ export function beginTransfer(meta, activeTransferId) {
 // 与 BOOK_META 一致；重复索引按幂等处理，不重复计数。
 export function applyChapterChunk(state, message) {
   if (!state || !message) return { ok: false, reason: 'E_PROTOCOL' };
+  if (state.chapterCatalogInvalid) {
+    return { ok: false, reason: 'E_PROTOCOL' };
+  }
   if (message.transferId !== state.meta.transferId ||
       message.bookId !== state.meta.bookId) {
     return { ok: false, reason: 'E_PROTOCOL' };
@@ -134,6 +155,9 @@ export function applyChapterChunk(state, message) {
 // 所有分片到齐后，按 index 拼接并做一次全目录连续性校验。
 export function assembleChapters(state) {
   if (!state) return { ok: false, reason: 'E_PROTOCOL' };
+  if (state.chapterCatalogInvalid) {
+    return { ok: false, reason: 'E_PROTOCOL' };
+  }
   if (state.expectedChapterChunks === 0) {
     return { ok: true, chapters: state.meta.chapters };
   }
@@ -161,7 +185,6 @@ export function assembleChapters(state) {
       });
     }
   }
-  state.meta.chapters = out;
   return { ok: true, chapters: out };
 }
 

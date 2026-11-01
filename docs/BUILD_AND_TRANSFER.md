@@ -2,6 +2,8 @@
 
 > 本文是开发路线，不是已执行的构建日志。当前没有签名 HAP，不能称为“可安装”或“实机验证通过”。
 
+> Issue #27 当前文件通道规则：手机以 Wear Engine `transferFile` 成功回调报告“文件已发送”，不显示“手表已确认入库”；手表独立校验大小和 SHA-256。章节目录是可选元数据，分片未完整时正文仍可入库。本文下方早期 RESULT waiter / CHAPTERS_ACK 记录是历史实现，不代表当前流程。
+
 ## 两个工程不能直接套一个流水线
 
 | | 手表 GT 4 46mm | 手机 Pocket 2 |
@@ -41,8 +43,8 @@
    `EpubImportService` 按 OPF/spine 顺序清洗章节；仅无 DRM。
 4. `BookRepository` 维护 `library.json` 索引，重启不丢书。
 5. 用 [Wear Engine Kit 手机侧 ArkTS API](https://developer.huawei.com/consumer/cn/doc/doccenter-references/api/wearengine_api) 做设备发现与授权：`getAuthClient` → `getAuthorization` 查询、`requestAuthorization` 由用户显式授权（最小权限 `Permission.DEVICE_IDENTIFIER`），再 `getConnectedDevices` 发现设备；授权与发现各自失败阶段/错误码结构化上报（阶段 5，源码完成，真机待验证）。授权入口在素阅应用内，**不依赖**运动健康的授权入口。
-6. 将书籍规范化、写入临时文件，调用手机侧 `P2pClient.transferFile`；也可使用 `sendMessage` 发送控制/ACK 消息。BOOK_META 的章节目录超过 Wear Engine 单条 JSON 消息 4096 字节时，Harmony/Android 两侧都会改发 `chapterChunks` + 多条 `CHAPTERS`，手表组装完整后再接收正文；正文通道不变。API 支持并不保证当前 GT 4 配对与签名权限已经打通。
-7. 手表注册接收、校验大小/摘要，安全落盘并更新书架，成功后由手表回执，不能只凭手机侧回调就认定入库成功。
+6. 将书籍规范化、写入临时文件，调用手机侧 `P2pClient.transferFile`；控制消息通过 `sendMessage` 发送。BOOK_META 的章节目录超过 Wear Engine 单条 JSON 消息 4096 字节时，Harmony/Android 两侧会尝试发送 `chapterChunks` + 多条 `CHAPTERS`；目录不完整时正文仍继续走文件通道。API 支持并不保证当前 GT 4 配对与签名权限已经打通。
+7. 手表收到文件后校验大小和摘要，通过后安全落盘并更新书架。手机的 `transferFile` 成功回调只确认文件已发送，不确认手表校验或入库；文件通道不依赖手表应用层 RESULT。
 
 手机端打包：`tools/build_phone_hap.sh` + `.github/workflows/phone_hap.yml`
 （自托管 `hmos-deveco` runner，签名材料经 Secrets 注入）。
@@ -401,10 +403,7 @@ watch: entry-default-debug-signed.hap size=419960
 
 - `watch/huawei/watch-lite/build-profile.json5` 暂时采用轻智能手表示例的 `6.1.1(24)` 模板数值，但**没有确认为 GT 4 开发安装实际可用的版本**。
 - HML 页面的几何大小和字号尚未经真机校准；UTF-8 分页是估算字宽，不是字体像素测量。
-- `wear/WearReceiver.js` 的手机指纹经 CI 注入（`PhonePeerConfig.g.js`），未注入时停用消息接收；**系统级授权还需要 `config.json` 的 `supportLists` 同步注入**（workflow 已做，构建后从 HAP 内清单复验）。`wearengine.sendMsg` 的参数形状以华为 Lite 示例为准，**待真机验证**：其中
-`deviceId` 的占位回退值 `'remote'` 已确认未经真机验证，实现会优先采用从
-订阅回调里探测到的真实 `deviceId`，探测不到时回退并告警一次，
-不静默把占位值当真值用。
+- `wear/WearReceiver.js` 的手机指纹经 CI 注入（`PhonePeerConfig.g.js`），未注入时停用消息接收；**系统级授权还需要 `config.json` 的 `supportLists` 同步注入**（workflow 已做，构建后从 HAP 内清单复验）。`wearengine.sendMsg` 参照 Lite 示例使用 `deviceId: 'remote'`；若订阅回调提供 `deviceId`，实现优先使用回调值。手表到手机的消息发送仍待 GT4 真机核对；文件通道完成不依赖应用层回执。
 - 手表文件通道依赖 Wear Engine 回调给出的文件路径字段：实现按 `file`/`name`/`uri`/`filePath` 逐字段探测并记录来源，**字段名待真机核对**。
 - 手表单本在途互斥（`E_BUSY`）：并发传书会被拒绝，手机侧同样限制并发发送。
 - 手机 `WATCH_PEER` 固定为 GT4 Lite 公钥身份（`bundleName_Base64(raw EC point)`，issue #13）；手表 `supportLists` / `PhonePeerConfig.g.js` 固定为手机 APP ID，二者方向不同，不能互相顶替。证书 SHA-256 只保留为诊断字段，不再进入 Wear Engine 身份。

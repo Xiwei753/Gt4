@@ -11,8 +11,7 @@
 //   - android-book-meta.json 的 UTF-8 字节数 / 章节偏移 / SHA-256 /
 //     bookId（sha256 前 16 位）/ chunks 与真实正文自洽；
 //   - Android BOOK_META 生产者字段集合与协议契约一致；
-//   - 回执关联：RESULT 必须按 transferId 关联，串号不得计入成功；
-//   - 成功只在 ok=true 时成立；E_BUSY / E_CANCELLED 等为失败；
+//   - 文件通道回调是发送方完成边界；不会等待 RESULT 或自动重发；
 //   - Kotlin 常量与身份名静态对齐（包名 / 手表 bundle / 分块 / 上限）。
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -91,69 +90,17 @@ for (const key of META_KEYS) {
 assert.ok(bookModels.includes('sha256.take(16)'),
   'Android bookId = sha256.take(16)');
 
-// ---------- 4) 回执关联（照 Android ReceiptMatcher 语义，P0-C） ----------
-// 只有 v=0 且 type=RESULT，且 transferId 与 bookId 同时命中当前等待者，
-// 才唤醒本次等待；串号 / 别的书 / 缺 bookId 一律忽略。
-const receipts = new Map();
-let pending = null; // { transferId, bookId }
-const begin = (transferId, bookId) => { pending = { transferId, bookId }; };
-const clearPending = () => { pending = null; };
-const deliver = (json) => {
-  if (json.v !== 0 || json.type !== 'RESULT') return false;
-  const tid = json.transferId;
-  const bid = json.bookId;
-  if (typeof tid !== 'string' || tid.length === 0) return false;
-  if (typeof bid !== 'string' || bid.length === 0) return false;
-  if (!pending || pending.transferId !== tid || pending.bookId !== bid) {
-    return false;
-  }
-  receipts.set(tid, { ok: json.ok === true, reason: json.reason });
-  return true;
-};
-const inFlight = 'aaaa0000bbbb1111cccc2222dddd3333';
-const bookId = '3a7bd3e2360a4f5c';
-begin(inFlight, bookId);
-assert.equal(
-  deliver({ v: 0, type: 'RESULT', transferId: inFlight, bookId, ok: true }), true);
-assert.equal(receipts.get(inFlight).ok, true, 'ok=true is success');
-// 别的 transferId 的回执不得被认为唤醒本次等待者。
-const other = 'ffff9999eeee8888dddd7777cccc6666';
-assert.equal(
-  deliver({ v: 0, type: 'RESULT', transferId: other, bookId, ok: true }), false,
-  'stray transferId must not match');
-// transferId 对但 bookId 不同（串号到别的书）也必须忽略。
-assert.equal(
-  deliver({ v: 0, type: 'RESULT', transferId: inFlight,
-    bookId: 'deadbeefdeadbeef', ok: true }), false,
-  'bookId mismatch must not match');
-// 缺 bookId 的帧不得被当成命中（协议要求 RESULT 携带 bookId）。
-assert.equal(
-  deliver({ v: 0, type: 'RESULT', transferId: inFlight, ok: true }), false,
-  'missing bookId must not match');
-// 非 RESULT / 坏帧被丢弃。
-assert.equal(
-  deliver({ v: 0, type: 'ACK', transferId: inFlight, bookId, index: 0 }), false);
-assert.equal(
-  deliver({ v: 1, type: 'RESULT', transferId: inFlight, bookId, ok: true }),
-  false);
-assert.equal(
-  deliver({ v: 0, type: 'RESULT', transferId: '', bookId, ok: true }), false);
-
-// ok=false 一律失败；E_BUSY 不可重试成功。
-assert.equal(
-  deliver({ v: 0, type: 'RESULT', transferId: inFlight, bookId,
-    ok: false, reason: 'E_BUSY' }), true);
-assert.equal(receipts.get(inFlight).ok, false, 'E_BUSY must be failure');
-assert.equal(receipts.get(inFlight).reason, 'E_BUSY');
-assert.equal(
-  deliver({ v: 0, type: 'RESULT', transferId: inFlight, bookId,
-    ok: false, reason: 'E_DIGEST_MISMATCH' }), true);
-assert.equal(receipts.get(inFlight).ok, false);
-// 取消/重试后清空 pending：迟到回执不得再命中。
-clearPending();
-assert.equal(
-  deliver({ v: 0, type: 'RESULT', transferId: inFlight, bookId, ok: true }),
-  false, 'late receipt after clear must not match');
+// ---------- 4) 当前发送路径不依赖应用层回执或重试 ----------
+const transferSource = read('wear/BookTransferService.kt');
+assert.ok(transferSource.includes('gateway.sendFile(') &&
+  transferSource.includes('message = "文件已发送；手表侧校验和入库未确认"'),
+  'transferFile success must be reported without claiming watch ingestion');
+assert.ok(!transferSource.includes('CompletableDeferred') &&
+  !transferSource.includes('RESULT_TIMEOUT_MS') &&
+  !transferSource.includes('ReceiptMatcher') &&
+  !transferSource.includes('while (attempt') &&
+  !transferSource.includes('MAX_RETRY'),
+  'Android sender must not wait for RESULT or automatically retry');
 
 // ---------- 5) 取消语义 ----------
 const cancel = JSON.parse(
@@ -180,16 +127,10 @@ assert.ok(importService.includes('MESSAGE_CHUNK_BYTES = 64 * 1024'),
   'message chunk = 64KB');
 
 const transferService = read('wear/BookTransferService.kt');
-for (const type of ['HELLO', 'BOOK_META', 'RESULT', 'ERROR']) {
+for (const type of ['HELLO', 'BOOK_META', 'ERROR']) {
   assert.ok(transferService.includes('"' + type + '"'),
     'BookTransferService must emit/accept ' + type);
 }
-
-// P0-C：回执匹配器必须同时比对 transferId 与 bookId（纯 Kotlin 逻辑）。
-const receiptMatcher = read('wear/ReceiptMatcher.kt');
-assert.ok(
-  receiptMatcher.includes('current.transferId != transferId || current.bookId != bookId'),
-  'ReceiptMatcher must match BOTH transferId and bookId');
 
 // P1-5：重发策略必须允许已发送/发送失败的书籍再次发送。
 const sendPolicy = read('model/SendPolicy.kt');
@@ -202,4 +143,4 @@ assert.ok(appGradle.includes('applicationId = "com.xiwei.suyue.android"'),
   'applicationId must be com.xiwei.suyue.android');
 
 console.info('PASS: android protocol examples, UTF-8 byte offsets, sha256/bookId, ' +
-  'BOOK_META fields, receipt correlation, cancel, Kotlin constants');
+  'BOOK_META fields, file-send completion boundary, cancel, Kotlin constants');

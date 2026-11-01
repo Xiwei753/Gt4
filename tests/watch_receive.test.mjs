@@ -3,9 +3,9 @@
 // 手表端接收闭环测试（施工单 P0-5/P0-6/P1-11/P1-12）：
 //   - 文件通道：BOOK_META → receiveFileChannel
 //     （复制 → 大小校验 → 流式 SHA-256 → 原子入库）
-//     → RESULT ok=true 回传；
+//     → file callback reports local verification/import outcome;
 //   - 消息通道：BOOK_META → CHUNK×N → FINISH
-//     → 拼接 → 摘要 → 入库 → RESULT；
+//     → 拼接 → 摘要 → 入库 → RESULT（legacy message channel）；
 //   - 失败路径：摘要不符 / 大小不符 / 无 BOOK_META，
 //     必须清理暂存、不得出现在书架；
 //   - LibraryIndex：写操作串行化、原子写无残留。
@@ -80,15 +80,12 @@ assert.equal(fileOutcome.ok, true,
   'file channel must succeed: ' +
   JSON.stringify(fileOutcome));
 
-// RESULT 必须经 sendToPhone 回传（P0-6）。
+// 文件通道不通过 RESULT 回执手机；transferFile 回调是发送方的完成边界。
 const results = sentMessages
   .map((t) => JSON.parse(t))
   .filter((m) => m.type === 'RESULT');
-assert.equal(results.length, 1,
-  'exactly one RESULT must go back to phone');
-assert.equal(results[0].ok, true);
-assert.equal(results[0].transferId, 'file-ok-1');
-assert.equal(results[0].bookId, bookId);
+assert.equal(results.filter((m) => m.transferId === 'file-ok-1').length, 0,
+  'file-channel receive must not send an application-level RESULT');
 
 // 书籍落盘且内容一致。
 const onDisk = readSandbox('gt4reader/books/' + bookId + '.txt');
@@ -125,9 +122,8 @@ const badResults = sentMessages
   .map((t) => JSON.parse(t))
   .filter((m) => m.type === 'RESULT' &&
     m.transferId === 'file-bad-1');
-assert.equal(badResults.length, 1);
-assert.equal(badResults[0].ok, false);
-assert.equal(badResults[0].reason, 'E_DIGEST_MISMATCH');
+assert.equal(badResults.length, 0,
+  'watch-side digest rejection must not be misreported through RESULT');
 assert.equal(existsSync(join(sandbox,
   'gt4reader/books/bbbbbbbbbbbbbbbb.txt')), false,
   'rejected book must not reach the shelf');
@@ -225,162 +221,108 @@ const msgOnDisk = readSandbox('gt4reader/books/' +
 assert.deepEqual(Buffer.from(msgOnDisk),
   Buffer.from(msgBytes));
 
-// ---- E2. 文件通道 + CHAPTERS 分片：章节先于文件到达，乱序分片可重排 ----
-const chapterText = '第一章：分片目录\r\n第二章：文件通道\r\n'.repeat(40);
-const chapterBytes = enc.encode(chapterText);
+// ---- E2. 完整 65 章目录分片后，文件入库保留全部跳章元数据 ----
+const chapterParts = [];
+const chapterEntries = [];
+let chapterOffset = 0;
+for (let i = 0; i < 65; i++) {
+  const text = '第' + (i + 1) + '章 正文内容 abcdefghij\n';
+  const bytes = enc.encode(text);
+  chapterParts.push(bytes);
+  chapterEntries.push({ title: '第' + (i + 1) + '章',
+    offset: chapterOffset, length: bytes.length });
+  chapterOffset += bytes.length;
+}
+const chapterBytes = Buffer.concat(chapterParts.map((part) =>
+  Buffer.from(part)));
 const chapterBookId = sha256(chapterBytes).slice(0, 16);
 const chapterMeta = {
-  v: 0, type: 'BOOK_META',
-  transferId: 'file-chapters-1',
-  bookId: chapterBookId, title: '分片目录书',
-  encoding: 'utf-8', bytes: chapterBytes.length,
-  sha256: sha256(chapterBytes),
-  chunks: 1, chunkBytes: 65536,
-  chapters: [], chapterChunks: 2
+  v: 0, type: 'BOOK_META', transferId: 'file-chapters-65',
+  bookId: chapterBookId, title: '六十五章书', encoding: 'utf-8',
+  bytes: chapterBytes.length, sha256: sha256(chapterBytes),
+  chunks: 1, chunkBytes: 65536, chapters: [], chapterChunks: 5
 };
 receiver.onMessage(JSON.stringify(chapterMeta));
-receiver.onMessage(JSON.stringify({
-  v: 0, type: 'CHAPTERS', transferId: 'file-chapters-1',
-  bookId: chapterBookId, index: 1, total: 2,
-  chapters: [{ title: '第二章', offset: 20,
-    length: chapterBytes.length - 20 }]
-}));
-receiver.onMessage(JSON.stringify({
-  v: 0, type: 'CHAPTERS', transferId: 'file-chapters-1',
-  bookId: chapterBookId, index: 1, total: 2,
-  chapters: [{ title: '第二章', offset: 20,
-    length: chapterBytes.length - 20 }]
-}));
-receiver.onMessage(JSON.stringify({
-  v: 0, type: 'CHAPTERS', transferId: 'file-chapters-1',
-  bookId: chapterBookId, index: 0, total: 2,
-  chapters: [{ title: '第一章', offset: 0, length: 20 }]
-}));
-const chaptersUri = writeReceived(
-  'inbox/chapters.bin', chapterBytes);
+for (let index = 4; index >= 0; index--) {
+  receiver.onMessage(JSON.stringify({
+    v: 0, type: 'CHAPTERS', transferId: chapterMeta.transferId,
+    bookId: chapterBookId, index, total: 5,
+    chapters: chapterEntries.slice(index * 13, (index + 1) * 13)
+  }));
+}
+const chaptersUri = writeReceived('inbox/chapters.bin', chapterBytes);
 const chapterOutcome = await wait((cb) =>
   receiver.receiveFileChannel(chaptersUri, null, cb));
 assert.equal(chapterOutcome.ok, true);
-const chapterAcks = sentMessages
-  .map((t) => JSON.parse(t))
-  .filter((m) => m.type === 'CHAPTERS_ACK' &&
-    m.transferId === 'file-chapters-1');
-assert.equal(chapterAcks.length, 3,
-  'each received chapter slice, including a duplicate, must be ACKed');
-assert.ok(chapterAcks.every((ack) => ack.ok === true && ack.total === 2));
-assert.equal(chapterAcks[1].duplicate, true,
-  'duplicate chapter slices must receive idempotent ACKs');
-assert.equal(chapterAcks[2].index, 0,
-  'out-of-order chapter slices must be accepted and individually ACKed');
 const chapterEntry = await wait((cb) =>
   LibraryIndex.getBook(chapterBookId, cb));
+assert.equal(chapterEntry.chapters.length, 65,
+  'a complete long directory must be retained for chapter navigation');
 assert.deepEqual(chapterEntry.chapters.map((c) => c.title),
-  ['第一章', '第二章'], 'CHAPTERS chunks must be assembled before addBook');
-await wait((cb) => LibraryIndex.removeBook(chapterBookId, cb));
-
-// ---- E3. File channel arriving before all chapter ACKs is rejected ----
-const earlyMeta = Object.assign({}, chapterMeta, {
-  transferId: 'file-first-chapters',
-  bookId: 'eeeeeeeeeeeeeeee'
-});
-receiver.onMessage(JSON.stringify(earlyMeta));
-const earlyOutcome = await wait((cb) =>
-  receiver.receiveFileChannel(chaptersUri, null, cb));
-assert.equal(earlyOutcome.ok, false);
-assert.equal(earlyOutcome.reason, 'E_MISSING_CHAPTERS',
-  'file-first delivery must not bypass missing chapter chunks');
+  chapterEntries.map((c) => c.title));
 assert.equal(sentMessages.map((t) => JSON.parse(t)).filter((m) =>
-  m.type === 'RESULT' && m.transferId === 'file-first-chapters' &&
-  m.reason === 'E_MISSING_CHAPTERS').length, 1);
-receiver.onMessage(JSON.stringify({
-  v: 0, type: 'CHAPTERS', transferId: 'file-first-chapters',
-  bookId: earlyMeta.bookId, index: 0, total: 2,
-  chapters: [{ title: '迟到目录', offset: 0, length: 20 }]
-}));
-const staleChapterAck = sentMessages.map((t) => JSON.parse(t)).filter((m) =>
-  m.type === 'CHAPTERS_ACK' &&
-  m.transferId === 'file-first-chapters');
-assert.equal(staleChapterAck.length, 1);
-assert.equal(staleChapterAck[0].ok, false,
-  'a chapter arriving after file-first cleanup must be rejected');
-assert.equal(staleChapterAck[0].reason, 'E_PROTOCOL');
+  m.type === 'CHAPTERS_ACK').length, 0,
+  'chapter metadata transfer must not use application ACKs');
 
-// ---- E4. One missing index is diagnosed and never committed ----
+// ---- E3. 缺失/不完整目录不阻断正文校验和入库 ----
+const missingMeta = Object.assign({}, meta, {
+  transferId: 'file-no-chapter-meta',
+  bookId: '1212121212121212', title: '无目录书'
+});
+delete missingMeta.chapters;
+receiver.onMessage(JSON.stringify(missingMeta));
+const missingOutcome = await wait((cb) =>
+  receiver.receiveFileChannel(receivedUri, null, cb));
+assert.equal(missingOutcome.ok, true,
+  'a valid body without chapter metadata must be imported');
+const missingEntry = await wait((cb) =>
+  LibraryIndex.getBook(missingMeta.bookId, cb));
+assert.deepEqual(missingEntry.chapters, []);
+
 const partialMeta = Object.assign({}, chapterMeta, {
-  transferId: 'file-missing-chapter',
-  bookId: 'ffffffffffffffff'
+  transferId: 'file-partial-chapters',
+  bookId: '3434343434343434'
 });
 receiver.onMessage(JSON.stringify(partialMeta));
 receiver.onMessage(JSON.stringify({
-  v: 0, type: 'CHAPTERS', transferId: 'file-missing-chapter',
-  bookId: partialMeta.bookId, index: 0, total: 2,
-  chapters: [{ title: '唯一已收到', offset: 0, length: 20 }]
+  v: 0, type: 'CHAPTERS', transferId: partialMeta.transferId,
+  bookId: partialMeta.bookId, index: 0, total: 5,
+  chapters: chapterEntries.slice(0, 13)
 }));
-const oldConsoleError = console.error;
-const chapterErrorLogs = [];
-console.error = (...args) => chapterErrorLogs.push(args.join(' '));
-let partialOutcome;
-try {
-  partialOutcome = await wait((cb) =>
-    receiver.receiveFileChannel(chaptersUri, null, cb));
-} finally {
-  console.error = oldConsoleError;
-}
-assert.equal(partialOutcome.ok, false);
-assert.equal(partialOutcome.reason, 'E_MISSING_CHAPTERS');
-assert.ok(chapterErrorLogs.some((line) =>
-  line.includes('received=1/2 missing=1')),
-  'file arrival must log received count and missing zero-based indexes');
-assert.equal(await wait((cb) => LibraryIndex.getBook(partialMeta.bookId, cb)),
-  null, 'incomplete chapter catalogs must not reach the shelf');
+const partialOutcome = await wait((cb) =>
+  receiver.receiveFileChannel(chaptersUri, null, cb));
+assert.equal(partialOutcome.ok, true,
+  'a correct body must still import when chapter chunks are missing');
+const partialEntry = await wait((cb) =>
+  LibraryIndex.getBook(partialMeta.bookId, cb));
+assert.deepEqual(partialEntry.chapters, [],
+  'an incomplete catalog must not be stored as a partial jump directory');
+assert.equal(sentMessages.map((t) => JSON.parse(t)).filter((m) =>
+  m.type === 'RESULT' && m.transferId === partialMeta.transferId).length, 0,
+  'file-channel completion must not depend on or emit RESULT');
 
-// ---- E5. Failed chapter ACK releases the watch transaction for the next tap ----
-const lostAckMeta = Object.assign({}, chapterMeta, {
-  transferId: 'ack-lost-cancelled',
-  bookId: 'abababababababab'
+// ---- E4. 失效的可选目录不会清掉活动传输或正文 ----
+const invalidCatalogMeta = Object.assign({}, meta, {
+  transferId: 'file-invalid-catalog',
+  bookId: '5656565656565656', title: '目录异常书',
+  chapters: [{ title: '越界', offset: -1, length: 20 }]
 });
-receiver.onMessage(JSON.stringify(lostAckMeta));
-receiver.onMessage(JSON.stringify({
-  v: 0, type: 'CHAPTERS', transferId: lostAckMeta.transferId,
-  bookId: lostAckMeta.bookId, index: 0, total: 2,
-  chapters: [{ title: '已登记但回执丢失', offset: 0, length: 20 }]
-}));
-assert.ok(sentMessages.map((t) => JSON.parse(t)).some((message) =>
-  message.type === 'CHAPTERS_ACK' &&
-  message.transferId === lostAckMeta.transferId && message.ok),
-  'watch registers the chapter before the simulated lost ACK');
-// The phone's ACK waiter times out and its best-effort cancellation arrives.
-receiver.onMessage(JSON.stringify({
-  v: 0, type: 'ERROR', transferId: lostAckMeta.transferId,
-  code: 'E_CANCELLED'
-}));
-const retryMeta = Object.assign({}, chapterMeta, {
-  transferId: 'ack-lost-retry',
-  bookId: 'cdcdcdcdcdcdcdcd'
-});
-receiver.onMessage(JSON.stringify(retryMeta));
-receiver.onMessage(JSON.stringify({
-  v: 0, type: 'CHAPTERS', transferId: retryMeta.transferId,
-  bookId: retryMeta.bookId, index: 0, total: 2,
-  chapters: [{ title: '下一次用户发送', offset: 0, length: 20 }]
-}));
-const retryAcks = sentMessages.map((t) => JSON.parse(t)).filter((message) =>
-  message.type === 'CHAPTERS_ACK' &&
-  message.transferId === retryMeta.transferId);
-const retryAck = retryAcks[retryAcks.length - 1];
-assert.ok(retryAck && retryAck.ok,
-  'a retry after E_CANCELLED must not be rejected with E_BUSY');
-receiver.onMessage(JSON.stringify({
-  v: 0, type: 'ERROR', transferId: retryMeta.transferId,
-  code: 'E_CANCELLED'
-}));
+receiver.onMessage(JSON.stringify(invalidCatalogMeta));
+const invalidCatalogOutcome = await wait((cb) =>
+  receiver.receiveFileChannel(receivedUri, null, cb));
+assert.equal(invalidCatalogOutcome.ok, true,
+  'invalid optional chapter metadata must not reject a valid body');
+const invalidCatalogEntry = await wait((cb) =>
+  LibraryIndex.getBook(invalidCatalogMeta.bookId, cb));
+assert.deepEqual(invalidCatalogEntry.chapters, []);
 
-// ---- E6. A lost cancellation is recovered by bounded stale cleanup ----
+// ---- E5. 被遗弃的传输超时清理后可接收下一本 ----
 let fakeNow = 0;
 let fakeTimerId = 0;
 const fakeTimers = new Map();
 const staleReplies = [];
-const staleReceiver = new IncomingBookReceiver(() => {},
+const staleStatuses = [];
+const staleReceiver = new IncomingBookReceiver((status) => staleStatuses.push(status),
   (message) => staleReplies.push(JSON.parse(message)), {
     staleTimeoutMs: 1000,
     now: () => fakeNow,
@@ -392,7 +334,7 @@ const staleReceiver = new IncomingBookReceiver(() => {},
     clearTimeout: (id) => fakeTimers.delete(id)
   });
 const staleMeta = Object.assign({}, chapterMeta, {
-  transferId: 'ack-lost-expiry',
+  transferId: 'abandoned-expiry',
   bookId: 'efefefefefefefef'
 });
 staleReceiver.onMessage(JSON.stringify(staleMeta));
@@ -404,27 +346,24 @@ for (const [id, timer] of [...fakeTimers]) {
   }
 }
 const expiryRetry = Object.assign({}, chapterMeta, {
-  transferId: 'ack-lost-expiry-retry',
-  bookId: '1212121212121212'
+  transferId: 'expiry-retry',
+  bookId: '9898989898989898'
 });
 staleReceiver.onMessage(JSON.stringify(expiryRetry));
-staleReceiver.onMessage(JSON.stringify({
-  v: 0, type: 'CHAPTERS', transferId: expiryRetry.transferId,
-  bookId: expiryRetry.bookId, index: 0, total: 2,
-  chapters: [{ title: '过期事务后的发送', offset: 0, length: 20 }]
-}));
-assert.ok(staleReplies.some((message) =>
-  message.type === 'CHAPTERS_ACK' &&
-  message.transferId === expiryRetry.transferId && message.ok),
+assert.ok(staleStatuses.some((status) => status === '接收《六十五章书》'),
   'bounded expiry must clear an unreachable old transaction');
-staleReceiver.onMessage(JSON.stringify({
-  v: 0, type: 'ERROR', transferId: expiryRetry.transferId,
-  code: 'E_CANCELLED'
-}));
+const expiryOutcome = await wait((cb) =>
+  staleReceiver.receiveFileChannel(chaptersUri, null, cb));
+assert.equal(expiryOutcome.ok, true,
+  'the next file transfer must not wait for an application ACK');
 
 // ---- F. LibraryIndex 串行写（P1-12） ----
 await wait((cb) => LibraryIndex.removeBook(bookId, cb));
 await wait((cb) => LibraryIndex.removeBook(msgBookId, cb));
+for (const id of [chapterBookId, missingMeta.bookId, partialMeta.bookId,
+  invalidCatalogMeta.bookId, expiryRetry.bookId]) {
+  await wait((cb) => LibraryIndex.removeBook(id, cb));
+}
 const addIds = [];
 for (let i = 0; i < 5; i++) {
   const id = ('ddddd' + String(i).padStart(11, '0'))
