@@ -85,6 +85,9 @@ export interface DiagnosticDetails {
   deltaYVp?: number;
   pageInForeground?: boolean;
   readerReady?: boolean;
+  receiverReady?: boolean;
+  deviceSelected?: boolean;
+  peerConfigured?: boolean;
   loading?: boolean;
   leaving?: boolean;
   catalogVisible?: boolean;
@@ -303,6 +306,15 @@ function safeDetails(details: DiagnosticDetails | undefined):
     out.pageInForeground = details.pageInForeground;
   }
   if (typeof details.readerReady === 'boolean') out.readerReady = details.readerReady;
+  if (typeof details.receiverReady === 'boolean') {
+    out.receiverReady = details.receiverReady;
+  }
+  if (typeof details.deviceSelected === 'boolean') {
+    out.deviceSelected = details.deviceSelected;
+  }
+  if (typeof details.peerConfigured === 'boolean') {
+    out.peerConfigured = details.peerConfigured;
+  }
   if (typeof details.loading === 'boolean') out.loading = details.loading;
   if (typeof details.leaving === 'boolean') out.leaving = details.leaving;
   if (typeof details.catalogVisible === 'boolean') {

@@ -284,8 +284,8 @@ export class WearDeviceService {
     }
   }
 
-  // 注册手表 → 手机的消息接收（用于 RESULT 回执、
-  // ACK、RESUME）。appParam 中的指纹必须与手表
+  // 注册手表 → 手机的消息接收（供阅读进度同步使用）。
+  // appParam 中的指纹必须与手表
   // supportLists 配置一致。
   async registerMessageReceiver(
     device: TargetDevice,

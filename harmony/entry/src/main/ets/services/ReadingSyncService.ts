@@ -113,7 +113,7 @@ export class ReadingSyncService {
     }
   }
 
-  // 返回 true 表示这是进度消息，调用方不应再交给传书 RESULT 处理器。
+  // 返回 true 表示这是本服务处理的阅读进度消息；传书完成以文件通道回调为准。
   onMessageFromWatch(content: Uint8Array): boolean {
     let text = '';
     try {

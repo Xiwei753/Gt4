@@ -397,9 +397,22 @@ struct Index {
 
   // 注册/恢复同一个手表 → 手机消息接收回调，供阅读进度同步使用。
   private async registerReceiverFor(device: TargetDevice): Promise<boolean> {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     if (!isConfigured(WATCH_PEER) || this.transferService === null) {
+      recordReaderDiagnostic(context, 'device', 'receiver_register_fail', 0, {
+        source: 'registerMessageReceiver',
+        reason: !isConfigured(WATCH_PEER) ? 'E_PEER_IDENTITY_UNCONFIGURED' :
+          'E_TRANSFER_SERVICE_UNAVAILABLE',
+        deviceSelected: this.selectedRandomId === device.randomId,
+        receiverReady: this.receiverReady
+      });
       return false;
     }
+    recordReaderDiagnostic(context, 'device', 'receiver_register_start', 0, {
+      source: 'registerMessageReceiver',
+      deviceSelected: this.selectedRandomId === device.randomId,
+      receiverReady: this.receiverReady
+    });
     try {
       await this.getDeviceService().registerMessageReceiver(
         device, WATCH_PEER.bundleName, WATCH_PEER.fingerprint,
@@ -408,15 +421,32 @@ struct Index {
             this.syncService.onMessageFromWatch(message.content);
           }
         });
-      this.receiverReady = true;
-      return true;
+      const deviceSelected = this.selectedRandomId === device.randomId;
+      if (deviceSelected) this.receiverReady = true;
+      recordReaderDiagnostic(context, 'device', 'receiver_register_success', 0, {
+        source: 'registerMessageReceiver',
+        deviceSelected: deviceSelected,
+        receiverReady: this.receiverReady
+      });
+      return deviceSelected;
     } catch (error) {
       const failure = error as SdkCodeCarrier;
-      const code = typeof failure.code === 'number' ? failure.code : 0;
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const message = error instanceof Error ? error.message : String(error);
+      const codeMatch = /(?:code|failed:)\s*(-?\d+)/i.exec(message);
+      const code = typeof failure.code === 'number' ? failure.code :
+        codeMatch !== null ? Number(codeMatch[1]) : 0;
+      const deviceSelected = this.selectedRandomId === device.randomId;
+      if (deviceSelected) this.receiverReady = false;
       recordReaderDiagnostic(context, 'device', 'receiver_register_fail',
-        code, { source: 'registerMessageReceiver' });
-      this.deviceStatus += '；消息接收注册失败（' + code + '）';
+        code, {
+          source: 'registerMessageReceiver',
+          reason: code === 0 ? 'E_REGISTER_FAILED' : 'E_SDK_REGISTER_FAILED',
+          deviceSelected: deviceSelected,
+          receiverReady: this.receiverReady
+        });
+      if (deviceSelected) {
+        this.deviceStatus += '；消息接收注册失败（' + code + '）';
+      }
       return false;
     }
   }
@@ -425,13 +455,15 @@ struct Index {
     if (e < 0 || e >= this.devices.length) return;
     const previous = this.devices[this.selectedDevice];
     const device = this.devices[e];
-    if (previous && previous.randomId !== device.randomId) {
-      await this.getDeviceService().unregisterMessageReceiver(previous);
-    }
+    // Close the send gate before any awaited unregister/register call so a
+    // tap cannot race the receiver becoming ready for the new selection.
     this.receiverReady = false;
     this.selectedDevice = e;
     this.selectedRandomId = device.randomId;
     this.deviceStatus = '已选择：' + device.name;
+    if (previous && previous.randomId !== device.randomId) {
+      await this.getDeviceService().unregisterMessageReceiver(previous);
+    }
     if (!isConfigured(WATCH_PEER)) {
       this.deviceStatus += '；手表 Lite 公钥指纹未配置或格式错误，' +
         '发送将保持禁用';
@@ -499,6 +531,7 @@ struct Index {
 
   private canSend(): boolean {
     return this.selectedDevice >= 0 &&
+      this.receiverReady &&
       isConfigured(WATCH_PEER) &&
       !this.sending;
   }
@@ -515,7 +548,7 @@ struct Index {
     if (this.sending) return;
     if (!this.canSend() || this.transferService === null) {
       this.transferText =
-        '发送不可用：请先选择设备并配置手表 Lite 公钥指纹';
+        '发送不可用：请先选择设备并配置手表 Lite 公钥指纹，等待消息接收就绪';
       return;
     }
     if (!this.canTransferBook(book)) {
@@ -532,7 +565,12 @@ struct Index {
     let wasCancelled = false;
     let lastSdkCode = 0;
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    recordReaderDiagnostic(context, 'transfer', 'start');
+    recordReaderDiagnostic(context, 'transfer', 'start', 0, {
+      source: 'sendBook',
+      receiverReady: this.receiverReady,
+      deviceSelected: this.selectedRandomId === device.randomId,
+      peerConfigured: isConfigured(WATCH_PEER)
+    });
     const ok = await this.transferService.sendBook(
       book, device, WATCH_PEER,
       {

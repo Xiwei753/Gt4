@@ -164,8 +164,8 @@ assert.ok(index.includes('ReadingSyncService') &&
   'phone index must route watch messages through sync first');
 const routePos = index.indexOf('syncService.onMessageFromWatch');
 const transferPos = index.indexOf('transferService.onMessageFromWatch');
-assert.ok(routePos >= 0 && transferPos > routePos,
-  'progress messages must be offered to sync before transfer RESULT');
+assert.ok(routePos >= 0 && transferPos === -1,
+  'phone must route watch progress to sync without a RESULT-dependent transfer handler');
 assert.ok(index.includes("Button('同步可映射书籍的阅读进度')") &&
   index.includes('syncReadingProgress'),
   'phone index must expose manual progress sync');
