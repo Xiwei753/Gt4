@@ -14,7 +14,8 @@ import { ensureDirs, bookPath,
   deleteBook } from '../../storage/BookStorage';
 import { listBooks, removeBook } from '../../storage/LibraryIndex';
 import { loadLastBook, clearProgress } from '../../storage/ProgressStore';
-import { beginReceive, stopReceive } from '../../wear/WearReceiver';
+import { getReceiveStatus,
+  setReceiveStatusHandler } from '../../wear/WearReceiver';
 import { isLowerHex } from '../../util/Validate';
 
 export default {
@@ -36,20 +37,15 @@ export default {
     this.resumeDone = false;
     this.externalLoaded = false;
     this.lastBookId = '';
+    this.transferStatus = getReceiveStatus();
+    setReceiveStatusHandler((message) => {
+      this.handleReceiveStatus(message);
+    });
     this.refreshShelf();
     // 2) 后台合入外部（手机传书）书目，绝不阻塞上面的书架。
     this.loadExternal();
     // 3) 上次阅读记录也异步读取；书架先显示，绝不永久等待。
     this.loadResume();
-    // 4) 传书接收与书架彼此独立：初始化异常不能拖垮离线书架。
-    try {
-      beginReceive((message) => {
-        this.handleReceiveStatus(message);
-      });
-    } catch (error) {
-      this.transferStatus = '传书初始化异常';
-      console.error('[suyue] E_WEAR_INIT ' + error);
-    }
   },
   // 从阅读页返回时刷新外部书目（内置书单固定）。
   onShow() {
@@ -57,7 +53,7 @@ export default {
     this.tryAutoResume();
   },
   onDestroy() {
-    stopReceive();
+    setReceiveStatusHandler(null);
   },
   // 内置书单（同步）：只做一次轻量拷贝，带上 origin。
   bundledList() {

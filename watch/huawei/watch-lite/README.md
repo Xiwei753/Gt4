@@ -125,7 +125,9 @@ Lite JS SDK 在 `$HOME/.harmony-cli/sdk/default/openharmony/js`。
   手机书仍需二次点击确认删除。
 - 已移除：#9 的手动「文件自检」入口、`pages/probe/*`、`WatchFileProbe.js`、
   `BundledBookImporter.js`，以及启动前置链 `prepareLibrary/readIndex/migrateDemo/...` 与重复看门狗。
-- Wear Engine 初始化与本地书库分开 try/catch，传书异常只体现在底部 `transferStatus`。
+- Wear Engine 的唯一订阅由 `MainAbility/app.js` 在应用创建时启动、应用销毁时注销，
+  不随书架页切到阅读页而停止；书架只挂接/解绑自己的状态回调，冷启动自动续读进入阅读页时仍可接收。
+  初始化状态保存在 `wear/WearReceiver.js`，书架显示当前状态，阅读页不创建第二个订阅。
 
 `storage/BookStorage.js` 仍保留 settle-once + `setOperationTimeout`（默认 8s）无回调兜底。
 

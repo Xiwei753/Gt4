@@ -455,8 +455,8 @@ struct Index {
     if (e < 0 || e >= this.devices.length) return;
     const previous = this.devices[this.selectedDevice];
     const device = this.devices[e];
-    // Close the send gate before any awaited unregister/register call so a
-    // tap cannot race the receiver becoming ready for the new selection.
+    // Mark progress sync unavailable until the receiver is registered for
+    // the selected device. File sending uses its independent transfer channel.
     this.receiverReady = false;
     this.selectedDevice = e;
     this.selectedRandomId = device.randomId;
@@ -531,7 +531,6 @@ struct Index {
 
   private canSend(): boolean {
     return this.selectedDevice >= 0 &&
-      this.receiverReady &&
       isConfigured(WATCH_PEER) &&
       !this.sending;
   }
@@ -548,7 +547,7 @@ struct Index {
     if (this.sending) return;
     if (!this.canSend() || this.transferService === null) {
       this.transferText =
-        '发送不可用：请先选择设备并配置手表 Lite 公钥指纹，等待消息接收就绪';
+        '发送不可用：请先选择设备并配置手表 Lite 公钥指纹';
       return;
     }
     if (!this.canTransferBook(book)) {
