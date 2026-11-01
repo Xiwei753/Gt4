@@ -18,7 +18,8 @@ const src = readFileSync(
   'utf8');
 const modPath = join(tmp, 'TransferWaiters.mjs');
 writeFileSync(modPath, src);
-const { createWaiterRegistry } = await import(modPath);
+const { createWaiterRegistry, sendThenAwaitChapterAck } =
+  await import(modPath);
 
 // Phone UI book transfer must be explicitly one-shot. The waiter registry
 // itself remains able to handle late RESULT, but BookTransferService never
@@ -340,3 +341,54 @@ console.info('PASS: RESULT waiter lifecycle ' +
 }
 
 console.info('PASS: CHAPTERS_ACK matching, timeout, cancellation and stale ACK handling');
+
+// ---- 10. ACK cannot outrun a later SDK send failure ----
+{
+  let rejectSend = null;
+  const sendPromise = new Promise((resolve, reject) => {
+    rejectSend = reject;
+  });
+  const ackPromise = Promise.resolve({ ok: true });
+  let fileTransferStarted = false;
+  const flow = sendThenAwaitChapterAck(sendPromise, ackPromise)
+    .then((ack) => {
+      if (ack.ok) fileTransferStarted = true;
+    });
+  await Promise.resolve();
+  assert.equal(fileTransferStarted, false,
+    'an early ACK must not start file transfer before SDK send completes');
+  rejectSend(new Error('SDK send failed after early ACK'));
+  await assert.rejects(flow, /SDK send failed/);
+  assert.equal(fileTransferStarted, false,
+    'a late SDK failure must prevent file transfer');
+}
+
+// ---- 11. A successful send still waits for ACK and timeout blocks file ----
+{
+  let resolveSend = null;
+  const sendPromise = new Promise((resolve) => {
+    resolveSend = resolve;
+  });
+  const ackPromise = Promise.resolve({ ok: false,
+    reason: 'E_CHAPTERS_ACK_TIMEOUT' });
+  let fileTransferStarted = false;
+  const flow = sendThenAwaitChapterAck(sendPromise, ackPromise)
+    .then((ack) => {
+      if (ack.ok) fileTransferStarted = true;
+      return ack;
+    });
+  await Promise.resolve();
+  assert.equal(fileTransferStarted, false,
+    'the unresolved send must remain the first gate');
+  resolveSend();
+  assert.deepEqual(await flow, { ok: false,
+    reason: 'E_CHAPTERS_ACK_TIMEOUT' });
+  assert.equal(fileTransferStarted, false,
+    'successful send plus ACK timeout must not start file transfer');
+}
+
+assert.ok(senderSrc.includes('sendThenAwaitChapterAck(') &&
+  !senderSrc.includes('Promise.race') &&
+  senderSrc.includes('notifyRemoteCancellation(transferId)'),
+  'phone must await SDK send then ACK and cancel remote state after failure');
+console.info('PASS: chapter send result gates ACK and file transfer');

@@ -334,6 +334,94 @@ assert.ok(chapterErrorLogs.some((line) =>
 assert.equal(await wait((cb) => LibraryIndex.getBook(partialMeta.bookId, cb)),
   null, 'incomplete chapter catalogs must not reach the shelf');
 
+// ---- E5. Failed chapter ACK releases the watch transaction for the next tap ----
+const lostAckMeta = Object.assign({}, chapterMeta, {
+  transferId: 'ack-lost-cancelled',
+  bookId: 'abababababababab'
+});
+receiver.onMessage(JSON.stringify(lostAckMeta));
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'CHAPTERS', transferId: lostAckMeta.transferId,
+  bookId: lostAckMeta.bookId, index: 0, total: 2,
+  chapters: [{ title: '已登记但回执丢失', offset: 0, length: 20 }]
+}));
+assert.ok(sentMessages.map((t) => JSON.parse(t)).some((message) =>
+  message.type === 'CHAPTERS_ACK' &&
+  message.transferId === lostAckMeta.transferId && message.ok),
+  'watch registers the chapter before the simulated lost ACK');
+// The phone's ACK waiter times out and its best-effort cancellation arrives.
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'ERROR', transferId: lostAckMeta.transferId,
+  code: 'E_CANCELLED'
+}));
+const retryMeta = Object.assign({}, chapterMeta, {
+  transferId: 'ack-lost-retry',
+  bookId: 'cdcdcdcdcdcdcdcd'
+});
+receiver.onMessage(JSON.stringify(retryMeta));
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'CHAPTERS', transferId: retryMeta.transferId,
+  bookId: retryMeta.bookId, index: 0, total: 2,
+  chapters: [{ title: '下一次用户发送', offset: 0, length: 20 }]
+}));
+const retryAcks = sentMessages.map((t) => JSON.parse(t)).filter((message) =>
+  message.type === 'CHAPTERS_ACK' &&
+  message.transferId === retryMeta.transferId);
+const retryAck = retryAcks[retryAcks.length - 1];
+assert.ok(retryAck && retryAck.ok,
+  'a retry after E_CANCELLED must not be rejected with E_BUSY');
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'ERROR', transferId: retryMeta.transferId,
+  code: 'E_CANCELLED'
+}));
+
+// ---- E6. A lost cancellation is recovered by bounded stale cleanup ----
+let fakeNow = 0;
+let fakeTimerId = 0;
+const fakeTimers = new Map();
+const staleReplies = [];
+const staleReceiver = new IncomingBookReceiver(() => {},
+  (message) => staleReplies.push(JSON.parse(message)), {
+    staleTimeoutMs: 1000,
+    now: () => fakeNow,
+    setTimeout: (fn, delay) => {
+      const id = ++fakeTimerId;
+      fakeTimers.set(id, { due: fakeNow + delay, fn });
+      return id;
+    },
+    clearTimeout: (id) => fakeTimers.delete(id)
+  });
+const staleMeta = Object.assign({}, chapterMeta, {
+  transferId: 'ack-lost-expiry',
+  bookId: 'efefefefefefefef'
+});
+staleReceiver.onMessage(JSON.stringify(staleMeta));
+fakeNow = 1001;
+for (const [id, timer] of [...fakeTimers]) {
+  if (timer.due <= fakeNow) {
+    fakeTimers.delete(id);
+    timer.fn();
+  }
+}
+const expiryRetry = Object.assign({}, chapterMeta, {
+  transferId: 'ack-lost-expiry-retry',
+  bookId: '1212121212121212'
+});
+staleReceiver.onMessage(JSON.stringify(expiryRetry));
+staleReceiver.onMessage(JSON.stringify({
+  v: 0, type: 'CHAPTERS', transferId: expiryRetry.transferId,
+  bookId: expiryRetry.bookId, index: 0, total: 2,
+  chapters: [{ title: '过期事务后的发送', offset: 0, length: 20 }]
+}));
+assert.ok(staleReplies.some((message) =>
+  message.type === 'CHAPTERS_ACK' &&
+  message.transferId === expiryRetry.transferId && message.ok),
+  'bounded expiry must clear an unreachable old transaction');
+staleReceiver.onMessage(JSON.stringify({
+  v: 0, type: 'ERROR', transferId: expiryRetry.transferId,
+  code: 'E_CANCELLED'
+}));
+
 // ---- F. LibraryIndex 串行写（P1-12） ----
 await wait((cb) => LibraryIndex.removeBook(bookId, cb));
 await wait((cb) => LibraryIndex.removeBook(msgBookId, cb));

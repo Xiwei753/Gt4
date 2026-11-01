@@ -75,6 +75,9 @@ export interface DiagnosticDetails {
   pageViewportHeightPx?: number;
   source?: string;
   reason?: string;
+  chapterIndex?: number;
+  chapterTotal?: number;
+  chapterStatus?: string;
   hitRegion?: string;
   inputXVp?: number;
   inputYVp?: number;
@@ -279,6 +282,18 @@ function safeDetails(details: DiagnosticDetails | undefined):
   }
   if (isSafeLabel(details.source)) out.source = details.source;
   if (isSafeLabel(details.reason)) out.reason = details.reason;
+  if (isSafeCount(details.chapterIndex)) {
+    out.chapterIndex = details.chapterIndex;
+  }
+  if (isSafeCount(details.chapterTotal)) {
+    out.chapterTotal = details.chapterTotal;
+  }
+  if (details.chapterStatus === 'sent' || details.chapterStatus === 'ack' ||
+      details.chapterStatus === 'timeout' ||
+      details.chapterStatus === 'rejected' ||
+      details.chapterStatus === 'send_failed') {
+    out.chapterStatus = details.chapterStatus;
+  }
   if (isSafeLabel(details.hitRegion)) out.hitRegion = details.hitRegion;
   if (isSafeMetric(details.inputXVp)) out.inputXVp = roundMetric(details.inputXVp);
   if (isSafeMetric(details.inputYVp)) out.inputYVp = roundMetric(details.inputYVp);
@@ -347,6 +362,11 @@ function isSafeMetric(value: number | undefined): value is number {
 
 function isSafeByteOffset(value: number | undefined): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSafeCount(value: number | undefined): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) &&
+    value >= 0 && value <= 10000;
 }
 
 function isSafeLabel(value: string | undefined): value is string {

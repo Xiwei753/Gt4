@@ -238,3 +238,12 @@ export function createWaiterRegistry(env) {
     }
   };
 }
+
+// A chapter slice advances only after both the Wear Engine send call and the
+// watch application's matching ACK succeed. Register the ACK waiter before
+// starting sendMessage; this keeps an early ACK cached without hiding a later
+// SDK send failure.
+export async function sendThenAwaitChapterAck(sendPromise, ackPromise) {
+  await sendPromise;
+  return await ackPromise;
+}

@@ -537,11 +537,21 @@ const phoneTransfer = read(
   'harmony/entry/src/main/ets/services/BookTransferService.ts');
 const transferWaiters = read(
   'harmony/entry/src/main/ets/services/TransferWaiters.js');
+const readerDiagnostics = read(
+  'harmony/entry/src/main/ets/services/ReaderDiagnostics.ts');
 assert.ok(phoneTransfer.includes('beginChapterAck(') &&
   phoneTransfer.includes('deliverChapterAck(message)') &&
   transferWaiters.includes('deliverChapterAck: function') &&
-  transferWaiters.includes('E_CHAPTERS_ACK_TIMEOUT'),
+  transferWaiters.includes('E_CHAPTERS_ACK_TIMEOUT') &&
+  phoneTransfer.includes('sendThenAwaitChapterAck(') &&
+  !phoneTransfer.includes('Promise.race') &&
+  phoneTransfer.includes('notifyRemoteCancellation(transferId)'),
   'phone must wait for a matching application-level chapter ACK before file transfer');
+assert.ok(phoneIndexFull.includes('onChapterChunk:') &&
+  phoneIndexFull.includes('chapterIndex: index') &&
+  readerDiagnostics.includes('chapterIndex?: number') &&
+  readerDiagnostics.includes("details.chapterStatus === 'send_failed'"),
+  'per-chunk phone outcomes must enter the bounded exportable diagnostics');
 assert.ok(read('harmony/entry/src/main/ets/services/BookTransferService.ts')
   .includes('splitChapterChunks') &&
   read('android/app/src/main/java/com/xiwei/suyue/wear/BookTransferService.kt')

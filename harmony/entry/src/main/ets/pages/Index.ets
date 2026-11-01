@@ -559,6 +559,20 @@ struct Index {
             (progress.percent > 0 &&
               progress.state === TransferState.SENDING ?
               '（' + progress.percent + '%）' : '');
+        },
+        onChapterChunk: (index: number, total: number,
+          result: 'sent' | 'ack' | 'timeout' | 'rejected' |
+            'send_failed') => {
+          const stage = result === 'sent' ? 'chapter_sent' :
+            result === 'ack' ? 'chapter_ack' :
+            result === 'timeout' ? 'chapter_timeout' :
+            result === 'send_failed' ? 'chapter_send_failed' :
+            'chapter_rejected';
+          recordReaderDiagnostic(context, 'transfer', stage, 0, {
+            chapterIndex: index,
+            chapterTotal: total,
+            chapterStatus: result
+          });
         }
       });
     this.sending = false;

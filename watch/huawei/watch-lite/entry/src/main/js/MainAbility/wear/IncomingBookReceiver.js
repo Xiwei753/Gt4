@@ -21,7 +21,19 @@ import { beginTransfer, applyChunk, applyChapterChunk,
 // 文件通道流式校验窗口（字节）。
 var VERIFY_WINDOW = 64 * 1024;
 
-export function IncomingBookReceiver(onStatus, sendToPhone) {
+export function IncomingBookReceiver(onStatus, sendToPhone, options) {
+  const config = options || {};
+  // Longer than the phone's 5-minute upload and 60-second result limits,
+  // with margin for lifecycle scheduling on the watch.
+  const staleTimeoutMs = typeof config.staleTimeoutMs === 'number' &&
+    isFinite(config.staleTimeoutMs) && config.staleTimeoutMs > 0 ?
+    config.staleTimeoutMs : 7 * 60 * 1000;
+  const now = typeof config.now === 'function' ?
+    config.now : () => Date.now();
+  const setTimer = typeof config.setTimeout === 'function' ?
+    config.setTimeout : setTimeout;
+  const clearTimer = typeof config.clearTimeout === 'function' ?
+    config.clearTimeout : clearTimeout;
   const notify = (message) => {
     if (typeof onStatus === 'function') onStatus(message);
   };
@@ -34,6 +46,8 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
     }
   };
   const transfers = {};   // transferId → state
+  const staleTimers = {}; // transferId → bounded cleanup timer
+  const expiresAt = {};
 
   // 当前在途 transferId（单本互斥，P0-2）。
   function activeTransferId() {
@@ -70,7 +84,45 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
   }
 
   function cleanup(transferId) {
+    if (staleTimers[transferId] !== undefined) {
+      clearTimer(staleTimers[transferId]);
+      delete staleTimers[transferId];
+    }
+    delete expiresAt[transferId];
     delete transfers[transferId];
+  }
+
+  function expireIfStale(transferId, expectedState) {
+    if (transfers[transferId] !== expectedState) return;
+    delete staleTimers[transferId];
+    const remaining = expiresAt[transferId] - now();
+    if (remaining > 0) {
+      staleTimers[transferId] = setTimer(() =>
+        expireIfStale(transferId, expectedState), remaining);
+      return;
+    }
+    cleanup(transferId);
+    console.warn('transfer expired reason=E_TIMEOUT');
+    notify('传书状态超时，已清理');
+  }
+
+  function armStaleCleanup(transferId, state) {
+    if (staleTimers[transferId] !== undefined) {
+      clearTimer(staleTimers[transferId]);
+    }
+    expiresAt[transferId] = now() + staleTimeoutMs;
+    staleTimers[transferId] = setTimer(() =>
+      expireIfStale(transferId, state), staleTimeoutMs);
+  }
+
+  function expireStaleTransfers() {
+    const currentTime = now();
+    for (const transferId in transfers) {
+      if (expiresAt[transferId] !== undefined &&
+          expiresAt[transferId] <= currentTime) {
+        expireIfStale(transferId, transfers[transferId]);
+      }
+    }
   }
 
   // 消息通道入口。ACK/RESULT/RESUME 全部
@@ -84,6 +136,9 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
       return notify('收到非协议消息');
     }
     if (message.v !== 0) return notify('协议版本不支持');
+    // A fresh user-initiated BOOK_META must not remain blocked by an old
+    // transfer if a best-effort E_CANCELLED could not reach the watch.
+    expireStaleTransfers();
     switch (message.type) {
       case 'BOOK_META': {
         // 单本互斥：第二个不同 transferId 的
@@ -100,6 +155,7 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
             false, started.reason);
         }
         transfers[message.transferId] = started.state;
+        armStaleCleanup(message.transferId, started.state);
         if (started.state.expectedChapterChunks > 0) {
           console.info('chapter chunks expected=' +
             started.state.expectedChapterChunks);

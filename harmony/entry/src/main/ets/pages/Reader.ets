@@ -4,6 +4,7 @@
 import { common } from '@kit.AbilityKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
 import { router } from '@kit.ArkUI';
+import { text } from '@kit.ArkGraphics2D';
 import { inputConsumer, KeyCode, KeyEvent } from '@kit.InputKit';
 import { picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -72,6 +73,7 @@ const READER_GESTURE_SAFE_REGION_RATIO = 0.36;
 const READER_INPUT_FEEDBACK_MS = 1600;
 const READER_INPUT_HILOG_TAG = 'suyue/ReaderInput';
 const REGISTERED_READER_FONT_FAMILIES = new Set<string>();
+let readerFontRegistrationQueue: Promise<void> = Promise.resolve();
 
 @Entry
 @Component
@@ -1233,7 +1235,7 @@ struct Reader {
         item.id === settings.readerFontId);
       if (font && fontService.isAvailable(font)) {
         try {
-          this.registerReaderFont(font, fontService);
+          await this.registerReaderFont(font, fontService);
           this.readerFontFamily = readerFontFamily(font.id);
         } catch (error) {
           settings.readerFontId = 'system';
@@ -1253,15 +1255,22 @@ struct Reader {
     this.applySettings(settings);
   }
 
-  private registerReaderFont(font: ImportedReaderFont,
-    service: ReaderFontService): void {
+  private async registerReaderFont(font: ImportedReaderFont,
+    service: ReaderFontService): Promise<void> {
     const family = readerFontFamily(font.id);
     if (REGISTERED_READER_FONT_FAMILIES.has(family)) return;
-    this.getUIContext().getFont().registerFont({
-      familyName: family,
-      familySrc: 'file://' + service.pathFor(font)
+    const registration = readerFontRegistrationQueue.then(async (): Promise<void> => {
+      if (REGISTERED_READER_FONT_FAMILIES.has(family)) return;
+      if (!service.isAvailable(font)) {
+        throw new Error('字体文件不可用');
+      }
+      await text.FontCollection.getGlobalInstance().loadFont(
+        family, 'file://' + service.pathFor(font));
+      REGISTERED_READER_FONT_FAMILIES.add(family);
     });
-    REGISTERED_READER_FONT_FAMILIES.add(family);
+    readerFontRegistrationQueue = registration.then((): void => {},
+      (): void => {});
+    await registration;
   }
 
   private applySettings(settings: ReaderSettings): void {
@@ -1360,7 +1369,7 @@ struct Reader {
           this.readerFontId = 'system';
           this.readerFontFamily = READER_TEXT_FONT;
         } else {
-          this.registerReaderFont(font, service);
+          await this.registerReaderFont(font, service);
           this.readerFontId = font.id;
           this.readerFontFamily = readerFontFamily(font.id);
           this.fontStatus = '已选择：' + font.name;
@@ -1402,7 +1411,7 @@ struct Reader {
       }
       const service = new ReaderFontService(context);
       const imported = await service.importFont(uris[0]);
-      this.registerReaderFont(imported, service);
+      await this.registerReaderFont(imported, service);
       this.readerFonts = [imported, ...this.readerFonts.filter(
         (font: ImportedReaderFont) => font.id !== imported.id)];
       this.readerFontId = imported.id;

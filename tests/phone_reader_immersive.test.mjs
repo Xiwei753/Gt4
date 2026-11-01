@@ -64,8 +64,9 @@ const fontService = read(
   'harmony/entry/src/main/ets/services/ReaderFontService.ts');
 assert.ok(reader.includes('new picker.DocumentViewPicker(context)') &&
   reader.includes("fileSuffixFilters = ['Fonts (.ttf, .otf)|.ttf,.otf']") &&
-  reader.includes('registerFont({') &&
-  reader.includes("familySrc: 'file://' + service.pathFor(font)") &&
+  reader.includes('await text.FontCollection.getGlobalInstance().loadFont(') &&
+  reader.includes('readerFontRegistrationQueue') &&
+  reader.includes("'file://' + service.pathFor(font)") &&
   fontService.includes("this.context.filesDir + '/reader-fonts'") &&
   fontService.includes('fileIo.renameSync(tempPath, finalPath)'),
   'Aa settings must import local TTF/OTF files into private storage');

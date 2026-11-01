@@ -26,7 +26,8 @@ import { TransferProgress, TransferState,
   UPLOAD_TIMEOUT_MS,
   newTransferId } from '../model/TransferModels';
 import { WearDeviceService } from './WearDeviceService';
-import { createWaiterRegistry } from './TransferWaiters';
+import { createWaiterRegistry,
+  sendThenAwaitChapterAck } from './TransferWaiters';
 import { splitChapterChunks, MAX_MESSAGE_BYTES,
   CHAPTER_TOO_LARGE } from '../model/ChapterChunks';
 
@@ -35,7 +36,8 @@ const TAG = 'suyue/BookTransferService';
 export interface TransferCallbacks {
   onProgress: (progress: TransferProgress) => void;
   onChapterChunk?: (index: number, total: number,
-    result: 'sent' | 'ack' | 'timeout' | 'rejected') => void;
+    result: 'sent' | 'ack' | 'timeout' | 'rejected' |
+      'send_failed') => void;
 }
 
 // 在途传输的运行态：取消时需要同一个
@@ -287,6 +289,20 @@ export class BookTransferService {
     }
   }
 
+  private async notifyRemoteCancellation(transferId: string): Promise<void> {
+    const flight = this.inFlight;
+    if (!flight || flight.transferId !== transferId) return;
+    try {
+      await this.sendMessage(flight.device, flight.appParam, {
+        v: 0, type: 'ERROR', transferId: transferId,
+        code: 'E_CANCELLED'
+      }, 'ERROR');
+    } catch (error) {
+      hilog.warn(0x0000, TAG,
+        'transfer cleanup notice failed');
+    }
+  }
+
   // 发送一本书：一轮操作只尝试一次，失败不自动重发。
   // peer 必须是对端（手表）身份，不能是本机身份。
   async sendBook(book: BookMeta, device: TargetDevice,
@@ -355,6 +371,7 @@ export class BookTransferService {
       return false;
     }
     const resultPromise = this.waiters.beginAttempt(transferId);
+    let remoteMayHaveTransfer = false;
     try {
         // HELLO
         progress.state = TransferState.CONNECTING;
@@ -424,6 +441,9 @@ export class BookTransferService {
         progress.phase = 'BOOK_META';
         progress.message = '发送书籍元数据';
         this.update(callbacks, progress);
+        // The SDK can fail after remote delivery, so conservatively remember
+        // that the watch may have allocated this transfer id.
+        remoteMayHaveTransfer = true;
         await this.sendMessage(device, appParam, metaPayload, 'BOOK_META');
         if (chapterGroups.length > 0) {
           hilog.info(0x0000, TAG,
@@ -451,10 +471,15 @@ export class BookTransferService {
           progress.message = '等待手表确认章节索引 ' + (i + 1) +
             '/' + chapterGroups.length;
           this.update(callbacks, progress);
-          const ack = await Promise.race([
-            ackPromise,
-            sendPromise.then(() => ackPromise)
-          ]);
+          let ack;
+          try {
+            ack = await sendThenAwaitChapterAck(
+              sendPromise, ackPromise);
+          } catch (sendError) {
+            callbacks.onChapterChunk?.(i, chapterGroups.length,
+              'send_failed');
+            throw sendError;
+          }
           if (this.cancelled.has(transferId)) {
             this.finishTransfer(transferId);
             progress.state = TransferState.CANCELLED;
@@ -475,6 +500,7 @@ export class BookTransferService {
             }
             callbacks.onChapterChunk?.(i, chapterGroups.length,
               reason === 'E_CHAPTERS_ACK_TIMEOUT' ? 'timeout' : 'rejected');
+            await this.notifyRemoteCancellation(transferId);
             this.finishTransfer(transferId);
             progress.state = TransferState.FAILED;
             progress.error = reason;
@@ -526,6 +552,7 @@ export class BookTransferService {
           return true;
         }
         const reason = result.reason || 'E_PROTOCOL';
+        await this.notifyRemoteCancellation(transferId);
         this.finishTransfer(transferId);
         progress.state = TransferState.FAILED;
         progress.error = reason;
@@ -545,6 +572,9 @@ export class BookTransferService {
           progress.message = '已取消';
           this.update(callbacks, progress);
           return false;
+        }
+        if (remoteMayHaveTransfer) {
+          await this.notifyRemoteCancellation(transferId);
         }
         const rawFailure = error instanceof Error ? error.message :
           String(error);
