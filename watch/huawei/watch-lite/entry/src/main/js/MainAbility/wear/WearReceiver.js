@@ -33,12 +33,30 @@ function notifyReceiveStatus(message) {
 }
 
 export function getReceiveStatus() {
+  try {
+    const event = JSON.parse(latestReceiveStatus);
+    if (event && event.type === 'RESULT') {
+      return event.ok ? '接收成功，已加入书架' :
+        '传书失败：' + (event.reason || '未知错误');
+    }
+  } catch (error) {}
   return latestReceiveStatus;
 }
 
 export function setReceiveStatusHandler(onStatus) {
   receiveStatusHandler = typeof onStatus === 'function' ? onStatus : null;
-  if (receiveStatusHandler) receiveStatusHandler(latestReceiveStatus);
+  if (receiveStatusHandler) receiveStatusHandler(getReceiveStatus());
+}
+
+// Local-only completion event. This does not use sendToPhone / Wear Engine;
+// the file callback fires only after digest verification and LibraryIndex.addBook.
+export function reportLocalReceiveOutcome(outcome) {
+  const event = outcome && outcome.ok ?
+    { type: 'RESULT', ok: true } : {
+      type: 'RESULT', ok: false,
+      reason: outcome && outcome.reason || 'E_RECEIVE_FAILED'
+    };
+  notifyReceiveStatus(JSON.stringify(event));
 }
 
 // 回调里可能携带 deviceId 的候选字段名（与文件引用一样逐一探测，
@@ -222,9 +240,10 @@ function receiveFile(filePath, field) {
   }
   console.info('file channel ref via data.' + field);
   receiver.receiveFileChannel(filePath, null, (outcome) => {
-    if (!outcome.ok) {
+    reportLocalReceiveOutcome(outcome);
+    if (!outcome || !outcome.ok) {
       console.error('file channel failed: ' +
-        outcome.reason);
+        (outcome && outcome.reason || 'E_RECEIVE_FAILED'));
     }
   });
 }

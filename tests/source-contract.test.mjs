@@ -577,6 +577,16 @@ assert.ok(watchReceiver.includes('isFileType'),
   'watch receiver must handle the file channel branch');
 assert.ok(watchReceiver.includes('receiveFile('),
   'watch receiver must route files to the receiver');
+const fileReceiveStart = watchReceiver.indexOf('function receiveFile(');
+const fileReceiveEnd = watchReceiver.indexOf('export function stopReceive(',
+  fileReceiveStart);
+assert.ok(watchReceiver.includes('export function reportLocalReceiveOutcome(') &&
+  fileReceiveStart >= 0 && fileReceiveEnd > fileReceiveStart &&
+  watchReceiver.slice(fileReceiveStart, fileReceiveEnd)
+    .includes('reportLocalReceiveOutcome(outcome)') &&
+  !watchReceiver.slice(fileReceiveStart, fileReceiveEnd)
+    .includes('sendToPhone('),
+  'file completion must update the local shelf without sending an app RESULT');
 assert.ok(watchReceiver.includes('Wear message received type='),
   'watch must log whether HELLO/BOOK_META actually reached the receiver');
 const wearDeviceService = read(
@@ -643,11 +653,17 @@ const wearDeviceCode = read('harmony/entry/src/main/ets/services/WearDeviceServi
 assert.ok(wearDeviceCode.includes('registered.appParam, registered.callback'),
   'unsubscribe must reuse the registered appParam and callback');
 const phoneShelf = read('harmony/entry/src/main/ets/pages/Index.ets');
-assert.ok(!phoneShelf.slice(phoneShelf.indexOf('private canSend'),
-    phoneShelf.indexOf('private canTransferBook')).includes('receiverReady') &&
-  phoneShelf.includes('private syncReadingProgress') &&
-  phoneShelf.slice(phoneShelf.indexOf('private syncReadingProgress'),
-    phoneShelf.indexOf('private findBook')).includes('receiverReady'),
+const canSendStart = phoneShelf.indexOf('private canSend(): boolean');
+const canTransferStart = phoneShelf.indexOf('private canTransferBook(',
+  canSendStart);
+const syncProgressStart = phoneShelf.indexOf(
+  'private async syncReadingProgress(): Promise<void>');
+const findBookStart = phoneShelf.indexOf('private findBook(',
+  syncProgressStart);
+assert.ok(canSendStart >= 0 && canTransferStart > canSendStart &&
+  !phoneShelf.slice(canSendStart, canTransferStart).includes('receiverReady') &&
+  syncProgressStart >= 0 && findBookStart > syncProgressStart &&
+  phoneShelf.slice(syncProgressStart, findBookStart).includes('receiverReady'),
   'book file sending must not depend on the optional progress-sync receiver');
 assert.ok(phoneShelf.includes('private canTransferBook(') &&
   phoneShelf.includes('BookStatus.SENT') &&

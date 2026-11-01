@@ -3,14 +3,14 @@
 // 手表端接收闭环测试（施工单 P0-5/P0-6/P1-11/P1-12）：
 //   - 文件通道：BOOK_META → receiveFileChannel
 //     （复制 → 大小校验 → 流式 SHA-256 → 原子入库）
-//     → file callback reports local verification/import outcome;
+//     → local status refreshes the visible shelf only on success;
 //   - 消息通道：BOOK_META → CHUNK×N → FINISH
 //     → 拼接 → 摘要 → 入库 → RESULT（legacy message channel）；
 //   - 失败路径：摘要不符 / 大小不符 / 无 BOOK_META，
 //     必须清理暂存、不得出现在书架；
 //   - LibraryIndex：写操作串行化、原子写无残留。
 // 通过 @system.file 的 Node 桩（真实文件系统后端）
-// 驱动 IncomingBookReceiver / LibraryIndex。
+// 驱动 IncomingBookReceiver / LibraryIndex / shelf status routing。
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync,
@@ -18,7 +18,8 @@ import { readFileSync, writeFileSync, mkdirSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeSystemFileStub } from './helpers/system_file_stub.mjs';
-import { createWatchLoader, wait }
+import { createWatchLoader, wait, writeWearEngineStub,
+  writeRouterStub, writeStorageStub }
   from './helpers/watch_module_loader.mjs';
 
 const tmp = mkdtempSync(join(tmpdir(), 'suyue-rcv-'));
@@ -26,12 +27,19 @@ const sandbox = mkdtempSync(join(tmpdir(), 'suyue-fs-'));
 // @system.file 桩：internal://app/<p> → sandbox/<p>
 // （共享实现见 tests/helpers/system_file_stub.mjs）。
 const stubPath = writeSystemFileStub(tmp, sandbox);
-const load = createWatchLoader({ tmpDir: tmp, stubPath });
+const wearengineStubPath = writeWearEngineStub(tmp);
+const routerStubPath = writeRouterStub(tmp);
+const storageStubPath = writeStorageStub(tmp);
+const load = createWatchLoader({ tmpDir: tmp, stubPath,
+  wearengineStubPath, routerStubPath, storageStubPath });
 
 const BookStorage = await load('storage/BookStorage.js');
 const LibraryIndex = await load('storage/LibraryIndex.js');
 const { IncomingBookReceiver } =
   await load('wear/IncomingBookReceiver.js');
+const { reportLocalReceiveOutcome } =
+  await load('wear/WearReceiver.js');
+const shelfMod = await load('pages/index/index.js');
 const { sha256Bytes } = await load('util/Sha256.js');
 
 const enc = new TextEncoder();
@@ -47,6 +55,14 @@ const writeReceived = (name, bytes) => {
 
 const readSandbox = (name) =>
   readFileSync(join(sandbox, name));
+const waitFor = async (fn, timeoutMs = 2000) => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (fn()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  return fn();
+};
 
 // ---- A. 文件通道成功闭环 ----
 const bookText = '第一章：你好，世界！\r\n第二章：流式校验。'
@@ -67,6 +83,23 @@ const receivedUri = writeReceived('inbox/book.bin',
   bookBytes);
 
 await wait((cb) => BookStorage.ensureDirs(cb));
+const shelf = Object.create(shelfMod.default);
+shelf.data = Object.assign({}, shelfMod.default.data);
+shelf.token = 0;
+shelf.external = [];
+shelf.resume = '0';
+let shelfLoads = 0;
+const loadExternal = shelf.loadExternal;
+shelf.loadExternal = function () {
+  shelfLoads++;
+  return loadExternal.call(this);
+};
+shelf.onInit();
+assert.equal(await waitFor(() => shelf.externalLoaded), true,
+  'the shelf must finish its initial external-library load');
+assert.equal(shelf.books.length, 0,
+  'the integration shelf must start empty before file reception');
+const shelfLoadsBeforeImport = shelfLoads;
 const sentMessages = [];
 const statuses = [];
 const receiver = new IncomingBookReceiver(
@@ -79,6 +112,13 @@ const fileOutcome = await wait((cb) =>
 assert.equal(fileOutcome.ok, true,
   'file channel must succeed: ' +
   JSON.stringify(fileOutcome));
+reportLocalReceiveOutcome(fileOutcome);
+assert.equal(await waitFor(() =>
+  shelf.books.some((book) => book.bookId === bookId)), true,
+  'verified file import must refresh the visible shelf immediately');
+assert.equal(shelf.transferStatus, '接收成功，已加入书架');
+assert.ok(shelfLoads > shelfLoadsBeforeImport,
+  'successful file import must trigger a shelf reload');
 
 // 文件通道不通过 RESULT 回执手机；transferFile 回调是发送方的完成边界。
 const results = sentMessages
@@ -118,6 +158,14 @@ const badOutcome = await wait((cb) =>
   receiver.receiveFileChannel(receivedUri, null, cb));
 assert.equal(badOutcome.ok, false);
 assert.equal(badOutcome.reason, 'E_DIGEST_MISMATCH');
+const shelfLoadsBeforeBadDigest = shelfLoads;
+reportLocalReceiveOutcome(badOutcome);
+assert.equal(shelf.transferStatus, '传书失败：E_DIGEST_MISMATCH');
+assert.equal(shelf.books.some((book) =>
+  book.bookId === 'bbbbbbbbbbbbbbbb'), false,
+  'bad SHA must not show the rejected book as successfully received');
+assert.equal(shelfLoads, shelfLoadsBeforeBadDigest,
+  'bad SHA must not refresh the shelf as a successful import');
 const badResults = sentMessages
   .map((t) => JSON.parse(t))
   .filter((m) => m.type === 'RESULT' &&
@@ -393,7 +441,8 @@ assert.equal(finalList.length, 5,
 assert.equal(existsSync(join(sandbox,
   'gt4reader/books.json.tmp')), false);
 
-console.info('PASS: watch receive loop (file channel, ' +
+shelf.onDestroy();
+console.info('PASS: watch receive loop (file channel, local shelf refresh, ' +
   'message channel, digest/size rejection, ' +
   'serialized index writes); book bytes=' +
   bookBytes.length);

@@ -6,7 +6,7 @@
 //   1. onInit 同步返回时书架已经可用，且**启动阶段不读 books.json**；
 //   2. 索引缺失/损坏不会卡住或清空书架（数据安全：不删原索引）；
 //   3. 外部（手机传书）书目在后台合入，失败也不影响内置书架；
-//   4. 传书结果消息只改提示，不影响书架；
+//   4. 本地文件接收成功触发书架刷新，失败只更新提示；
 //   5. 二次确认删除；内置书籍不可删。
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, existsSync,
@@ -161,21 +161,28 @@ function newPage() {
   console.info('  [3] 外部书目后台合入 / 打开 / 二次确认删除 ✓');
 }
 
-// ---- 4. 传书结果消息只改提示，不影响书架 ----
+// ---- 4. 本地入库结果：成功刷新书架，失败不假报成功 ----
 {
   clearLibrary();
   const page = newPage();
+  let refreshes = 0;
+  page.loadExternal = function () { refreshes++; };
   page.onInit();
+  const beforeResult = refreshes;
   page.handleReceiveStatus(JSON.stringify(
     { type: 'RESULT', ok: false, reason: 'E_BUSY' }));
   assert.equal(page.transferStatus, '传书失败：E_BUSY');
+  assert.equal(refreshes, beforeResult,
+    'failed local receive must not refresh as a successful import');
   page.handleReceiveStatus(JSON.stringify(
     { type: 'RESULT', ok: true }));
   assert.equal(page.transferStatus, '接收成功，已加入书架');
+  assert.equal(refreshes, beforeResult + 1,
+    'successful local receive must refresh the external shelf');
   assert.equal(page.books.length, 0);
   page.handleReceiveStatus('纯文本提示');
   assert.equal(page.transferStatus, '纯文本提示');
-  console.info('  [4] 传书消息只改提示，书架不受影响 ✓');
+  console.info('  [4] 本地入库成功刷新书架，失败不误报 ✓');
 }
 
 // ---- 5. 冷启动自动续读：只认仍存在的书，显式返回不重开 ----
