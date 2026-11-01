@@ -27,11 +27,19 @@ const controls = builderSection('topControls', 'catalogPanel');
 const buildStart = reader.indexOf('\n  build() {');
 assert.ok(buildStart >= 0);
 const build = reader.slice(buildStart);
+const bodyTextStart = build.indexOf('Text(this.readerDisplayText(this.pageText))');
+const bodyTextEnd = build.indexOf('.onAreaChange', bodyTextStart);
+assert.ok(bodyTextStart >= 0 && bodyTextEnd > bodyTextStart);
+const bodyText = build.slice(bodyTextStart, bodyTextEnd);
 const createPageStart = reader.indexOf('private async createPageAt(');
 const previousPageStart = reader.indexOf(
   'private async createPreviousPageEndingAt(', createPageStart);
 assert.ok(createPageStart >= 0 && previousPageStart > createPageStart);
 const createPageAt = reader.slice(createPageStart, previousPageStart);
+const exitReaderStart = appearance.indexOf('  exitReader(pageToken: number): void {');
+const exitReaderEnd = appearance.indexOf('\n  private enqueue(', exitReaderStart);
+assert.ok(exitReaderStart >= 0 && exitReaderEnd > exitReaderStart);
+const exitReader = appearance.slice(exitReaderStart, exitReaderEnd);
 
 assert.ok(appearance.includes('window.getLastWindow') &&
   appearance.includes('setWindowLayoutFullScreen(true)') &&
@@ -49,6 +57,15 @@ assert.ok(build.includes('Text(this.readerDisplayText(this.pageText))') &&
   build.includes('.lineHeight(this.fontSize * this.lineHeight)') &&
   build.includes('.wordBreak(WordBreak.BREAK_WORD)'),
   'the displayed native Text must use the same font and wrapping settings as pagination');
+assert.ok(bodyText.includes('.align(Alignment.TopStart)'),
+  'short reader pages must align their body text to the top');
+assert.ok(appearance.includes('this.activePageToken = generation;') &&
+  exitReader.includes("this.activePage !== 'reader'") &&
+  exitReader.includes('pageToken !== this.activePageToken') &&
+  reader.includes('this.windowPageToken = enterReaderWindow(') &&
+  reader.includes('const pageToken = this.windowPageToken;') &&
+  reader.includes('exitReaderWindow(pageToken);'),
+  'a stale reader page token must not exit the currently active reader');
 assert.ok(reader.includes('textContent: this.readerDisplayText(text)') &&
   reader.includes('formatReaderParagraphs(sourceText)'),
   'rendering and measured pagination must use the same display-only paragraph spacing');

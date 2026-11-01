@@ -77,17 +77,20 @@ assert.ok(phoneIndexFull.includes('RESULT'),
   'phone must wait for watch RESULT receipt');
 assert.ok(phoneIndexFull.includes('transferService'),
   'phone index must use BookTransferService');
-// issue #6 P0-B：设备发现必须用有上限的退避重试策略，且确定性失败不自动重试。
+// issue #6 P0-B：设备发现由用户主动刷新；UI 不为失败自动重试。
 const phoneDeviceService = read('harmony/entry/src/main/ets/services/WearDeviceService.ts');
 const phonePolicy = read('harmony/entry/src/main/ets/services/WearAuthPolicy.js');
 assert.ok(phonePolicy.includes('app_client_id_not_configured'),
   'policy must classify 1008509999 as app identity misconfiguration');
 assert.ok(phonePolicy.includes('planRetry') && phonePolicy.includes('isRetryable'),
-  'policy must expose a bounded retry state machine');
-assert.ok(phoneIndexFull.includes('planRetry'),
-  'phone index must gate auto-retry through planRetry');
-assert.ok(phoneIndexFull.includes('clearRetryTimer'),
-  'phone index must clean up retry timers on hide');
+  'WearAuthPolicy must retain its bounded retry classification helpers');
+assert.ok(phoneIndexFull.includes('private async refreshDevices(): Promise<void>') &&
+  phoneIndexFull.includes('if (this.deviceBusy) return;') &&
+  phoneIndexFull.includes('await this.runDeviceRefreshFlow();') &&
+  phoneIndexFull.includes(".onClick(() => { this.refreshDevices(); })") &&
+  !phoneIndexFull.includes('planRetry(') &&
+  !phoneIndexFull.includes('clearRetryTimer'),
+  'phone index must offer manual device refresh, guard in-flight requests, and never auto-retry');
 assert.ok(phoneDeviceService.includes('deviceQueryInFlight'),
   'device service must serialize device discovery (single in-flight query)');
 assert.ok(read('README.md').startsWith('# 素阅 · suyue'));

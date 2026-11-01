@@ -320,8 +320,7 @@ struct Index {
 
   // 设备发现（issue #5 第二轮 + issue #6 P0-B）：传书只需「设备基础信息」
   // 服务审批，无需运行时用户权限，因此不再查询/申请授权。
-  // 同一时间最多 1 个在途请求，只有最新一轮结果落地；短暂错误按上限退避
-  // 重试，确定性失败立即停止，只由用户手动刷新。
+  // 同一时间最多 1 个在途请求，只有最新一轮结果落地；失败后由用户手动刷新。
   private async refreshDevices(): Promise<void> {
     if (this.deviceBusy) return;
     await this.runDeviceRefreshFlow();
