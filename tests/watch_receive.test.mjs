@@ -247,6 +247,12 @@ receiver.onMessage(JSON.stringify({
 }));
 receiver.onMessage(JSON.stringify({
   v: 0, type: 'CHAPTERS', transferId: 'file-chapters-1',
+  bookId: chapterBookId, index: 1, total: 2,
+  chapters: [{ title: '第二章', offset: 20,
+    length: chapterBytes.length - 20 }]
+}));
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'CHAPTERS', transferId: 'file-chapters-1',
   bookId: chapterBookId, index: 0, total: 2,
   chapters: [{ title: '第一章', offset: 0, length: 20 }]
 }));
@@ -255,11 +261,78 @@ const chaptersUri = writeReceived(
 const chapterOutcome = await wait((cb) =>
   receiver.receiveFileChannel(chaptersUri, null, cb));
 assert.equal(chapterOutcome.ok, true);
+const chapterAcks = sentMessages
+  .map((t) => JSON.parse(t))
+  .filter((m) => m.type === 'CHAPTERS_ACK' &&
+    m.transferId === 'file-chapters-1');
+assert.equal(chapterAcks.length, 3,
+  'each received chapter slice, including a duplicate, must be ACKed');
+assert.ok(chapterAcks.every((ack) => ack.ok === true && ack.total === 2));
+assert.equal(chapterAcks[1].duplicate, true,
+  'duplicate chapter slices must receive idempotent ACKs');
+assert.equal(chapterAcks[2].index, 0,
+  'out-of-order chapter slices must be accepted and individually ACKed');
 const chapterEntry = await wait((cb) =>
   LibraryIndex.getBook(chapterBookId, cb));
 assert.deepEqual(chapterEntry.chapters.map((c) => c.title),
   ['第一章', '第二章'], 'CHAPTERS chunks must be assembled before addBook');
 await wait((cb) => LibraryIndex.removeBook(chapterBookId, cb));
+
+// ---- E3. File channel arriving before all chapter ACKs is rejected ----
+const earlyMeta = Object.assign({}, chapterMeta, {
+  transferId: 'file-first-chapters',
+  bookId: 'eeeeeeeeeeeeeeee'
+});
+receiver.onMessage(JSON.stringify(earlyMeta));
+const earlyOutcome = await wait((cb) =>
+  receiver.receiveFileChannel(chaptersUri, null, cb));
+assert.equal(earlyOutcome.ok, false);
+assert.equal(earlyOutcome.reason, 'E_MISSING_CHAPTERS',
+  'file-first delivery must not bypass missing chapter chunks');
+assert.equal(sentMessages.map((t) => JSON.parse(t)).filter((m) =>
+  m.type === 'RESULT' && m.transferId === 'file-first-chapters' &&
+  m.reason === 'E_MISSING_CHAPTERS').length, 1);
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'CHAPTERS', transferId: 'file-first-chapters',
+  bookId: earlyMeta.bookId, index: 0, total: 2,
+  chapters: [{ title: '迟到目录', offset: 0, length: 20 }]
+}));
+const staleChapterAck = sentMessages.map((t) => JSON.parse(t)).filter((m) =>
+  m.type === 'CHAPTERS_ACK' &&
+  m.transferId === 'file-first-chapters');
+assert.equal(staleChapterAck.length, 1);
+assert.equal(staleChapterAck[0].ok, false,
+  'a chapter arriving after file-first cleanup must be rejected');
+assert.equal(staleChapterAck[0].reason, 'E_PROTOCOL');
+
+// ---- E4. One missing index is diagnosed and never committed ----
+const partialMeta = Object.assign({}, chapterMeta, {
+  transferId: 'file-missing-chapter',
+  bookId: 'ffffffffffffffff'
+});
+receiver.onMessage(JSON.stringify(partialMeta));
+receiver.onMessage(JSON.stringify({
+  v: 0, type: 'CHAPTERS', transferId: 'file-missing-chapter',
+  bookId: partialMeta.bookId, index: 0, total: 2,
+  chapters: [{ title: '唯一已收到', offset: 0, length: 20 }]
+}));
+const oldConsoleError = console.error;
+const chapterErrorLogs = [];
+console.error = (...args) => chapterErrorLogs.push(args.join(' '));
+let partialOutcome;
+try {
+  partialOutcome = await wait((cb) =>
+    receiver.receiveFileChannel(chaptersUri, null, cb));
+} finally {
+  console.error = oldConsoleError;
+}
+assert.equal(partialOutcome.ok, false);
+assert.equal(partialOutcome.reason, 'E_MISSING_CHAPTERS');
+assert.ok(chapterErrorLogs.some((line) =>
+  line.includes('received=1/2 missing=1')),
+  'file arrival must log received count and missing zero-based indexes');
+assert.equal(await wait((cb) => LibraryIndex.getBook(partialMeta.bookId, cb)),
+  null, 'incomplete chapter catalogs must not reach the shelf');
 
 // ---- F. LibraryIndex 串行写（P1-12） ----
 await wait((cb) => LibraryIndex.removeBook(bookId, cb));

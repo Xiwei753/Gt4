@@ -165,6 +165,17 @@ export function assembleChapters(state) {
   return { ok: true, chapters: out };
 }
 
+// Small, title-free diagnostic used when the file channel arrives before
+// the full chapter catalog. Indices are 0-based protocol positions.
+export function missingChapterIndices(state) {
+  if (!state || state.expectedChapterChunks <= 0) return [];
+  const missing = [];
+  for (let i = 0; i < state.expectedChapterChunks; i++) {
+    if (!state.chapterChunks[i]) missing.push(i);
+  }
+  return missing;
+}
+
 // 幂等：重复 index 不覆盖、不重复计数。
 // 按序约束：offset 必须等于已收字节数（消息通道按序到达；
 // 文件通道不经此函数）。

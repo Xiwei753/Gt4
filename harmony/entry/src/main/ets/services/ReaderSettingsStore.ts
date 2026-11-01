@@ -4,6 +4,7 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { enqueueBookWrite } from '../model/ProgressWriteQueue';
+import { ImportedReaderFont } from './ReaderFontService';
 
 const PREF_NAME = 'suyue_reader_kit';
 const SETTINGS_KEY = 'settings';
@@ -15,6 +16,8 @@ export interface ReaderSettings {
   nightMode: boolean;
   flipMode: string;
   volumeKeyPaging: boolean;
+  readerFontId: string;
+  readerFonts: ImportedReaderFont[];
 }
 
 const DEFAULT_SETTINGS: ReaderSettings = {
@@ -22,7 +25,9 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   lineHeight: 1.6,
   nightMode: true,
   flipMode: '1',
-  volumeKeyPaging: true
+  volumeKeyPaging: true,
+  readerFontId: 'system',
+  readerFonts: []
 };
 
 export class ReaderSettingsStore {
@@ -57,7 +62,10 @@ export class ReaderSettingsStore {
               value.nightMode : DEFAULT_SETTINGS.nightMode,
             flipMode: value.flipMode === '0' ? '0' : '1',
             volumeKeyPaging: typeof value.volumeKeyPaging === 'boolean' ?
-              value.volumeKeyPaging : DEFAULT_SETTINGS.volumeKeyPaging
+              value.volumeKeyPaging : DEFAULT_SETTINGS.volumeKeyPaging,
+            readerFonts: this.sanitizeReaderFonts(value.readerFonts),
+            readerFontId: this.sanitizeFontId(value.readerFontId,
+              this.sanitizeReaderFonts(value.readerFonts))
           };
         } catch (error) {
           return Object.assign({}, DEFAULT_SETTINGS);
@@ -75,7 +83,10 @@ export class ReaderSettingsStore {
           DEFAULT_SETTINGS.lineHeight),
         nightMode: settings.nightMode,
         flipMode: settings.flipMode === '0' ? '0' : '1',
-        volumeKeyPaging: settings.volumeKeyPaging
+        volumeKeyPaging: settings.volumeKeyPaging,
+        readerFontId: this.sanitizeFontId(settings.readerFontId,
+          this.sanitizeReaderFonts(settings.readerFonts)),
+        readerFonts: this.sanitizeReaderFonts(settings.readerFonts)
       } as ReaderSettings));
       await store.flush();
     });
@@ -95,5 +106,30 @@ export class ReaderSettingsStore {
     fallback: number): number {
     if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
     return Math.min(max, Math.max(min, value));
+  }
+
+  private sanitizeReaderFonts(value: ImportedReaderFont[] | undefined): ImportedReaderFont[] {
+    if (!Array.isArray(value)) return [];
+    const fonts: ImportedReaderFont[] = [];
+    for (let i = 0; i < value.length && fonts.length < 64; i++) {
+      const font = value[i];
+      if (!font || typeof font.id !== 'string' ||
+          !/^f_[a-z0-9_]{1,40}$/.test(font.id) ||
+          typeof font.name !== 'string' || font.name.length === 0 ||
+          font.name.length > 48 ||
+          (font.extension !== 'ttf' && font.extension !== 'otf')) continue;
+      if (fonts.some((item: ImportedReaderFont) => item.id === font.id)) continue;
+      fonts.push({ id: font.id, name: font.name,
+        extension: font.extension });
+    }
+    return fonts;
+  }
+
+  private sanitizeFontId(value: string | undefined,
+    fonts: ImportedReaderFont[]): string {
+    if (value === 'system') return 'system';
+    if (typeof value !== 'string') return 'system';
+    return fonts.some((font: ImportedReaderFont) => font.id === value) ?
+      value : 'system';
   }
 }

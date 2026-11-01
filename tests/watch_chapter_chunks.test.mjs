@@ -75,8 +75,23 @@ try {
     assert.match(messages[0], /"total":\d+/);
   }
 
+  check(65);
   check(100);
   check(500);
+  const small = chapters(1);
+  const smallMeta = JSON.stringify({
+    v: 0, type: 'BOOK_META', transferId, bookId,
+    title: '小目录', encoding: 'utf-8', bytes: 1,
+    sha256: '0'.repeat(64), chunks: 1, chunkBytes: 1,
+    chapters: small
+  });
+  assert.ok(encoder.encode(smallMeta).length <= MAX_MESSAGE_BYTES,
+    'small catalog must remain inside BOOK_META');
+  const sender = readFileSync(join('harmony', 'entry', 'src', 'main', 'ets',
+    'services', 'BookTransferService.ts'), 'utf8');
+  assert.ok(sender.includes('if (fullMetaBytes > MAX_MESSAGE_BYTES)') &&
+    sender.includes('metaPayload.chapters = [];'),
+    'sender must preserve complete chapters in BOOK_META when it fits');
   {
     const huge = [{ title: '超'.repeat(1500), offset: 0, length: 100 }];
     assert.ok(measure(huge, 0, 1) > MAX_MESSAGE_BYTES,
@@ -86,7 +101,7 @@ try {
       (error) => error && error.message === CHAPTER_TOO_LARGE,
       'oversized single chapter must fail explicitly, not be truncated');
   }
-  console.info('PASS: 100/500 chapter catalogs are split into <=4096-byte ' +
+  console.info('PASS: 65/100/500 chapter catalogs split into <=4096-byte ' +
     'CHAPTERS messages; oversized single chapter fails explicitly');
 } finally {
   rmSync(tmp, { recursive: true, force: true });

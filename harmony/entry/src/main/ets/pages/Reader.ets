@@ -5,6 +5,7 @@ import { common } from '@kit.AbilityKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
 import { router } from '@kit.ArkUI';
 import { inputConsumer, KeyCode, KeyEvent } from '@kit.InputKit';
+import { picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BookChapter, BookMeta } from '../model/BookModels';
 import { paginateForward, paginatePreviousToBoundary, ReaderTextPage,
@@ -16,6 +17,8 @@ import { NormalizedTextFile } from '../services/NormalizedTextFile';
 import { ReadingProgressStore } from '../services/ReadingProgressStore';
 import { ReaderSettings, ReaderSettingsStore }
   from '../services/ReaderSettingsStore';
+import { ImportedReaderFont, ReaderFontService, readerFontFamily }
+  from '../services/ReaderFontService';
 import { AppThemePalette, AppThemeMode, APP_SYSTEM_DARK_KEY,
   APP_THEME_MODE_KEY, isDarkTheme, themePalette }
   from '../services/AppTheme';
@@ -68,6 +71,7 @@ const READER_CHAPTER_LABEL_GAP_VP = 8;
 const READER_GESTURE_SAFE_REGION_RATIO = 0.36;
 const READER_INPUT_FEEDBACK_MS = 1600;
 const READER_INPUT_HILOG_TAG = 'suyue/ReaderInput';
+const REGISTERED_READER_FONT_FAMILIES = new Set<string>();
 
 @Entry
 @Component
@@ -107,6 +111,11 @@ struct Reader {
   @State private timeText: string = '--:--';
   @State private batteryPercent: number = -1;
   @State private volumeKeyPaging: boolean = true;
+  @State private readerFonts: ImportedReaderFont[] = [];
+  @State private readerFontId: string = 'system';
+  @State private readerFontFamily: string = READER_TEXT_FONT;
+  @State private fontBusy: boolean = false;
+  @State private fontStatus: string = '';
 
   private book: BookMeta | null = null;
   private repository: BookRepository | null = null;
@@ -520,7 +529,7 @@ struct Reader {
     if (!this.pageInForeground) return 'page_hidden';
     if (this.leaving) return 'leaving';
     if (this.catalogVisible) return 'catalog_open';
-    if (this.settingsVisible && source !== 'debug_next') {
+    if (this.settingsVisible) {
       return 'settings_open';
     }
     if (this.loading) return 'loading';
@@ -843,7 +852,7 @@ struct Reader {
       constraintWidth: this.viewportWidthVp,
       fontSize: this.fontSize,
       fontWeight: FontWeight.Normal,
-      fontFamily: READER_TEXT_FONT,
+      fontFamily: this.readerFontFamily,
       lineHeight: this.fontSize * this.lineHeight,
       letterSpacing: 0,
       wordBreak: WordBreak.BREAK_WORD
@@ -1090,7 +1099,7 @@ struct Reader {
       Math.round(this.readerBodyFirstLineIndentVp * 100) / 100,
       this.fontSize,
       this.lineHeight,
-      READER_TEXT_FONT,
+      this.readerFontFamily,
       'break-word'
     ]);
   }
@@ -1212,7 +1221,47 @@ struct Reader {
     const store = this.settingsStore;
     if (store === null) return;
     const settings = await store.load();
+    const fontService = new ReaderFontService(this.context());
+    this.readerFonts = settings.readerFonts.filter(
+      (font: ImportedReaderFont) => fontService.isAvailable(font));
+    if (this.readerFonts.length !== settings.readerFonts.length) {
+      settings.readerFonts = this.readerFonts.slice();
+    }
+    this.readerFontId = settings.readerFontId;
+    if (settings.readerFontId !== 'system') {
+      const font = this.readerFonts.find((item: ImportedReaderFont) =>
+        item.id === settings.readerFontId);
+      if (font && fontService.isAvailable(font)) {
+        try {
+          this.registerReaderFont(font, fontService);
+          this.readerFontFamily = readerFontFamily(font.id);
+        } catch (error) {
+          settings.readerFontId = 'system';
+          this.readerFontId = 'system';
+          this.readerFontFamily = READER_TEXT_FONT;
+          this.fontStatus = '自定义字体无法加载，已使用系统字体';
+          await store.save(settings);
+        }
+      } else {
+        settings.readerFontId = 'system';
+        this.readerFontId = 'system';
+        this.readerFontFamily = READER_TEXT_FONT;
+        this.fontStatus = '字体文件不可用，已使用系统字体';
+        await store.save(settings);
+      }
+    }
     this.applySettings(settings);
+  }
+
+  private registerReaderFont(font: ImportedReaderFont,
+    service: ReaderFontService): void {
+    const family = readerFontFamily(font.id);
+    if (REGISTERED_READER_FONT_FAMILIES.has(family)) return;
+    this.getUIContext().getFont().registerFont({
+      familyName: family,
+      familySrc: 'file://' + service.pathFor(font)
+    });
+    REGISTERED_READER_FONT_FAMILIES.add(family);
   }
 
   private applySettings(settings: ReaderSettings): void {
@@ -1251,7 +1300,9 @@ struct Reader {
       lineHeight: this.lineHeight,
       nightMode: this.isDarkTheme(),
       flipMode: this.flipMode,
-      volumeKeyPaging: this.volumeKeyPaging
+      volumeKeyPaging: this.volumeKeyPaging,
+      readerFontId: this.readerFontId,
+      readerFonts: this.readerFonts.slice()
     };
   }
 
@@ -1274,6 +1325,98 @@ struct Reader {
       Math.max(1.1, Math.round((this.lineHeight + delta) * 10) / 10));
     this.saveSettings();
     this.reflowCurrentPage();
+  }
+
+  private selectedReaderFontName(): string {
+    if (this.readerFontId === 'system') return '系统默认';
+    const font = this.readerFonts.find((item: ImportedReaderFont) =>
+      item.id === this.readerFontId);
+    return font ? font.name : '系统默认';
+  }
+
+  private async selectNextReaderFont(): Promise<void> {
+    if (this.fontBusy) return;
+    const choices: ImportedReaderFont[] = this.readerFonts.slice();
+    if (choices.length === 0) return;
+    let nextId = choices[0].id;
+    if (this.readerFontId !== 'system') {
+      const currentIndex = choices.findIndex((font: ImportedReaderFont) =>
+        font.id === this.readerFontId);
+      nextId = currentIndex >= 0 && currentIndex + 1 < choices.length ?
+        choices[currentIndex + 1].id : 'system';
+    }
+    if (nextId === this.readerFontId) return;
+    this.fontBusy = true;
+    try {
+      if (nextId !== 'system') {
+        const font = choices.find((item: ImportedReaderFont) =>
+          item.id === nextId);
+        if (!font) return;
+        const service = new ReaderFontService(this.context());
+        if (!service.isAvailable(font)) {
+          this.fontStatus = '字体文件不可用，已使用系统字体';
+          this.readerFonts = choices.filter(
+            (item: ImportedReaderFont) => item.id !== font.id);
+          this.readerFontId = 'system';
+          this.readerFontFamily = READER_TEXT_FONT;
+        } else {
+          this.registerReaderFont(font, service);
+          this.readerFontId = font.id;
+          this.readerFontFamily = readerFontFamily(font.id);
+          this.fontStatus = '已选择：' + font.name;
+        }
+      } else {
+        this.readerFontId = 'system';
+        this.readerFontFamily = READER_TEXT_FONT;
+        this.fontStatus = '已选择系统默认字体';
+      }
+      this.cachedReaderIndentFontSize = -1;
+      await this.settingsStore?.save(this.currentSettings());
+      await this.reflowCurrentPage();
+    } catch (error) {
+      this.readerFonts = this.readerFonts.filter(
+        (font: ImportedReaderFont) => font.id !== nextId);
+      this.readerFontId = 'system';
+      this.readerFontFamily = READER_TEXT_FONT;
+      this.fontStatus = '自定义字体无法加载，已使用系统字体';
+      await this.settingsStore?.save(this.currentSettings());
+      await this.reflowCurrentPage();
+    } finally {
+      this.fontBusy = false;
+    }
+  }
+
+  private async importReaderFont(): Promise<void> {
+    if (this.fontBusy) return;
+    this.fontBusy = true;
+    this.fontStatus = '正在选择字体文件';
+    try {
+      const context = this.context();
+      const documentPicker = new picker.DocumentViewPicker(context);
+      const options = new picker.DocumentSelectOptions();
+      options.fileSuffixFilters = ['Fonts (.ttf, .otf)|.ttf,.otf'];
+      const uris = await documentPicker.select(options);
+      if (!uris || uris.length === 0) {
+        this.fontStatus = '';
+        return;
+      }
+      const service = new ReaderFontService(context);
+      const imported = await service.importFont(uris[0]);
+      this.registerReaderFont(imported, service);
+      this.readerFonts = [imported, ...this.readerFonts.filter(
+        (font: ImportedReaderFont) => font.id !== imported.id)];
+      this.readerFontId = imported.id;
+      this.readerFontFamily = readerFontFamily(imported.id);
+      this.cachedReaderIndentFontSize = -1;
+      await this.settingsStore?.save(this.currentSettings());
+      await this.reflowCurrentPage();
+      this.fontStatus = '已导入并选择：' + imported.name;
+    } catch (error) {
+      this.fontStatus = '字体导入失败：' + this.errorCode(error);
+      this.log('settings', 'font_import_fail', this.errorCode(error));
+    } finally {
+      this.fontBusy = false;
+    }
   }
 
   private async reflowCurrentPage(): Promise<void> {
@@ -1488,7 +1631,7 @@ struct Reader {
       constraintWidth: Math.max(1, this.viewportWidthVp),
       fontSize: this.fontSize,
       fontWeight: FontWeight.Normal,
-      fontFamily: READER_TEXT_FONT,
+      fontFamily: this.readerFontFamily,
       lineHeight: this.fontSize * this.lineHeight,
       letterSpacing: 0,
       wordBreak: WordBreak.BREAK_WORD
@@ -1674,22 +1817,35 @@ struct Reader {
           }
           .width('100%')
           Row() {
+            Text('字体').fontSize(12)
+              .fontColor(this.palette().text).layoutWeight(1)
+            Button(this.selectedReaderFontName() + '  ›').height(32)
+              .backgroundColor(this.palette().surfaceRaised)
+              .fontColor(this.palette().text)
+              .enabled(!this.fontBusy)
+              .onClick(() => { this.selectNextReaderFont(); })
+          }
+          .width('100%')
+          Row() {
+            Button(this.fontBusy ? '正在导入…' : '导入 TTF / OTF')
+              .height(32).layoutWeight(1)
+              .backgroundColor(this.palette().surfaceRaised)
+              .fontColor(this.palette().text)
+              .enabled(!this.fontBusy)
+              .onClick(() => { this.importReaderFont(); })
+          }
+          .width('100%')
+          if (this.fontStatus.length > 0) {
+            Text(this.fontStatus).fontSize(11)
+              .fontColor(this.palette().secondaryText)
+              .width('100%').maxLines(2)
+          }
+          Row() {
             Text('音量键翻页').fontSize(12)
               .fontColor(this.palette().text).layoutWeight(1)
             Toggle({ type: ToggleType.Switch, isOn: this.volumeKeyPaging })
               .onChange((enabled: boolean) => {
                 this.setVolumeKeyPaging(enabled);
-              })
-          }
-          .width('100%')
-          Row() {
-            Text('分页调试').fontSize(12)
-              .fontColor(this.palette().text).layoutWeight(1)
-            Button('调试下一页').height(32)
-              .backgroundColor(this.palette().surfaceRaised)
-              .fontColor(this.palette().text)
-              .onClick(() => {
-                this.requestPageFlip('debug_next', true);
               })
           }
           .width('100%')
@@ -1752,7 +1908,7 @@ struct Reader {
           Text(this.readerDisplayText(this.pageText))
             .fontSize(this.fontSize)
             .fontWeight(FontWeight.Normal)
-            .fontFamily(READER_TEXT_FONT)
+            .fontFamily(this.readerFontFamily)
             .fontColor(this.isDarkTheme() ? '#E8EAF0' : '#1F2937')
             .lineHeight(this.fontSize * this.lineHeight)
             .letterSpacing(0)

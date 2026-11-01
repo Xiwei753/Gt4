@@ -22,7 +22,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
 import { BookMeta } from '../model/BookModels';
 import { TransferProgress, TransferState,
-  TargetDevice, RESULT_TIMEOUT_MS,
+  TargetDevice, CHAPTER_ACK_TIMEOUT_MS, RESULT_TIMEOUT_MS,
   UPLOAD_TIMEOUT_MS,
   newTransferId } from '../model/TransferModels';
 import { WearDeviceService } from './WearDeviceService';
@@ -34,6 +34,8 @@ const TAG = 'suyue/BookTransferService';
 
 export interface TransferCallbacks {
   onProgress: (progress: TransferProgress) => void;
+  onChapterChunk?: (index: number, total: number,
+    result: 'sent' | 'ack' | 'timeout' | 'rejected') => void;
 }
 
 // 在途传输的运行态：取消时需要同一个
@@ -55,7 +57,8 @@ export class BookTransferService {
     setTimeout: setTimeout,
     clearTimeout: clearTimeout,
     uploadTimeoutMs: UPLOAD_TIMEOUT_MS,
-    resultTimeoutMs: RESULT_TIMEOUT_MS
+    resultTimeoutMs: RESULT_TIMEOUT_MS,
+    chapterAckTimeoutMs: CHAPTER_ACK_TIMEOUT_MS
   });
   private cancelled = new Set<string>();
   // 当前在途传输（单本互斥）。
@@ -81,9 +84,14 @@ export class BookTransferService {
       hilog.warn(0x0000, TAG, 'non-protocol message');
       return;
     }
-    if (message.v !== 0 || message.type !== 'RESULT') {
+    if (message.v !== 0) {
       return;
     }
+    if (message.type === 'CHAPTERS_ACK') {
+      this.waiters.deliverChapterAck(message);
+      return;
+    }
+    if (message.type !== 'RESULT') return;
     // deliver：缓存回执并唤醒当前轮次；迟到
     // 回执只入缓存，不丢失（P0-3）。
     this.waiters.deliver(message);
@@ -417,18 +425,71 @@ export class BookTransferService {
         progress.message = '发送书籍元数据';
         this.update(callbacks, progress);
         await this.sendMessage(device, appParam, metaPayload, 'BOOK_META');
+        if (chapterGroups.length > 0) {
+          hilog.info(0x0000, TAG,
+            'chapter chunks expected=%{public}d', chapterGroups.length);
+        }
 
         for (let i = 0; i < chapterGroups.length; i++) {
           progress.phase = 'CHAPTERS';
           progress.message = '发送章节索引 ' + (i + 1) +
             '/' + chapterGroups.length;
           this.update(callbacks, progress);
-          await this.sendMessage(device, appParam, {
+          const ackPromise = this.waiters.beginChapterAck(
+            transferId, book.bookId, i, chapterGroups.length);
+          callbacks.onChapterChunk?.(i, chapterGroups.length, 'sent');
+          const sendPromise = this.sendMessage(device, appParam, {
             v: 0, type: 'CHAPTERS', transferId: transferId,
             bookId: book.bookId, index: i,
             total: chapterGroups.length,
             chapters: chapterGroups[i]
           }, 'CHAPTERS ' + (i + 1) + '/' + chapterGroups.length);
+          hilog.info(0x0000, TAG,
+            'chapter chunk sent index=%{public}d/%{public}d',
+            i + 1, chapterGroups.length);
+          progress.phase = 'CHAPTERS_ACK';
+          progress.message = '等待手表确认章节索引 ' + (i + 1) +
+            '/' + chapterGroups.length;
+          this.update(callbacks, progress);
+          const ack = await Promise.race([
+            ackPromise,
+            sendPromise.then(() => ackPromise)
+          ]);
+          if (this.cancelled.has(transferId)) {
+            this.finishTransfer(transferId);
+            progress.state = TransferState.CANCELLED;
+            progress.message = '已取消';
+            this.update(callbacks, progress);
+            return false;
+          }
+          if (!ack.ok) {
+            const reason = ack.reason || 'E_PROTOCOL';
+            if (reason === 'E_CHAPTERS_ACK_TIMEOUT') {
+              hilog.warn(0x0000, TAG,
+                'chapter chunk timeout index=%{public}d/%{public}d',
+                i + 1, chapterGroups.length);
+            } else {
+              hilog.warn(0x0000, TAG,
+                'chapter chunk rejected index=%{public}d/%{public}d reason=%{public}s',
+                i + 1, chapterGroups.length, reason);
+            }
+            callbacks.onChapterChunk?.(i, chapterGroups.length,
+              reason === 'E_CHAPTERS_ACK_TIMEOUT' ? 'timeout' : 'rejected');
+            this.finishTransfer(transferId);
+            progress.state = TransferState.FAILED;
+            progress.error = reason;
+            progress.message = reason === 'E_CHAPTERS_ACK_TIMEOUT' ?
+              '等待手表确认章节索引超时（' + (i + 1) + '/' +
+                chapterGroups.length + '）' :
+              '手表拒收章节索引（' + (i + 1) + '/' +
+                chapterGroups.length + '）：' + reason;
+            this.update(callbacks, progress);
+            return false;
+          }
+          hilog.info(0x0000, TAG,
+            'chapter chunk ack index=%{public}d/%{public}d',
+            i + 1, chapterGroups.length);
+          callbacks.onChapterChunk?.(i, chapterGroups.length, 'ack');
         }
 
         // 文件通道：整本规范化文件。

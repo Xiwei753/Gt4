@@ -109,8 +109,10 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 ### CHAPTERS（手机 → 表，可选）
 
 `BOOK_META.chapterChunks > 0` 时，手机在 BOOK_META 之后、正文文件/CHUNK
-之前按 `index` 发送全部章节分片。每片的完整 JSON（UTF-8）必须 ≤4096 字节；
-发送方按实际序列化字节数分片，不得按固定章节数猜测。
+之前按 `index` 逐片发送章节目录，并等待每片对应的 `CHAPTERS_ACK` 后
+才发送下一片。Wear Engine 的 `sendMessage` 成功不代表手表应用已接收。
+每片的完整 JSON（UTF-8）必须 ≤4096 字节；发送方按实际序列化字节数
+分片，不得按固定章节数猜测。所有章节片 ACK 成功后才可启动文件通道。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -122,6 +124,23 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 接收方按 index 收集（重复片幂等），全部到齐后按序拼成完整章节目录；
 缺片时 FINISH/文件通道返回 `E_MISSING_CHAPTERS`，不得把半份目录入库。
 旧手机不发 CHAPTERS、旧手表忽略 `chapterChunks` 时，正文仍可正常传输。
+
+### CHAPTERS_ACK（表 → 手机）
+
+每个 CHAPTERS 收到并通过应用层校验后，手表经已有回调消息通道回一条：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| bookId / transferId | string | 是 | 必须匹配当前传输 |
+| index / total | number | 是 | 与对应 CHAPTERS 完全一致 |
+| ok | boolean | 是 | 分片已接收并纳入当前目录；重复分片也返回 true |
+| received | number | 否 | 手表当前已收到的不同分片数 |
+| duplicate | boolean | 否 | true 表示这是已收分片的幂等确认 |
+| reason | string | 拒收时必填 | 如 `E_PROTOCOL` |
+
+手机只接受匹配当前 transferId/bookId/index/total 的 ACK。等待超时为
+10 秒，当前传输失败并清理 waiter；不自动重发分片。取消也会清理等待，
+迟到或错配 ACK 不会推进传输。
 
 ### CHUNK（手机 → 表）
 
@@ -187,6 +206,7 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 | E_DIGEST_MISMATCH | 整本或块摘要不符 |
 | E_MISSING_CHUNKS | FINISH 时仍有缺块 |
 | E_MISSING_CHAPTERS | 长章节目录分片未到齐 |
+| E_CHAPTERS_ACK_TIMEOUT | 手机等待手表应用确认目录分片超时 |
 | E_DUPLICATE_TRANSFER | 同一 transferId 重复开始且状态不一致 |
 | E_CANCELLED | 发送方取消 |
 | E_PEER_UNAVAILABLE | 对端未配对/离线/不支持 |
@@ -212,7 +232,9 @@ JSON 序列化负责书名等字段的转义，接收方不得对转义结果做
 手机 → 表  HELLO（capabilities，含 chunkBytes/fileChannel）
 表 → 手机 HELLO（capabilities 回应）
 手机 → 表  BOOK_META
-手机 → 表  CHAPTERS × N     （长目录时；每片 ≤4096 字节）
+手机 → 表  CHAPTERS[index]
+表 → 手机  CHAPTERS_ACK[index]
+             （长目录时逐片确认后再发下一片；每片 ≤4096 字节）
 手机 → 表  CHUNK × N        （每块到达后）
 表 → 手机 ACK {index, ok}
 手机 → 表  FINISH

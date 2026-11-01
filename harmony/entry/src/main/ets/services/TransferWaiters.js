@@ -33,8 +33,10 @@ export function createWaiterRegistry(env) {
   const clearTimer = env.clearTimeout;
   const uploadTimeoutMs = env.uploadTimeoutMs;
   const resultTimeoutMs = env.resultTimeoutMs;
+  const chapterAckTimeoutMs = env.chapterAckTimeoutMs;
 
   const waiters = {};   // transferId → waiter
+  const chapterAcks = {}; // transferId → current expected chapter ACK
   const receipts = {};  // transferId → {ok, reason}
 
   function clearWaiter(waiter) {
@@ -52,6 +54,20 @@ export function createWaiterRegistry(env) {
     if (waiter.settled) return;
     waiter.settled = true;
     clearWaiter(waiter);
+    waiter.resolve(outcome);
+  }
+
+  function clearChapterAck(waiter) {
+    if (waiter.timer !== null) {
+      clearTimer(waiter.timer);
+      waiter.timer = null;
+    }
+  }
+
+  function settleChapterAck(waiter, outcome) {
+    if (waiter.settled) return;
+    waiter.settled = true;
+    clearChapterAck(waiter);
     waiter.resolve(outcome);
   }
 
@@ -111,6 +127,63 @@ export function createWaiterRegistry(env) {
       startResultTimer(waiter);
     },
 
+    // Only one CHAPTERS slice is in flight. The expected identity is
+    // installed before sendMessage so an immediate ACK cannot be lost.
+    beginChapterAck: function (transferId, bookId, index, total) {
+      const previous = chapterAcks[transferId];
+      if (previous && !previous.settled) {
+        settleChapterAck(previous, { ok: false,
+          reason: 'E_SUPERSEDED', phase: 'chapters_ack' });
+      }
+      let resolveFn = null;
+      const promise = new Promise((resolve) => {
+        resolveFn = resolve;
+      });
+      const waiter = {
+        transferId: transferId,
+        bookId: bookId,
+        index: index,
+        total: total,
+        resolve: resolveFn,
+        settled: false,
+        timer: null
+      };
+      if (chapterAckTimeoutMs > 0) {
+        waiter.timer = setTimer(() => {
+          waiter.timer = null;
+          settleChapterAck(waiter, { ok: false,
+            reason: 'E_CHAPTERS_ACK_TIMEOUT',
+            phase: 'chapters_ack' });
+        }, chapterAckTimeoutMs);
+      }
+      chapterAcks[transferId] = waiter;
+      return promise;
+    },
+
+    // Mismatched, stale, or malformed ACKs never release the sender.
+    deliverChapterAck: function (message) {
+      if (!message || message.v !== 0 ||
+          message.type !== 'CHAPTERS_ACK' ||
+          typeof message.transferId !== 'string' ||
+          typeof message.bookId !== 'string' ||
+          typeof message.index !== 'number' ||
+          typeof message.total !== 'number' ||
+          typeof message.ok !== 'boolean') return false;
+      const waiter = chapterAcks[message.transferId];
+      if (!waiter || waiter.settled ||
+          waiter.bookId !== message.bookId ||
+          waiter.index !== message.index ||
+          waiter.total !== message.total) return false;
+      const outcome = message.ok ? { ok: true } : {
+        ok: false,
+        reason: typeof message.reason === 'string' ?
+          message.reason : 'E_PROTOCOL',
+        phase: 'chapters_ack'
+      };
+      settleChapterAck(waiter, outcome);
+      return true;
+    },
+
     // RESULT 到达：缓存 + 解析当前等待者。
     // 返回 true 表示有活跃 waiter 被唤醒。
     deliver: function (message) {
@@ -133,13 +206,21 @@ export function createWaiterRegistry(env) {
         waiter.phase = 'failed';
         settle(waiter, { ok: false, reason: reason });
       }
+      const chapterAck = chapterAcks[transferId];
+      if (chapterAck && !chapterAck.settled) {
+        settleChapterAck(chapterAck, { ok: false, reason: reason,
+          phase: 'chapters_ack' });
+      }
     },
 
     // 终结：清理计时器与状态（成功后调用）。
     end: function (transferId) {
       const waiter = waiters[transferId];
       if (waiter) clearWaiter(waiter);
+      const chapterAck = chapterAcks[transferId];
+      if (chapterAck) clearChapterAck(chapterAck);
       delete waiters[transferId];
+      delete chapterAcks[transferId];
     },
 
     attempt: function (transferId) {

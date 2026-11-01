@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "CHAPTERS_ACK",
+  "transferId": "0123456789abcdef0123456789abcdef",
+  "bookId": "0123456789abcdef",
+  "index": 0,
+  "total": 2,
+  "ok": true,
+  "received": 1
+}

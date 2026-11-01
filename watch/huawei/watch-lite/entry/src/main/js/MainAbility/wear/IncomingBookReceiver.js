@@ -15,7 +15,7 @@ import { ensureDirs, saveTempBook,
   fileSize, readWindow, tempPath } from '../storage/BookStorage.js';
 import { addBook } from '../storage/LibraryIndex.js';
 import { beginTransfer, applyChunk, applyChapterChunk,
-  assembleChapters, assembleBytes, verifyDigest,
+  assembleChapters, missingChapterIndices, assembleBytes, verifyDigest,
   createDigestVerifier } from './TransferLogic.js';
 
 // 文件通道流式校验窗口（字节）。
@@ -53,6 +53,22 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
     return message;
   }
 
+  function chapterAck(message, state, ok, reason, duplicate) {
+    const ack = {
+      v: 0, type: 'CHAPTERS_ACK',
+      transferId: message.transferId,
+      bookId: message.bookId,
+      index: message.index,
+      total: message.total,
+      ok: ok
+    };
+    if (state) ack.received = state.chapterChunksReceived;
+    if (duplicate) ack.duplicate = true;
+    if (!ok) ack.reason = reason || 'E_PROTOCOL';
+    respond(JSON.stringify(ack));
+    return ack;
+  }
+
   function cleanup(transferId) {
     delete transfers[transferId];
   }
@@ -84,22 +100,31 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
             false, started.reason);
         }
         transfers[message.transferId] = started.state;
+        if (started.state.expectedChapterChunks > 0) {
+          console.info('chapter chunks expected=' +
+            started.state.expectedChapterChunks);
+        }
         notify('接收《' + message.title + '》');
         break;
       }
       case 'CHAPTERS': {
         const state = transfers[message.transferId];
         if (!state) {
-          return result(message.transferId, message.bookId,
-            false, 'E_PROTOCOL');
+          console.warn('chapter chunk rejected reason=E_PROTOCOL');
+          return chapterAck(message, null, false, 'E_PROTOCOL', false);
         }
         const applied = applyChapterChunk(state, message);
         if (!applied.ok) {
           cleanup(message.transferId);
-          return result(message.transferId, message.bookId,
-            false, applied.reason);
+          console.warn('chapter chunk rejected reason=' + applied.reason);
+          return chapterAck(message, state, false,
+            applied.reason, false);
         }
-        break;
+        console.info('chapter chunk index=' +
+          (message.index + 1) + '/' + state.expectedChapterChunks +
+          ' received=' + state.chapterChunksReceived);
+        return chapterAck(message, state, true, undefined,
+          applied.duplicate === true);
       }
       case 'CHUNK': {
         const state = transfers[message.transferId];
@@ -247,6 +272,10 @@ export function IncomingBookReceiver(onStatus, sendToPhone) {
     };
     const chapters = assembleChapters(state);
     if (!chapters.ok) {
+      const missing = missingChapterIndices(state);
+      console.error('file channel arrived before chapter catalog complete ' +
+        'received=' + state.chapterChunksReceived + '/' +
+        state.expectedChapterChunks + ' missing=' + missing.join(','));
       cleanup(meta.transferId);
       return finish(false, chapters.reason);
     }

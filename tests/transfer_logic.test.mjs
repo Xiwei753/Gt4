@@ -48,7 +48,7 @@ const load = async (rel) => {
 
 const { validateBookMeta, beginTransfer, applyChunk,
   applyChapterChunk, assembleChapters,
-  missingIndices, assembleBytes, verifyDigest } =
+  missingIndices, missingChapterIndices, assembleBytes, verifyDigest } =
   await load('wear/TransferLogic.js');
 
 const enc = new TextEncoder();
@@ -252,6 +252,8 @@ for (const broken of [
     chapters: [{ title: '第一章', offset: 0, length: 10 }]
   });
   assert.equal(assembleChapters(state).reason, 'E_MISSING_CHAPTERS');
+  assert.deepEqual(missingChapterIndices(state), [1],
+    'missing catalog indexes must be available for diagnostics');
   assert.equal(applyChapterChunk(state, {
     transferId: chunkedMeta.transferId, bookId: chunkedMeta.bookId,
     index: 2, total: 2,

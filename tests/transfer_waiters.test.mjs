@@ -271,3 +271,72 @@ const makeRegistry = (uploadTimeoutMs = 300000,
 console.info('PASS: RESULT waiter lifecycle ' +
   '(retry rounds, upload/result phase separation, ' +
   'early RESULT, late receipt, timer cleanup)');
+
+// ---- 8. CHAPTERS_ACK must match the one in-flight catalog slice ----
+{
+  const clock = makeClock();
+  const reg = createWaiterRegistry({
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    uploadTimeoutMs: 300000,
+    resultTimeoutMs: 60000,
+    chapterAckTimeoutMs: 10000
+  });
+  const ack = reg.beginChapterAck('chapter-transfer', 'book-1', 0, 2);
+  assert.equal(reg.deliverChapterAck({ v: 0, type: 'CHAPTERS_ACK',
+    transferId: 'stale-transfer', bookId: 'book-1',
+    index: 0, total: 2, ok: true }), false,
+  'stale transfer ACK must not release the waiter');
+  assert.equal(reg.deliverChapterAck({ v: 0, type: 'CHAPTERS_ACK',
+    transferId: 'chapter-transfer', bookId: 'other-book',
+    index: 0, total: 2, ok: true }), false,
+  'wrong book ACK must not release the waiter');
+  assert.equal(reg.deliverChapterAck({ v: 0, type: 'CHAPTERS_ACK',
+    transferId: 'chapter-transfer', bookId: 'book-1',
+    index: 1, total: 2, ok: true }), false,
+  'out-of-order ACK must not release the current slice');
+  assert.equal(reg.deliverChapterAck({ v: 0, type: 'CHAPTERS_ACK',
+    transferId: 'chapter-transfer', bookId: 'book-1',
+    index: 0, total: 2, ok: true }), true);
+  assert.deepEqual(await ack, { ok: true });
+  assert.equal(reg.deliverChapterAck({ v: 0, type: 'CHAPTERS_ACK',
+    transferId: 'chapter-transfer', bookId: 'book-1',
+    index: 0, total: 2, ok: true }), false,
+  'duplicate late ACK must be ignored');
+  reg.end('chapter-transfer');
+  assert.equal(clock.pending(), 0);
+}
+
+// ---- 9. ACK timeout and cancellation clear the chapter waiter ----
+{
+  const clock = makeClock();
+  const reg = createWaiterRegistry({
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    uploadTimeoutMs: 300000,
+    resultTimeoutMs: 60000,
+    chapterAckTimeoutMs: 10000
+  });
+  const ack = reg.beginChapterAck('chapter-timeout', 'book-2', 3, 5);
+  clock.tick(9999);
+  assert.equal(clock.pending(), 1);
+  clock.tick(1);
+  assert.deepEqual(await ack, { ok: false,
+    reason: 'E_CHAPTERS_ACK_TIMEOUT', phase: 'chapters_ack' });
+  assert.equal(reg.deliverChapterAck({ v: 0, type: 'CHAPTERS_ACK',
+    transferId: 'chapter-timeout', bookId: 'book-2',
+    index: 3, total: 5, ok: true }), false,
+  'timed out ACK must not revive the waiter');
+  reg.end('chapter-timeout');
+  assert.equal(clock.pending(), 0);
+
+  const cancelled = reg.beginChapterAck('chapter-cancel', 'book-3', 0, 1);
+  reg.fail('chapter-cancel', 'E_CANCELLED');
+  assert.deepEqual(await cancelled,
+    { ok: false, reason: 'E_CANCELLED', phase: 'chapters_ack' });
+  reg.end('chapter-cancel');
+  assert.equal(clock.pending(), 0,
+    'cancellation must clear the chapter ACK timeout');
+}
+
+console.info('PASS: CHAPTERS_ACK matching, timeout, cancellation and stale ACK handling');

@@ -57,6 +57,22 @@ assert.ok(build.includes('Text(this.readerDisplayText(this.pageText))') &&
   build.includes('.lineHeight(this.fontSize * this.lineHeight)') &&
   build.includes('.wordBreak(WordBreak.BREAK_WORD)'),
   'the displayed native Text must use the same font and wrapping settings as pagination');
+assert.ok(!reader.includes('debug_next') && !reader.includes('分页调试') &&
+  !reader.includes('调试下一页'),
+  'temporary debug paging controls and special-case logic must be removed');
+const fontService = read(
+  'harmony/entry/src/main/ets/services/ReaderFontService.ts');
+assert.ok(reader.includes('new picker.DocumentViewPicker(context)') &&
+  reader.includes("fileSuffixFilters = ['Fonts (.ttf, .otf)|.ttf,.otf']") &&
+  reader.includes('registerFont({') &&
+  reader.includes("familySrc: 'file://' + service.pathFor(font)") &&
+  fontService.includes("this.context.filesDir + '/reader-fonts'") &&
+  fontService.includes('fileIo.renameSync(tempPath, finalPath)'),
+  'Aa settings must import local TTF/OTF files into private storage');
+assert.ok(settings.includes('readerFontId') && settings.includes('readerFonts') &&
+  reader.includes('this.readerFontFamily') &&
+  reader.includes('this.resetPaginationHistory(targetByte)'),
+  'font choice must persist, share one measurement/render family and reflow at the current byte offset');
 assert.ok(bodyText.includes('.align(Alignment.TopStart)'),
   'short reader pages must align their body text to the top');
 assert.ok(appearance.includes('this.activePageToken = generation;') &&

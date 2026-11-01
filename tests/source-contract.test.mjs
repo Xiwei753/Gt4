@@ -527,16 +527,29 @@ assert.ok(watchTransferLogic.includes('applyChapterChunk') &&
   watchTransferLogic.includes('assembleChapters') &&
   watchTransferLogic.includes('E_MISSING_CHAPTERS'),
   'watch receiver must assemble CHAPTERS chunks before FINISH/file commit');
-assert.ok(read('watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/IncomingBookReceiver.js')
-  .includes("case 'CHAPTERS'"),
+const chapterReceiver = read(
+  'watch/huawei/watch-lite/entry/src/main/js/MainAbility/wear/IncomingBookReceiver.js');
+assert.ok(chapterReceiver.includes("case 'CHAPTERS'") &&
+  chapterReceiver.includes("type: 'CHAPTERS_ACK'") &&
+  chapterReceiver.includes('missingChapterIndices(state)'),
   'watch receiver must handle CHAPTERS messages');
+const phoneTransfer = read(
+  'harmony/entry/src/main/ets/services/BookTransferService.ts');
+const transferWaiters = read(
+  'harmony/entry/src/main/ets/services/TransferWaiters.js');
+assert.ok(phoneTransfer.includes('beginChapterAck(') &&
+  phoneTransfer.includes('deliverChapterAck(message)') &&
+  transferWaiters.includes('deliverChapterAck: function') &&
+  transferWaiters.includes('E_CHAPTERS_ACK_TIMEOUT'),
+  'phone must wait for a matching application-level chapter ACK before file transfer');
 assert.ok(read('harmony/entry/src/main/ets/services/BookTransferService.ts')
   .includes('splitChapterChunks') &&
   read('android/app/src/main/java/com/xiwei/suyue/wear/BookTransferService.kt')
     .includes('ChapterChunks.split'),
   'both phone senders must chunk long chapter catalogs');
 assert.ok(read('protocol/README.md').includes('chapterChunks') &&
-  read('protocol/README.md').includes('E_MISSING_CHAPTERS'),
+  read('protocol/README.md').includes('E_MISSING_CHAPTERS') &&
+  read('protocol/README.md').includes('CHAPTERS_ACK'),
   'protocol must document 4096-byte chapter chunking');
 
 // P0-4：摘要必须对 normalized 字节计算，
